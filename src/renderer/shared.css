@@ -1,0 +1,26 @@
+@import 'tailwindcss';
+
+/* Daymate renderer base. Shared by robot and workbench windows. */
+
+:root {
+  color-scheme: dark;
+  --dm-bg: #0f1115;
+  --dm-panel: #171a21;
+  --dm-accent: #5b8cff;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica,
+    Arial, sans-serif;
+  background: transparent;
+  color: #e6e8ec;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
