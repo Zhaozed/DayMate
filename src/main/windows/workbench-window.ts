@@ -25,7 +25,7 @@ export function openWorkbench(): BrowserWindow {
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#0f1115',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.mjs'),
+      preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -38,9 +38,9 @@ export function openWorkbench(): BrowserWindow {
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    workbenchWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}/workbench.html`)
+    workbenchWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}/workbench/index.html`)
   } else {
-    workbenchWindow.loadFile(join(__dirname, '../renderer/workbench.html'))
+    workbenchWindow.loadFile(join(__dirname, '../renderer/workbench/index.html'))
   }
 
   return workbenchWindow

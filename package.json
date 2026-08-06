@@ -4,7 +4,6 @@
   "description": "Daymate — persistent desktop personal work agent (macOS-first)",
   "author": "Daymate",
   "main": "./out/main/index.js",
-  "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",

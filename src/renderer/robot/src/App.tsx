@@ -15,13 +15,13 @@ const STATE_LABEL: Record<RobotState, string> = {
 }
 
 const STATE_COLOR: Record<RobotState, string> = {
-  idle: '#5b8cff',
-  observing: '#5b8cff',
-  thinking: '#f5a623',
+  idle: '#ff3b3b',
+  observing: '#ff8a3b',
+  thinking: '#ffb020',
   working: '#7ed321',
-  need_approval: '#ff5d5d',
-  done: '#7ed321',
-  error: '#ff5d5d'
+  need_approval: '#ff3b3b',
+  done: '#3bd671',
+  error: '#ff3b3b'
 }
 
 export function Robot(): ReactElement {
@@ -53,14 +53,14 @@ export function Robot(): ReactElement {
       <div
         className="relative flex h-28 w-28 items-center justify-center rounded-full"
         style={{
-          background: 'radial-gradient(circle at 30% 30%, #2a2f3a, #0f1115)',
-          boxShadow: `0 0 24px 4px ${STATE_COLOR[state]}66`,
-          border: '2px solid #2a2f3a'
+          background: '#1a1d24',
+          boxShadow: `0 6px 20px 2px ${STATE_COLOR[state]}aa, 0 0 0 2px #00000033`,
+          border: `3px solid ${STATE_COLOR[state]}`
         }}
       >
         <div
-          className="h-16 w-16 rounded-full transition-all"
-          style={{ background: STATE_COLOR[state], opacity: 0.9 }}
+          className="h-14 w-14 rounded-full transition-all"
+          style={{ background: STATE_COLOR[state], opacity: 1 }}
         />
       </div>
     </div>

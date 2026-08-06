@@ -36,7 +36,7 @@ export function openRobot(): BrowserWindow {
     show: false,
     // Security: contextIsolation on, nodeIntegration off, sandbox on.
     webPreferences: {
-      preload: join(__dirname, '../preload/index.mjs'),
+      preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -49,9 +49,9 @@ export function openRobot(): BrowserWindow {
   robotWindow.on('will-resize', (e) => e.preventDefault())
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    robotWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}/robot.html`)
+    robotWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}/robot/index.html`)
   } else {
-    robotWindow.loadFile(join(__dirname, '../renderer/robot.html'))
+    robotWindow.loadFile(join(__dirname, '../renderer/robot/index.html'))
   }
 
   return robotWindow

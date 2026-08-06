@@ -25,5 +25,8 @@ logs/
 .vscode/
 .idea/
 
+# Claude Code local settings (machine-specific, not shared)
+.claude/settings.local.json
+
 # Drizzle
 drizzle/meta/_journal.json.bak
