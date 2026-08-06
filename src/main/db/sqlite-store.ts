@@ -14,7 +14,8 @@ import {
   routineRuns as runsTbl,
   routineRunSteps as runStepsTbl,
   activityEvents as activityTbl,
-  needToKnow as ntkTbl
+  needToKnow as ntkTbl,
+  approvalRequests as approvalsTbl
 } from './schema'
 import type {
   RoutineDefinition,
@@ -22,7 +23,8 @@ import type {
   RoutineRunStep,
   Task,
   NeedToKnow,
-  ActivityEvent
+  ActivityEvent,
+  ApprovalRequest
 } from '@shared/types'
 
 type TaskRow = typeof tasksTbl.$inferSelect
@@ -31,6 +33,7 @@ type RunRow = typeof runsTbl.$inferSelect
 type RunStepRow = typeof runStepsTbl.$inferSelect
 type ActivityRow = typeof activityTbl.$inferSelect
 type NtkRow = typeof ntkTbl.$inferSelect
+type ApprovalRow = typeof approvalsTbl.$inferSelect
 
 const parseJson = <T>(raw: string | null, fallback: T): T => {
   if (raw == null) return fallback
@@ -127,6 +130,22 @@ function rowToNtk(r: NtkRow): NeedToKnow {
     readAt: r.readAt ?? undefined,
     dismissedAt: r.dismissedAt ?? undefined,
     createdAt: r.createdAt
+  }
+}
+
+function rowToApproval(r: ApprovalRow): ApprovalRequest {
+  return {
+    id: r.id,
+    routineRunId: r.routineRunId ?? undefined,
+    toolCallId: r.toolCallId,
+    toolName: r.toolName,
+    riskLevel: r.riskLevel as ApprovalRequest['riskLevel'],
+    title: r.title,
+    preview: parseJson(r.preview, {}),
+    contentHash: r.contentHash,
+    status: r.status as ApprovalRequest['status'],
+    createdAt: r.createdAt,
+    resolvedAt: r.resolvedAt ?? undefined
   }
 }
 
@@ -374,5 +393,48 @@ export class SqliteStore implements RoutineStore {
       ? this.db.select().from(activityTbl).where(eq(activityTbl.runId, runId)).orderBy(desc(activityTbl.createdAt)).all()
       : this.db.select().from(activityTbl).orderBy(desc(activityTbl.createdAt)).all()
     return rows.map(rowToActivity)
+  }
+
+  // ── Approvals (Spec §8, §15) ────────────────────────────────────────────────
+  createApproval(request: ApprovalRequest): void {
+    this.db
+      .insert(approvalsTbl)
+      .values({
+        id: request.id,
+        routineRunId: request.routineRunId ?? null,
+        toolCallId: request.toolCallId,
+        toolName: request.toolName,
+        riskLevel: request.riskLevel,
+        title: request.title,
+        preview: JSON.stringify(request.preview),
+        contentHash: request.contentHash,
+        status: request.status,
+        createdAt: request.createdAt,
+        resolvedAt: request.resolvedAt ?? null
+      })
+      .run()
+  }
+  getApproval(id: string): ApprovalRequest | undefined {
+    const r = this.db.select().from(approvalsTbl).where(eq(approvalsTbl.id, id)).get()
+    return r ? rowToApproval(r) : undefined
+  }
+  listApprovals(pendingOnly = false): ApprovalRequest[] {
+    const rows = pendingOnly
+      ? this.db.select().from(approvalsTbl).where(eq(approvalsTbl.status, 'pending')).orderBy(desc(approvalsTbl.createdAt)).all()
+      : this.db.select().from(approvalsTbl).orderBy(desc(approvalsTbl.createdAt)).all()
+    return rows.map(rowToApproval)
+  }
+  updateApprovalStatus(
+    id: string,
+    status: ApprovalRequest['status'],
+    resolvedAt: string
+  ): ApprovalRequest | undefined {
+    this.db
+      .update(approvalsTbl)
+      .set({ status, resolvedAt })
+      .where(eq(approvalsTbl.id, id))
+      .run()
+    const r = this.db.select().from(approvalsTbl).where(eq(approvalsTbl.id, id)).get()
+    return r ? rowToApproval(r) : undefined
   }
 }

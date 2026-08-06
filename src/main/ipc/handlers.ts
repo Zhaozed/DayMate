@@ -4,7 +4,7 @@
 
 import { app, ipcMain, BrowserWindow } from 'electron'
 import { IPC } from './contracts'
-import type { AppInfo, RobotState, WindowName, TaskUpdate } from './contracts'
+import type { AppInfo, RobotState, WindowName, TaskUpdate, ApprovalRequest } from './contracts'
 import { APP_NAME, WINDOWS } from '@shared/constants'
 import { openWorkbench, openRobot } from '../windows'
 import { getContainer, initContainer } from '../app/container'
@@ -58,6 +58,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.ROUTINE_RUN, async (_e, routineId: string) => {
     const run = await container.engine.run(routineId, { manual: true })
     container.broadcastActivity(run.id)
+    // A run may pause waiting for approval — surface it to the Approval Center.
+    container.broadcastApprovals()
     return run
   })
   ipcMain.handle(IPC.ROUTINE_LIST_RUNS, (_e, routineId?: string) =>
@@ -87,6 +89,35 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.ACTIVITY_LIST, (_e, runId?: string) =>
     container.activityService.list(runId)
   )
+
+  // Approvals (M2 — Spec §8, §15, §18)
+  ipcMain.handle(IPC.APPROVAL_LIST, () => container.approvalService.list())
+  ipcMain.handle(IPC.APPROVAL_GET, (_e, id: string) =>
+    container.approvalService.get(id) ?? null
+  )
+  ipcMain.handle(IPC.APPROVAL_APPROVE, async (_e, id: string) => {
+    // Approve, then resume the paused run so the gated action executes under
+    // the approval context (Spec §15). Content immutability is rechecked
+    // inside engine.resume.
+    const request = container.approvalService.approve(id)
+    if (request.routineRunId) {
+      await container.engine.resume(request.routineRunId, { approval: { requestId: id } })
+    }
+    container.broadcastActivity(request.routineRunId)
+    container.broadcastApprovals()
+    return container.approvalService.get(id) as ApprovalRequest
+  })
+  ipcMain.handle(IPC.APPROVAL_REJECT, async (_e, id: string) => {
+    // Reject → cancel the paused run. The gated action NEVER executes
+    // (sends nothing, writes nothing) (Spec §15, §19).
+    const request = container.approvalService.reject(id)
+    if (request.routineRunId) {
+      await container.engine.cancelPausedRun(request.routineRunId)
+      container.broadcastActivity(request.routineRunId)
+    }
+    container.broadcastApprovals()
+    return container.approvalService.get(id) as ApprovalRequest
+  })
 }
 
 // Called from bootstrap once the app is ready and the DB path is resolvable.

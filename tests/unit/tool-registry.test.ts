@@ -12,7 +12,7 @@ function buildContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
     runId: 'run-test',
     routineRunId: 'run-test',
-    emailProvider: new MockEmailProvider(),
+    emailProviders: [new MockEmailProvider()],
     calendarProvider: new MockCalendarProvider(),
     taskService: new TaskService(store),
     needToKnowService: new NeedToKnowService(store),
@@ -42,31 +42,33 @@ describe('tool registry', () => {
 
   it('returns needs_approval for an R3 tool without approval context and does NOT execute', async () => {
     const ctx = buildContext()
+    const provider = ctx.emailProviders[0]
     // Create a draft first via the provider, then attempt send without approval.
-    const draft = await ctx.emailProvider.createDraft({
+    const draft = await provider.createDraft({
       accountId: 'mock-gmail-001',
       to: [{ address: 'someone@example.com' }],
       subject: 'hi',
       body: 'hello'
     })
-    const res = await registry.execute('email.send_draft', { draftId: draft.id }, ctx)
+    const res = await registry.execute('email.send_draft', { accountId: 'mock-gmail-001', draftId: draft.id }, ctx)
     expect(res.status).toBe('needs_approval')
     expect((res as { risk: string }).risk).toBe('R3')
     // The draft must still exist (send was not executed).
-    await expect(ctx.emailProvider.sendDraft(draft.id)).resolves.toEqual(
+    await expect(provider.sendDraft(draft.id)).resolves.toEqual(
       expect.objectContaining({ messageId: expect.any(String) })
     )
   })
 
   it('executes an R3 tool when an approval context is present', async () => {
     const ctx = buildContext({ approval: { requestId: 'appr-1' } })
-    const draft = await ctx.emailProvider.createDraft({
+    const provider = ctx.emailProviders[0]
+    const draft = await provider.createDraft({
       accountId: 'mock-gmail-001',
       to: [{ address: 'someone@example.com' }],
       subject: 'hi',
       body: 'hello'
     })
-    const res = await registry.execute('email.send_draft', { draftId: draft.id }, ctx)
+    const res = await registry.execute('email.send_draft', { accountId: 'mock-gmail-001', draftId: draft.id }, ctx)
     expect(res.status).toBe('ok')
   })
 

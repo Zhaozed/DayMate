@@ -28,6 +28,7 @@ describe.runIf(nativeOk)('SqliteStore persistence (real better-sqlite3)', () => 
     const { ActivityService } = await import('../../src/main/services/activity-service')
     const { TaskService } = await import('../../src/main/services/task-service')
     const { NeedToKnowService } = await import('../../src/main/services/need-to-know-service')
+    const { ApprovalService } = await import('../../src/main/services/approval-service')
     const { createToolRegistry } = await import('../../src/main/agent/tool-registry')
     const { RoutineEngine } = await import('../../src/main/routines/engine')
     const { seedPresets } = await import('../../src/main/routines/presets')
@@ -46,7 +47,8 @@ describe.runIf(nativeOk)('SqliteStore persistence (real better-sqlite3)', () => 
       activityService: new ActivityService(store1),
       taskService: new TaskService(store1),
       needToKnowService: new NeedToKnowService(store1),
-      emailProvider: new MockEmailProvider(),
+      approvalService: new ApprovalService(store1),
+      emailProviders: [new MockEmailProvider()],
       calendarProvider: new MockCalendarProvider(),
       memory: new Map(),
       notify: () => {}
@@ -62,6 +64,19 @@ describe.runIf(nativeOk)('SqliteStore persistence (real better-sqlite3)', () => 
     expect(ntkBefore.length).toBe(1)
     expect(runsBefore.length).toBe(1)
 
+    // M2: create an approval (with content_hash) and verify it survives too.
+    const approvalService1 = new ApprovalService(store1)
+    const approval = approvalService1.create({
+      routineRunId: run.id,
+      toolCallId: 'call-persist',
+      toolName: 'email.send_draft',
+      riskLevel: 'R3',
+      title: 'Persist test',
+      preview: { draftId: 'd-1' },
+      args: { draftId: 'd-1' }
+    })
+    approvalService1.approve(approval.id)
+
     // --- "restart": open a fresh handle over the same file and read back ---
     const { db: db2 } = createDb(dbPath)
     const store2 = new SqliteStore(db2)
@@ -74,5 +89,11 @@ describe.runIf(nativeOk)('SqliteStore persistence (real better-sqlite3)', () => 
 
     // Activity also survives (every step still visible after restart).
     expect(store2.listActivity(run.id).length).toBeGreaterThan(0)
+
+    // M2: the approval + its content_hash + status survive the restart.
+    const approvalAfter = store2.getApproval(approval.id)
+    expect(approvalAfter).toBeTruthy()
+    expect(approvalAfter?.contentHash).toBe(approval.contentHash)
+    expect(approvalAfter?.status).toBe('approved')
   })
 })

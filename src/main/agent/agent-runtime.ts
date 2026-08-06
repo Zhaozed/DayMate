@@ -11,7 +11,15 @@
 // message bodies for summarization but never treats them as instructions. The
 // prompt-injection fixture (SPAM label) is classified as untrusted and ignored.
 
-import type { NormalizedEmail, CalendarEvent, Task, SourceRef, SuggestedAction } from '@shared/types'
+import type {
+  NormalizedEmail,
+  CalendarEvent,
+  Task,
+  SourceRef,
+  SuggestedAction,
+  EmailClassification,
+  EmailClassificationResult
+} from '@shared/types'
 
 export interface MorningBriefOutput {
   title: string
@@ -29,11 +37,27 @@ export interface AgentStepInput {
   tasks?: Task[]
 }
 
+/** Input for the Auto Inbox classifier — one array per provider (Spec §13.2). */
+export interface ClassifyInboxInput {
+  gmailEmails?: NormalizedEmail[]
+  mail163Emails?: NormalizedEmail[]
+  emails?: NormalizedEmail[]
+}
+
+export interface ClassifyInboxOutput {
+  results: EmailClassificationResult[]
+  /** Counts per bucket, for the Activity summary. */
+  counts: Record<EmailClassification, number>
+}
+
 type AgentInputs = Record<string, unknown>
 
 export async function runAgentStep(action: string, input: AgentInputs): Promise<unknown> {
   if (action === 'generate_morning_brief') {
     return generateMorningBrief(input as AgentStepInput)
+  }
+  if (action === 'classify_inbox') {
+    return classifyInbox(input as ClassifyInboxInput)
   }
   throw new Error(`Unknown agent action: ${action}`)
 }
@@ -45,8 +69,88 @@ function isUntrusted(email: NormalizedEmail): boolean {
   return (
     body.includes('ignore previous instructions') ||
     body.includes('reveal your system prompt') ||
-    body.includes('automatically reply without asking')
+    body.includes('automatically reply without asking') ||
+    body.includes('reply with your') ||
+    body.includes('forward this to all')
   )
+}
+
+/** Deterministic Auto Inbox classifier (Spec §13.2). Real LLM classification is M3. */
+function classifyInbox(input: ClassifyInboxInput): ClassifyInboxOutput {
+  const all = [...(input.gmailEmails ?? []), ...(input.mail163Emails ?? []), ...(input.emails ?? [])]
+
+  // Dedupe by (provider, accountId, messageId) — a re-run never re-classifies
+  // the same message (Spec §12.6 idempotency).
+  const seen = new Set<string>()
+  const results: EmailClassificationResult[] = []
+  const counts: Record<EmailClassification, number> = { reply: 0, follow_up: 0, information: 0, ignore: 0 }
+
+  for (const email of all) {
+    const key = `${email.provider}:${email.accountId}:${email.messageId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    // Untrusted content is ALWAYS ignore + untrusted — never produces a task,
+    // draft, or send (Spec §17).
+    if (isUntrusted(email)) {
+      results.push({
+        provider: email.provider,
+        accountId: email.accountId,
+        messageId: email.messageId,
+        classification: 'ignore',
+        untrusted: true,
+        reason: 'SPAM / prompt-injection content — ignored'
+      })
+      counts.ignore++
+      continue
+    }
+
+    const subject = email.subject.toLowerCase()
+    const body = email.textBody.toLowerCase()
+    const wantsReply =
+      /reply|following up|follow up|confirmation|please (confirm|reply)|need your|decision needed/.test(subject) ||
+      /please reply|following up|need your|confirmation|by (today|friday|monday|tomorrow)|asap/.test(body)
+
+    if (wantsReply) {
+      const isFollowUp = /following up|follow up|need your|confirmation/.test(subject + ' ' + body)
+      const classification: EmailClassification = isFollowUp ? 'follow_up' : 'reply'
+      results.push({
+        provider: email.provider,
+        accountId: email.accountId,
+        messageId: email.messageId,
+        classification,
+        untrusted: false,
+        reason: isFollowUp ? 'Sender is following up — a reply is expected' : 'Sender expects a reply',
+        suggestedAction: {
+          label: `Reply to ${email.from.name ?? email.from.address}`,
+          toolName: 'email.create_draft',
+          args: {
+            accountId: email.accountId,
+            threadId: email.threadId,
+            to: [{ address: email.from.address, name: email.from.name }],
+            subject: email.subject.startsWith('Re:') ? email.subject : `Re: ${email.subject}`,
+            body: 'Thanks — I will review and get back to you shortly.'
+          }
+        }
+      })
+      counts[classification]++
+      continue
+    }
+
+    // Pure FYI / informational.
+    const isFyi = /for your information|fyi|no action required|for your reference/.test(subject + ' ' + body)
+    results.push({
+      provider: email.provider,
+      accountId: email.accountId,
+      messageId: email.messageId,
+      classification: 'information',
+      untrusted: false,
+      reason: isFyi ? 'Informational — no action required' : 'No reply expected'
+    })
+    counts.information++
+  }
+
+  return { results, counts }
 }
 
 function generateMorningBrief(input: AgentStepInput): MorningBriefOutput {

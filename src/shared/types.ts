@@ -14,7 +14,8 @@ import type {
   ApprovalStatus,
   ApprovalPolicy,
   RoutineOutput,
-  ActivityEventType
+  ActivityEventType,
+  EmailClassification
 } from './constants'
 
 // Re-export so `@shared/types` is the single import surface for shared types.
@@ -33,7 +34,8 @@ export type {
   ApprovalPolicy,
   RoutineOutput,
   RoutineStepType,
-  ActivityEventType
+  ActivityEventType,
+  EmailClassification
 } from './constants'
 
 // ── Robot ───────────────────────────────────────────────────────────────────
@@ -104,6 +106,21 @@ export interface EmailQuery {
   unreadOnly?: boolean
   sinceHours?: number
   limit?: number
+}
+
+// Result of classifying a single email in Auto Inbox (Spec §13.2). The
+// classifier dedupes by (provider, accountId, messageId), so a re-run never
+// re-classifies the same message. Prompt-injection / SPAM-labeled mail is
+// classified `ignore` and `untrusted: true` — it must never produce a task,
+// draft, or send.
+export interface EmailClassificationResult {
+  provider: 'gmail' | 'mail163'
+  accountId: string
+  messageId: string
+  classification: EmailClassification
+  untrusted: boolean
+  reason: string
+  suggestedAction?: SuggestedAction
 }
 
 // ── Calendar (Spec §8, §10) ─────────────────────────────────────────────────
@@ -315,7 +332,7 @@ export interface RoutineRun {
   error?: string
 }
 
-// ── Approval (Spec §8) ──────────────────────────────────────────────────────
+// ── Approval (Spec §8, §15) ─────────────────────────────────────────────────
 export interface ApprovalRequest {
   id: string
   routineRunId?: string
@@ -324,6 +341,9 @@ export interface ApprovalRequest {
   riskLevel: 'R1' | 'R2' | 'R3'
   title: string
   preview: Record<string, unknown>
+  // SHA-256 of canonical JSON of the action args at preview time. Recomputed
+  // at execution; mismatch refuses the action (Spec §15 content immutability).
+  contentHash: string
   status: ApprovalStatus
   createdAt: string
   resolvedAt?: string
@@ -375,6 +395,13 @@ export interface DaymateApi {
   // Activity (M1)
   listActivity(runId?: string): Promise<ActivityEvent[]>
   onActivityChanged(cb: (events: ActivityEvent[]) => void): () => void
+
+  // Approvals (M2 — Spec §8, §15, §18)
+  listApprovals(): Promise<ApprovalRequest[]>
+  getApproval(id: string): Promise<ApprovalRequest | null>
+  approveRequest(id: string): Promise<ApprovalRequest>
+  rejectRequest(id: string): Promise<ApprovalRequest>
+  onApprovalChanged(cb: (approvals: ApprovalRequest[]) => void): () => void
 }
 
 // Contract on the `window.daymate` global injected by preload.

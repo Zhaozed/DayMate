@@ -36,6 +36,7 @@ export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number]
 export type RoutineOutput = (typeof ROUTINE_OUTPUTS)[number]
 export type RoutineStepType = (typeof ROUTINE_STEP_TYPES)[number]
 export type ActivityEventType = (typeof ACTIVITY_EVENT_TYPES)[number]
+export type EmailClassification = (typeof EMAIL_CLASSIFICATIONS)[number]
 
 // ── Domain enums (Spec §8) ────────────────────────────────────────────────
 export const TASK_STATUSES = [
@@ -122,6 +123,14 @@ export const ACTIVITY_EVENT_TYPES = [
   'approval_resolved'
 ] as const
 
+// Auto Inbox classification buckets (Spec §13.2).
+export const EMAIL_CLASSIFICATIONS = [
+  'reply',
+  'follow_up',
+  'information',
+  'ignore'
+] as const
+
 // ── IPC channel namespace ───────────────────────────────────────────────────
 // All renderer <-> main traffic goes through channels prefixed here. The preload
 // is the only thing that touches ipcRenderer.
@@ -146,10 +155,20 @@ export const IPC = {
   NEED_TO_KNOW_LIST: 'daymate:need-to-know:list',
   // Activity (M1)
   ACTIVITY_LIST: 'daymate:activity:list',
-  ACTIVITY_CHANGED: 'daymate:activity:changed'
+  ACTIVITY_CHANGED: 'daymate:activity:changed',
+  // Approvals (M2)
+  APPROVAL_LIST: 'daymate:approval:list',
+  APPROVAL_GET: 'daymate:approval:get',
+  APPROVAL_APPROVE: 'daymate:approval:approve',
+  APPROVAL_REJECT: 'daymate:approval:reject',
+  APPROVAL_CHANGED: 'daymate:approval:changed'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
 
 // Hard ceiling on Routine step execution to prevent runaway loops. (Spec §12.7)
 export const ROUTINE_MAX_STEPS = 100
+
+// An approval request older than this is expired and cannot be executed
+// (Spec §20: approval expired).
+export const APPROVAL_TTL_HOURS = 24

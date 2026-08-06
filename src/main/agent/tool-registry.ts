@@ -21,12 +21,13 @@ import type { TaskService } from '../services/task-service'
 import type { NeedToKnowService } from '../services/need-to-know-service'
 import type { ActivityService } from '../services/activity-service'
 import { newId } from '../util/ids'
-import { taskPrioritySchema, taskStatusSchema } from '@shared/schemas'
+import { taskPrioritySchema, taskStatusSchema, classificationSchema } from '@shared/schemas'
 
 export interface ToolContext {
   runId?: string
   routineRunId?: string
-  emailProvider: EmailProvider
+  /** All connected email providers; email tools select by `accountId` (Spec §9). */
+  emailProviders: EmailProvider[]
   calendarProvider: CalendarProvider
   taskService: TaskService
   needToKnowService: NeedToKnowService
@@ -36,6 +37,20 @@ export interface ToolContext {
   notify: (message: string) => void
   /** Present only when executing an already-approved action (M2). */
   approval?: { requestId: string }
+}
+
+/** Resolve the email provider for an `accountId`; throws if none matches. */
+function emailProviderFor(ctx: ToolContext, accountId?: string): EmailProvider {
+  if (!accountId) {
+    // No account specified — use the first connected provider (convenience
+    // for single-account routines; multi-account routines must be explicit).
+    const [p] = ctx.emailProviders
+    if (!p) throw new Error('No email provider connected')
+    return p
+  }
+  const p = ctx.emailProviders.find((x) => x.accountId === accountId)
+  if (!p) throw new Error(`No email provider for accountId: ${accountId}`)
+  return p
 }
 
 export type ToolResult =
@@ -143,7 +158,7 @@ export function createToolRegistry(): ToolRegistry {
   // ── Email (read = R0) ─────────────────────────────────────────────────────
   registry.register({
     name: 'email.list',
-    description: 'List messages from the connected email account.',
+    description: 'List messages from a connected email account.',
     risk: 'R0',
     requiresApproval: false,
     parameters: z.object({
@@ -153,33 +168,37 @@ export function createToolRegistry(): ToolRegistry {
       limit: z.number().optional()
     }),
     async execute(args, ctx) {
-      const items = await ctx.emailProvider.listMessages(args as Parameters<typeof ctx.emailProvider.listMessages>[0])
+      const a = args as { accountId?: string; unreadOnly?: boolean; sinceHours?: number; limit?: number }
+      const provider = emailProviderFor(ctx, a.accountId)
+      const items = await provider.listMessages(a)
       return { status: 'ok', data: items }
     }
   })
 
   registry.register({
     name: 'email.search',
-    description: 'Search messages by text query.',
+    description: 'Search messages by text query on a connected account.',
     risk: 'R0',
     requiresApproval: false,
-    parameters: z.object({ query: z.string(), limit: z.number().optional() }),
+    parameters: z.object({ accountId: z.string().optional(), query: z.string(), limit: z.number().optional() }),
     async execute(args, ctx) {
-      const a = args as { query: string; limit?: number }
-      const items = await ctx.emailProvider.searchMessages(a.query, a.limit)
+      const a = args as { accountId?: string; query: string; limit?: number }
+      const provider = emailProviderFor(ctx, a.accountId)
+      const items = await provider.searchMessages(a.query, a.limit)
       return { status: 'ok', data: items }
     }
   })
 
   registry.register({
     name: 'email.get',
-    description: 'Get a single message by id.',
+    description: 'Get a single message by id from a connected account.',
     risk: 'R0',
     requiresApproval: false,
-    parameters: z.object({ messageId: z.string() }),
+    parameters: z.object({ accountId: z.string().optional(), messageId: z.string() }),
     async execute(args, ctx) {
-      const a = args as { messageId: string }
-      const msg = await ctx.emailProvider.getMessage(a.messageId)
+      const a = args as { accountId?: string; messageId: string }
+      const provider = emailProviderFor(ctx, a.accountId)
+      const msg = await provider.getMessage(a.messageId)
       return { status: 'ok', data: msg }
     }
   })
@@ -198,7 +217,9 @@ export function createToolRegistry(): ToolRegistry {
       body: z.string()
     }),
     async execute(args, ctx) {
-      const draft = await ctx.emailProvider.createDraft(args as Parameters<typeof ctx.emailProvider.createDraft>[0])
+      const a = args as Parameters<EmailProvider['createDraft']>[0]
+      const provider = emailProviderFor(ctx, a.accountId)
+      const draft = await provider.createDraft(a)
       return { status: 'ok', data: draft }
     }
   })
@@ -208,10 +229,11 @@ export function createToolRegistry(): ToolRegistry {
     description: 'Send an existing draft. R3 — preview + approval required. No send without approval.',
     risk: 'R3',
     requiresApproval: true,
-    parameters: z.object({ draftId: z.string() }),
+    parameters: z.object({ accountId: z.string(), draftId: z.string() }),
     async execute(args, ctx) {
-      const a = args as { draftId: string }
-      const result = await ctx.emailProvider.sendDraft(a.draftId)
+      const a = args as { accountId: string; draftId: string }
+      const provider = emailProviderFor(ctx, a.accountId)
+      const result = await provider.sendDraft(a.draftId)
       return { status: 'ok', data: result }
     }
   })
@@ -329,6 +351,33 @@ export function createToolRegistry(): ToolRegistry {
       const a = args as { id: string }
       const task = ctx.taskService.complete(a.id)
       return { status: 'ok', data: task }
+    }
+  })
+
+  // ── Inbox — turn classifications into Tasks (R1, idempotent by messageId) ──
+  registry.register({
+    name: 'inbox.create_tasks',
+    description:
+      'Create a Task for each actionable (non-ignore, non-untrusted) Auto Inbox classification. Idempotent by sourceId = messageId.',
+    risk: 'R1',
+    requiresApproval: false,
+    parameters: z.object({ classifications: z.array(classificationSchema) }),
+    async execute(args, ctx) {
+      const a = args as { classifications: Array<{ provider: string; accountId: string; messageId: string; classification: string; untrusted: boolean; reason: string; suggestedAction?: { label: string } }> }
+      const created = []
+      for (const c of a.classifications) {
+        // Ignore / untrusted items never produce a Task (Spec §17).
+        if (c.classification === 'ignore' || c.untrusted) continue
+        const task = ctx.taskService.create({
+          title: `${c.classification === 'follow_up' ? 'Follow up' : 'Reply'}: ${c.suggestedAction?.label ?? c.messageId}`,
+          sourceType: 'email',
+          sourceId: `${c.provider}:${c.messageId}`,
+          priority: c.classification === 'follow_up' ? 'high' : 'medium',
+          routineRunId: ctx.routineRunId
+        })
+        created.push(task)
+      }
+      return { status: 'ok', data: { created, count: created.length } }
     }
   })
 

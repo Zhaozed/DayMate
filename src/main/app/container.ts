@@ -13,28 +13,34 @@ import { SqliteStore } from '../db/sqlite-store'
 import { ActivityService } from '../services/activity-service'
 import { TaskService } from '../services/task-service'
 import { NeedToKnowService } from '../services/need-to-know-service'
+import { ApprovalService } from '../services/approval-service'
 import { createToolRegistry } from '../agent/tool-registry'
 import { RoutineEngine } from '../routines/engine'
 import { RoutineScheduler } from '../routines/scheduler'
 import { seedPresets } from '../routines/presets'
 import { MockEmailProvider } from '../providers/email/mock-email-provider'
+import { MockMail163Provider } from '../providers/email/mock-mail163-provider'
 import { MockCalendarProvider } from '../providers/calendar/mock-calendar-provider'
+import type { EmailProvider } from '../providers/email/email-provider'
 import { setRobotState } from '../ipc/handlers'
-import { APP_NAME } from '@shared/constants'
+import { APP_NAME, IPC } from '@shared/constants'
 
 export interface Container {
   store: SqliteStore
   activityService: ActivityService
   taskService: TaskService
   needToKnowService: NeedToKnowService
+  approvalService: ApprovalService
   toolRegistry: ReturnType<typeof createToolRegistry>
   engine: RoutineEngine
   scheduler: RoutineScheduler
-  emailProvider: MockEmailProvider
+  emailProviders: EmailProvider[]
   calendarProvider: MockCalendarProvider
   memory: Map<string, string>
   /** Push the latest activity to the workbench + robot for live UI updates. */
   broadcastActivity: (runId?: string) => void
+  /** Push the latest approvals to the workbench for live Approval Center. */
+  broadcastApprovals: () => void
 }
 
 let container: Container | null = null
@@ -54,8 +60,10 @@ export function initContainer(): Container {
   const activityService = new ActivityService(store)
   const taskService = new TaskService(store)
   const needToKnowService = new NeedToKnowService(store)
+  const approvalService = new ApprovalService(store)
 
-  const emailProvider = new MockEmailProvider()
+  // Unified normalized feed: mock Gmail + mock 163 (Spec §21 M2).
+  const emailProviders: EmailProvider[] = [new MockEmailProvider(), new MockMail163Provider()]
   const calendarProvider = new MockCalendarProvider()
   const memory = new Map<string, string>()
 
@@ -76,7 +84,14 @@ export function initContainer(): Container {
   const broadcastActivity = (runId?: string): void => {
     const events = activityService.list(runId)
     for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send('daymate:activity:changed', events)
+      win.webContents.send(IPC.ACTIVITY_CHANGED, events)
+    }
+  }
+
+  const broadcastApprovals = (): void => {
+    const approvals = approvalService.list()
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC.APPROVAL_CHANGED, approvals)
     }
   }
 
@@ -86,12 +101,14 @@ export function initContainer(): Container {
     activityService,
     taskService,
     needToKnowService,
-    emailProvider,
+    approvalService,
+    emailProviders,
     calendarProvider,
     memory,
     notify: (m) => {
       notify(m)
       broadcastActivity()
+      broadcastApprovals()
     }
   })
 
@@ -106,13 +123,15 @@ export function initContainer(): Container {
     activityService,
     taskService,
     needToKnowService,
+    approvalService,
     toolRegistry,
     engine,
     scheduler,
-    emailProvider,
+    emailProviders,
     calendarProvider,
     memory,
-    broadcastActivity
+    broadcastActivity,
+    broadcastApprovals
   }
   return container
 }

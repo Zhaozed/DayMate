@@ -14,5 +14,6 @@ export type {
   RoutineRun,
   RoutineRunStep,
   NeedToKnow,
-  ActivityEvent
+  ActivityEvent,
+  ApprovalRequest
 } from '@shared/types'

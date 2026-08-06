@@ -13,7 +13,8 @@ import type {
   RoutineRunStep,
   Task,
   NeedToKnow,
-  ActivityEvent
+  ActivityEvent,
+  ApprovalRequest
 } from '@shared/types'
 
 export interface RoutineStore {
@@ -49,4 +50,10 @@ export interface RoutineStore {
   // Activity
   createActivity(event: ActivityEvent): void
   listActivity(runId?: string): ActivityEvent[]
+
+  // Approvals (Spec §8, §15)
+  createApproval(request: ApprovalRequest): void
+  getApproval(id: string): ApprovalRequest | undefined
+  listApprovals(pendingOnly?: boolean): ApprovalRequest[]
+  updateApprovalStatus(id: string, status: ApprovalRequest['status'], resolvedAt: string): ApprovalRequest | undefined
 }

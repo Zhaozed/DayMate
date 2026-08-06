@@ -105,7 +105,9 @@ export const activityEvents = sqliteTable('activity_events', {
   createdAt: text('created_at').notNull()
 })
 
-// ── Approval requests (M2 fills execution; table ready now) ─────────────────
+// ── Approval requests (Spec §8, §15) ─────────────────────────────────────────
+// `contentHash` = SHA-256 of canonical JSON of the action args at preview time.
+// Recomputed at execution; mismatch refuses the action (§15 content immutability).
 export const approvalRequests = sqliteTable('approval_requests', {
   id: text('id').primaryKey(),
   routineRunId: text('routine_run_id'),
@@ -114,6 +116,7 @@ export const approvalRequests = sqliteTable('approval_requests', {
   riskLevel: text('risk_level').notNull(),
   title: text('title').notNull(),
   preview: text('preview').notNull(), // JSON
+  contentHash: text('content_hash').notNull(),
   status: text('status').notNull(),
   createdAt: text('created_at').notNull(),
   resolvedAt: text('resolved_at')

@@ -16,7 +16,9 @@ import {
   ACTIVITY_EVENT_TYPES,
   ACCOUNT_PROVIDERS,
   INTEGRATION_STATUSES,
-  RISK_LEVELS
+  RISK_LEVELS,
+  APPROVAL_STATUSES,
+  EMAIL_CLASSIFICATIONS
 } from './constants'
 
 // ── Robot / app ──────────────────────────────────────────────────────────────
@@ -190,3 +192,46 @@ export const routineTemplateSchema = routineDefinitionSchema.omit({
 // ── Run state ────────────────────────────────────────────────────────────────
 export const routineRunStatusSchema = z.enum(ROUTINE_RUN_STATUSES)
 export const stepStatusSchema = z.enum(STEP_STATUSES)
+
+// ── Approval (Spec §8, §15) ───────────────────────────────────────────────────
+// approvalRequestSchema validates an ApprovalRequest surfaced to the renderer.
+// `contentHash` is the SHA-256 of canonical JSON of the action args captured at
+// preview time; it is rechecked at execution and any mismatch refuses the
+// action (Spec §15 content immutability).
+export const approvalStatusSchema = z.enum(APPROVAL_STATUSES)
+export const emailClassificationSchema = z.enum(EMAIL_CLASSIFICATIONS)
+
+export const approvalRequestSchema = z.object({
+  id: z.string(),
+  routineRunId: z.string().optional(),
+  toolCallId: z.string(),
+  toolName: z.string(),
+  riskLevel: z.enum(['R1', 'R2', 'R3']),
+  title: z.string(),
+  preview: z.record(z.unknown()),
+  contentHash: z.string(),
+  status: approvalStatusSchema,
+  createdAt: z.string(),
+  resolvedAt: z.string().optional()
+})
+
+// Result of classifying a single email in Auto Inbox (Spec §13.2). The agent
+// step returns an array of these; the engine turns `reply`/`follow_up`/
+// `information` (non-ignore) into tasks / need-to-knows, and never acts on an
+// `untrusted` item (prompt-injection / SPAM fixture).
+export const suggestedActionSchema = z.object({
+  label: z.string(),
+  toolName: z.string().optional(),
+  args: z.record(z.unknown()).optional()
+})
+
+export const classificationSchema = z.object({
+  provider: z.enum(['gmail', 'mail163']),
+  accountId: z.string(),
+  messageId: z.string(),
+  classification: emailClassificationSchema,
+  untrusted: z.boolean(),
+  reason: z.string(),
+  suggestedAction: suggestedActionSchema.optional()
+})
+

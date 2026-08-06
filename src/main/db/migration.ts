@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   risk_level TEXT NOT NULL,
   title TEXT NOT NULL,
   preview TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
   resolved_at TEXT

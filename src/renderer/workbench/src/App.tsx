@@ -4,9 +4,12 @@ import { HomePage } from './pages/Home'
 import { TasksPage } from './pages/Tasks'
 import { RoutinesPage } from './pages/Routines'
 import { ActivityPage } from './pages/Activity'
+import { ApprovalsPage } from './pages/Approvals'
+import { NeedToKnowPage } from './pages/NeedToKnow'
+import { IntegrationsPage } from './pages/Integrations'
 
-// Workbench shell. Spec §4 IA. Real pages land M1-M4; M1 wires Home, Tasks,
-// Routines and Activity. The remaining nav entries are placeholders.
+// Workbench shell. Spec §4 IA. M2 wires Approvals, Need to Know and
+// Integrations. Assistant and Memory remain placeholders (M4/M5).
 const NAV = [
   'Home',
   'Assistant',
@@ -47,10 +50,13 @@ export function Workbench(): ReactElement {
 
       <main className="flex-1 overflow-auto p-8">
         {active === 'Home' && <HomePage />}
+        {active === 'Need to Know' && <NeedToKnowPage />}
         {active === 'Tasks' && <TasksPage />}
         {active === 'Routines' && <RoutinesPage />}
+        {active === 'Approvals' && <ApprovalsPage />}
         {active === 'Activity' && <ActivityPage />}
-        {active !== 'Home' && active !== 'Tasks' && active !== 'Routines' && active !== 'Activity' && (
+        {active === 'Integrations' && <IntegrationsPage />}
+        {(active === 'Assistant' || active === 'Memory') && (
           <>
             <h1 className="text-xl font-semibold text-white">{active}</h1>
             <p className="mt-1 text-sm text-white/45">

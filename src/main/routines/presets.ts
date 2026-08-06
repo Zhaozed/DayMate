@@ -6,9 +6,10 @@ import type { RoutineStore } from '../db/store'
 import type { RoutineDefinition } from '@shared/types'
 import { routineTemplateSchema } from '@shared/schemas'
 import { morningBriefTemplate } from './templates/morning-brief'
+import { autoInboxTemplate } from './templates/auto-inbox'
 import { nowIso } from '../util/ids'
 
-const PRESETS = [morningBriefTemplate]
+const PRESETS = [morningBriefTemplate, autoInboxTemplate]
 
 /** Seed presets; return all routines after seeding. */
 export function seedPresets(store: RoutineStore): RoutineDefinition[] {

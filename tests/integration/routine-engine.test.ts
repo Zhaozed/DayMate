@@ -6,6 +6,7 @@ import { NeedToKnowService } from '../../src/main/services/need-to-know-service'
 import { createToolRegistry } from '../../src/main/agent/tool-registry'
 import { RoutineEngine, type EngineDeps } from '../../src/main/routines/engine'
 import { seedPresets } from '../../src/main/routines/presets'
+import { ApprovalService } from '../../src/main/services/approval-service'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
 import { nowIso } from '../../src/main/util/ids'
@@ -20,7 +21,8 @@ function buildEngine(): { engine: RoutineEngine; store: InMemoryStore; deps: Eng
     activityService,
     taskService: new TaskService(store),
     needToKnowService: new NeedToKnowService(store),
-    emailProvider: new MockEmailProvider(),
+    approvalService: new ApprovalService(store),
+    emailProviders: [new MockEmailProvider()],
     calendarProvider: new MockCalendarProvider(),
     memory: new Map(),
     notify: () => {}
@@ -84,7 +86,7 @@ describe('routine engine — Morning Brief end to end', () => {
 
 describe('routine engine — pause and resume after approval', () => {
   it('pauses on an R3 tool and resumes after approval, running later steps', async () => {
-    const { engine, store } = buildEngine()
+    const { engine, store, deps } = buildEngine()
     const now = nowIso()
     const routine: RoutineDefinition = {
       id: 'approval_demo',
@@ -122,10 +124,18 @@ describe('routine engine — pause and resume after approval', () => {
     expect(run.currentStepId).toBe('create_draft')
     expect(store.listTasks().map((t) => t.title)).toEqual(['Before approval'])
 
-    // Resume with an approval context — the gated step runs, then later steps.
-    const resumed = await engine.resume(run.id, { approval: { requestId: 'req-1' } })
+    // The engine created an ApprovalRequest for the gated action (M2).
+    const pending = deps.approvalService.list(true)
+    expect(pending.length).toBe(1)
+    const request = pending[0]
+    deps.approvalService.approve(request.id)
+
+    // Resume with the real approval context — the gated step runs, then later steps.
+    const resumed = await engine.resume(run.id, { approval: { requestId: request.id } })
     expect(resumed.status).toBe('completed')
     expect(resumed.currentStepId).toBeUndefined()
     expect(store.listTasks().map((t) => t.title).sort()).toEqual(['After approval', 'Before approval'])
+    // The approval is now marked executed.
+    expect(deps.approvalService.get(request.id)?.status).toBe('executed')
   })
 })

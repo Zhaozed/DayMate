@@ -101,10 +101,35 @@ Key decisions in `docs/decisions/0002-m1-routine-engine-and-store.md`:
 - run-level + task-level idempotency; Tool Registry gates R2/R3 tools
   (`needs_approval` → run pauses → `engine.resume()`).
 
-**Next: Milestone 2 — email integrations.** Email Provider interface, Gmail
-OAuth + Provider, 163 IMAP/SMTP Provider, normalized email feed, Auto Inbox
-classification, draft creation, Approval Service (execute the paused/resume
-path), approved send, duplicate-send protection.
+**Milestone 2 — email integrations (credential-free core)** ✅ complete
+
+Verified: Approval Service + content-immutability hashing (SHA-256 of canonical
+JSON) gate every external write; Auto Inbox routine classifies a unified feed
+across mock Gmail + mock 163, dedupes by messageId, ignores SPAM/injection
+fixtures, creates Tasks + Need to Know; approval flow tested end-to-end (pause →
+approve → execute + markExecuted; reject → cancelled, sends nothing; content
+tamper → execution refused; duplicate run → no-op); approvals + content_hash +
+runs persist across a real-SQLite restart; typecheck + lint + 45 tests (incl.
+real better-sqlite3) + build all pass.
+
+Key decisions in `docs/decisions/0003-m2-approval-immutability-and-providers.md`:
+- content immutability: `content_hash` on `approval_requests`, recomputed at
+  resume, mismatch refuses execution (Spec §15);
+- engine creates the ApprovalRequest from the resolved step args (registry is a
+  pure gate); `cancelPausedRun` for reject (action never executes);
+- multi-provider `emailProviders[]` selected by `accountId` (Spec §9) — mock
+  Gmail + mock 163 unified feed;
+- deterministic `classify_inbox` + `inbox.create_tasks` (real LLM in M3);
+- duplicate-send protection at run + approval level (Spec §19).
+
+**Deferred (out of this pass — spec rule 6/7, credential-free):** real Gmail OAuth
+(loopback callback) and real 163 IMAP/SMTP are skeletons only; activate when the
+user supplies credentials through the secure flow. Feishu create/update (P1) and
+real LLM classification land in M3.
+
+**Next: Milestone 3 — agent runtime + memory.** Wire `@earendil-works/pi-agent-core`
++ `pi-ai` into the agent step seam (replace the deterministic stubs), Memory
+Service, prompt-injection hardening tests (Spec §17).
 
 ## Working rules (Spec §23)
 

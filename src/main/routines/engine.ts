@@ -19,6 +19,7 @@ import type { ToolResult } from '../agent/tool-registry'
 import type { ActivityService } from '../services/activity-service'
 import type { TaskService } from '../services/task-service'
 import type { NeedToKnowService } from '../services/need-to-know-service'
+import type { ApprovalService } from '../services/approval-service'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
 import type {
@@ -42,7 +43,7 @@ export interface RunOptions {
 
 export interface ResumeOptions {
   /** Present only when resuming an approved action (M2 wires the approval UI). */
-  approval?: { requestId: string }
+  approval: { requestId: string }
 }
 
 export interface EngineDeps {
@@ -51,7 +52,8 @@ export interface EngineDeps {
   activityService: ActivityService
   taskService: TaskService
   needToKnowService: NeedToKnowService
-  emailProvider: EmailProvider
+  approvalService: ApprovalService
+  emailProviders: EmailProvider[]
   calendarProvider: CalendarProvider
   /** Shared in-process memory (M1 stub; real Memory Service in M5). */
   memory: Map<string, string>
@@ -114,9 +116,12 @@ export class RoutineEngine {
 
   /**
    * Resume a paused run from its current step, with an approval context that
-   * lets the previously-gated action proceed (Spec §12.5).
+   * lets the previously-gated action proceed (Spec §12.5). Verifies the
+   * approval is `approved` and that the action's content hash still matches
+   * the args captured at preview time — any mismatch refuses execution
+   * (Spec §15 content immutability) and fails the run.
    */
-  async resume(runId: string, opts: ResumeOptions = {}): Promise<RoutineRun> {
+  async resume(runId: string, opts: ResumeOptions): Promise<RoutineRun> {
     const run = this.deps.store.getRun(runId)
     if (!run) throw new Error(`Run not found: ${runId}`)
     if (run.status !== 'waiting_approval') throw new Error(`Run is not paused: ${run.status}`)
@@ -126,15 +131,61 @@ export class RoutineEngine {
     const startIndex = routine.steps.findIndex((s) => s.id === run.currentStepId)
     if (startIndex < 0) throw new Error(`Cannot resume: current step ${run.currentStepId} not found`)
 
+    // Spec §15: verify the approval is approved AND the content is unchanged.
+    const approval = this.deps.approvalService.get(opts.approval.requestId)
+    if (!approval) throw new Error(`Approval not found: ${opts.approval.requestId}`)
+    if (approval.routineRunId && approval.routineRunId !== runId) {
+      throw new Error(`Approval does not belong to run ${runId}`)
+    }
+    if (approval.status !== 'approved') {
+      throw new Error(`Approval is not approved: ${approval.status}`)
+    }
+    const step = routine.steps[startIndex]
+    const resolvedArgs = this.resolveStepArgs(step)
+    if (!this.deps.approvalService.verifyContent(approval, resolvedArgs)) {
+      this.fail(run, `Content changed since approval preview — refusing to execute ${approval.toolName}`)
+      this.deps.activityService.record({
+        runId,
+        type: 'approval_resolved',
+        summary: `Approval content mismatch — execution refused`,
+        metadata: { requestId: approval.id, tool: approval.toolName }
+      })
+      const failed = this.deps.store.getRun(runId)
+      return failed ?? run
+    }
+
     this.deps.activityService.record({
       runId,
       type: 'approval_resolved',
       summary: `Resuming run after approval at step "${run.currentStepId}"`,
-      metadata: { requestId: opts.approval?.requestId }
+      metadata: { requestId: opts.approval.requestId }
     })
 
     await this.executeFrom(run, routine, startIndex, opts.approval)
 
+    const finalRun = this.deps.store.getRun(runId)
+    return finalRun ?? run
+  }
+
+  /**
+   * Cancel a paused run — used when the user rejects the approval. The gated
+   * action NEVER executes (sends nothing, writes nothing) (Spec §15, §19).
+   */
+  async cancelPausedRun(runId: string): Promise<RoutineRun> {
+    const run = this.deps.store.getRun(runId)
+    if (!run) throw new Error(`Run not found: ${runId}`)
+    if (run.status !== 'waiting_approval') throw new Error(`Run is not paused: ${run.status}`)
+    this.deps.store.updateRun(runId, {
+      status: 'cancelled',
+      completedAt: nowIso(),
+      currentStepId: undefined
+    })
+    this.deps.activityService.record({
+      runId,
+      type: 'approval_resolved',
+      summary: `Run cancelled — approval rejected`,
+      metadata: { stepId: run.currentStepId }
+    })
     const finalRun = this.deps.store.getRun(runId)
     return finalRun ?? run
   }
@@ -183,6 +234,13 @@ export class RoutineEngine {
           this.deps.store.updateRun(run.id, { status: 'waiting_approval', currentStepId: step.id })
           return
         }
+        // On resume, the first (paused) step just executed under approval —
+        // flip its ApprovalRequest to executed, then drop the approval context
+        // so later steps don't inherit it.
+        if (approval && i === startIndex) {
+          this.deps.approvalService.markExecuted(approval.requestId)
+          ctx.approval = undefined
+        }
         this.deps.store.updateRunStep(runStep.id, {
           status: 'completed',
           output: outcome.output,
@@ -220,7 +278,7 @@ export class RoutineEngine {
     return {
       runId: run.id,
       routineRunId: run.id,
-      emailProvider: this.deps.emailProvider,
+      emailProviders: this.deps.emailProviders,
       calendarProvider: this.deps.calendarProvider,
       taskService: this.deps.taskService,
       needToKnowService: this.deps.needToKnowService,
@@ -229,6 +287,45 @@ export class RoutineEngine {
       notify: this.deps.notify,
       approval
     }
+  }
+
+  /** Resolve a step's tool args against accumulated step outputs (for hashing). */
+  private resolveStepArgs(step: RoutineStep): Record<string, unknown> {
+    if (step.type === 'tool') return resolveTemplate(step.args ?? {}, {}) as Record<string, unknown>
+    if (step.type === 'approval') return resolveTemplate(step.args, {}) as Record<string, unknown>
+    return {}
+  }
+
+  /**
+   * Create an ApprovalRequest (capturing the content hash of the resolved
+   * args), record an `approval_requested` Activity event, and return a paused
+   * outcome. Used by both `tool` steps hitting an R2/R3 tool and explicit
+   * `approval` steps (Spec §12.4, §15).
+   */
+  private pauseForApproval(
+    run: RoutineRun,
+    step: RoutineStep,
+    toolName: string,
+    result: Extract<ToolResult, { status: 'needs_approval' }>,
+    resolvedArgs: Record<string, unknown>
+  ): StepOutcome {
+    const title = step.type === 'approval' ? step.title : `Approve: ${toolName}`
+    const request = this.deps.approvalService.create({
+      routineRunId: run.id,
+      toolCallId: result.toolCallId,
+      toolName,
+      riskLevel: result.risk,
+      title,
+      preview: result.preview,
+      args: resolvedArgs
+    })
+    this.deps.activityService.record({
+      runId: run.id,
+      type: 'approval_requested',
+      summary: `Approval required for ${toolName} (risk ${result.risk})`,
+      metadata: { tool: toolName, toolCallId: result.toolCallId, stepId: step.id, requestId: request.id }
+    })
+    return { output: undefined, paused: true }
   }
 
   private async executeStep(step: RoutineStep, run: RoutineRun, ctx: ToolContext): Promise<StepOutcome> {
@@ -262,14 +359,9 @@ export class RoutineEngine {
     })
     const result: ToolResult = await this.deps.toolRegistry.execute(step.tool, args, ctx)
     if (result.status === 'needs_approval') {
-      // Spec §12.4: persist context and pause — do not execute the action.
-      this.deps.activityService.record({
-        runId: run.id,
-        type: 'approval_requested',
-        summary: `Approval required for ${step.tool} (risk ${result.risk})`,
-        metadata: { tool: step.tool, toolCallId: result.toolCallId, stepId: step.id }
-      })
-      return { output: undefined, paused: true }
+      // Spec §12.4 + §15: create the approval request (hashing the resolved
+      // args) and pause — do not execute the action.
+      return this.pauseForApproval(run, step, step.tool, result, args as Record<string, unknown>)
     }
     if (result.status === 'error') {
       throw new Error(result.error)
@@ -361,17 +453,14 @@ export class RoutineEngine {
   }
 
   private async execApprovalStep(step: Extract<RoutineStep, { type: 'approval' }>, run: RoutineRun, ctx: ToolContext): Promise<StepOutcome> {
-    // Explicit approval step — the action is gated.
+    // Explicit approval step — the action is gated. On first pass (no
+    // ctx.approval) the registry returns needs_approval; we create the
+    // ApprovalRequest and pause. On resume (ctx.approval set) the gate passes
+    // and the action executes; executeFrom then marks the request executed.
     const args = resolveTemplate(step.args, run.stepOutputs)
     const result = await this.deps.toolRegistry.execute(step.toolName, args, ctx)
     if (result.status === 'needs_approval') {
-      this.deps.activityService.record({
-        runId: run.id,
-        type: 'approval_requested',
-        summary: `Approval required for ${step.toolName}`,
-        metadata: { tool: step.toolName, toolCallId: result.toolCallId, stepId: step.id }
-      })
-      return { output: undefined, paused: true }
+      return this.pauseForApproval(run, step, step.toolName, result, args as Record<string, unknown>)
     }
     if (result.status === 'error') throw new Error(result.error)
     return { output: result.status === 'ok' ? result.data : null }

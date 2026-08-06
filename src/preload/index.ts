@@ -37,6 +37,17 @@ const api: DaymateApi = {
     const listener = (_e: unknown, events: Parameters<typeof cb>[0]): void => cb(events)
     ipcRenderer.on(IPC.ACTIVITY_CHANGED, listener)
     return () => ipcRenderer.removeListener(IPC.ACTIVITY_CHANGED, listener)
+  },
+
+  // Approvals (M2 — Spec §8, §15, §18)
+  listApprovals: () => ipcRenderer.invoke(IPC.APPROVAL_LIST),
+  getApproval: (id) => ipcRenderer.invoke(IPC.APPROVAL_GET, id),
+  approveRequest: (id) => ipcRenderer.invoke(IPC.APPROVAL_APPROVE, id),
+  rejectRequest: (id) => ipcRenderer.invoke(IPC.APPROVAL_REJECT, id),
+  onApprovalChanged: (cb) => {
+    const listener = (_e: unknown, approvals: Parameters<typeof cb>[0]): void => cb(approvals)
+    ipcRenderer.on(IPC.APPROVAL_CHANGED, listener)
+    return () => ipcRenderer.removeListener(IPC.APPROVAL_CHANGED, listener)
   }
 }
 

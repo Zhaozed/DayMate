@@ -9,7 +9,8 @@ import type {
   RoutineRunStep,
   Task,
   NeedToKnow,
-  ActivityEvent
+  ActivityEvent,
+  ApprovalRequest
 } from '@shared/types'
 
 export class InMemoryStore implements RoutineStore {
@@ -19,6 +20,7 @@ export class InMemoryStore implements RoutineStore {
   private tasks = new Map<string, Task>()
   private needToKnow = new Map<string, NeedToKnow>()
   private activity: ActivityEvent[] = []
+  private approvals = new Map<string, ApprovalRequest>()
 
   // ── Routines ──────────────────────────────────────────────────────────────
   listRoutines(): RoutineDefinition[] {
@@ -140,5 +142,32 @@ export class InMemoryStore implements RoutineStore {
     return [...filtered]
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
       .map((e) => ({ ...e }))
+  }
+
+  // ── Approvals (Spec §8, §15) ────────────────────────────────────────────────
+  createApproval(request: ApprovalRequest): void {
+    this.approvals.set(request.id, { ...request, preview: { ...request.preview } })
+  }
+  getApproval(id: string): ApprovalRequest | undefined {
+    const a = this.approvals.get(id)
+    return a ? { ...a, preview: { ...a.preview } } : undefined
+  }
+  listApprovals(pendingOnly = false): ApprovalRequest[] {
+    const all = [...this.approvals.values()]
+    const filtered = pendingOnly ? all.filter((a) => a.status === 'pending') : all
+    return filtered
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .map((a) => ({ ...a, preview: { ...a.preview } }))
+  }
+  updateApprovalStatus(
+    id: string,
+    status: ApprovalRequest['status'],
+    resolvedAt: string
+  ): ApprovalRequest | undefined {
+    const a = this.approvals.get(id)
+    if (!a) return undefined
+    const next = { ...a, status, resolvedAt }
+    this.approvals.set(id, next)
+    return { ...next, preview: { ...next.preview } }
   }
 }
