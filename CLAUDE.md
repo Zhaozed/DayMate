@@ -73,10 +73,20 @@ docs/            decisions/ · evaluation/ · screenshots/
 
 ## Current milestone
 
-**Milestone 0 — repository and guardrails** (in progress)
+**Milestone 0 — repository and guardrails** ✅ complete
 
-Exit criteria: app launches; main and renderer compile; robot and workbench
-windows open; no Node API exposed to renderer; typecheck + lint + tests pass.
+Verified: app launches; main + renderer compile; robot + workbench windows
+open and render content; no Node API exposed to renderer (contextIsolation +
+sandbox + typed IPC); typecheck + lint + unit tests + build all pass.
+
+Key build/security decisions in `docs/decisions/0001-m0-security-and-build.md`:
+main + preload are CommonJS (no `"type": "module"`) so the sandboxed preload
+loads; CSP is set via session header (dev-permissive for Vite HMR, prod-strict);
+renderer windows load `/robot/index.html` and `/workbench/index.html`.
+
+**Next: Milestone 1 — domain and Routine foundation.** SQLite + Drizzle schema,
+Activity/Task services, Tool Registry, Routine Schema + Engine (schema-driven,
+resumable, idempotent, observable), manual trigger + node-cron, mock providers.
 
 ## Working rules (Spec §23)
 
