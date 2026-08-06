@@ -3,4 +3,16 @@
 // This file exists per spec §7 repo structure to keep main-side wiring local.
 
 export { IPC } from '@shared/constants'
-export type { DaymateApi, RobotState, AppInfo, WindowName } from '@shared/types'
+export type {
+  DaymateApi,
+  RobotState,
+  AppInfo,
+  WindowName,
+  TaskUpdate,
+  Task,
+  RoutineDefinition,
+  RoutineRun,
+  RoutineRunStep,
+  NeedToKnow,
+  ActivityEvent
+} from '@shared/types'

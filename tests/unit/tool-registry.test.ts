@@ -1,0 +1,86 @@
+import { describe, it, expect } from 'vitest'
+import { createToolRegistry, type ToolContext } from '../../src/main/agent/tool-registry'
+import { InMemoryStore } from '../../src/main/db/in-memory-store'
+import { ActivityService } from '../../src/main/services/activity-service'
+import { TaskService } from '../../src/main/services/task-service'
+import { NeedToKnowService } from '../../src/main/services/need-to-know-service'
+import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
+import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
+
+function buildContext(overrides: Partial<ToolContext> = {}): ToolContext {
+  const store = new InMemoryStore()
+  return {
+    runId: 'run-test',
+    routineRunId: 'run-test',
+    emailProvider: new MockEmailProvider(),
+    calendarProvider: new MockCalendarProvider(),
+    taskService: new TaskService(store),
+    needToKnowService: new NeedToKnowService(store),
+    activityService: new ActivityService(store),
+    memory: new Map(),
+    notify: () => {},
+    ...overrides
+  }
+}
+
+describe('tool registry', () => {
+  const registry = createToolRegistry()
+
+  it('executes an R0 read tool (email.list)', async () => {
+    const res = await registry.execute('email.list', { unreadOnly: true }, buildContext())
+    expect(res.status).toBe('ok')
+    const data = (res as { status: 'ok'; data: unknown[] }).data
+    expect(Array.isArray(data)).toBe(true)
+    expect(data.length).toBeGreaterThan(0)
+  })
+
+  it('validates parameters and rejects bad args', async () => {
+    const res = await registry.execute('email.get', {}, buildContext())
+    expect(res.status).toBe('error')
+    expect((res as { error: string }).error).toMatch(/Invalid parameters/)
+  })
+
+  it('returns needs_approval for an R3 tool without approval context and does NOT execute', async () => {
+    const ctx = buildContext()
+    // Create a draft first via the provider, then attempt send without approval.
+    const draft = await ctx.emailProvider.createDraft({
+      accountId: 'mock-gmail-001',
+      to: [{ address: 'someone@example.com' }],
+      subject: 'hi',
+      body: 'hello'
+    })
+    const res = await registry.execute('email.send_draft', { draftId: draft.id }, ctx)
+    expect(res.status).toBe('needs_approval')
+    expect((res as { risk: string }).risk).toBe('R3')
+    // The draft must still exist (send was not executed).
+    await expect(ctx.emailProvider.sendDraft(draft.id)).resolves.toEqual(
+      expect.objectContaining({ messageId: expect.any(String) })
+    )
+  })
+
+  it('executes an R3 tool when an approval context is present', async () => {
+    const ctx = buildContext({ approval: { requestId: 'appr-1' } })
+    const draft = await ctx.emailProvider.createDraft({
+      accountId: 'mock-gmail-001',
+      to: [{ address: 'someone@example.com' }],
+      subject: 'hi',
+      body: 'hello'
+    })
+    const res = await registry.execute('email.send_draft', { draftId: draft.id }, ctx)
+    expect(res.status).toBe('ok')
+  })
+
+  it('returns error for an unknown tool', async () => {
+    const res = await registry.execute('nope', {}, buildContext())
+    expect(res.status).toBe('error')
+  })
+
+  it('task.create is idempotent by sourceId', async () => {
+    const ctx = buildContext()
+    const a = await registry.execute('task.create', { title: 'T1', sourceId: 'src-1' }, ctx)
+    const b = await registry.execute('task.create', { title: 'T1', sourceId: 'src-1' }, ctx)
+    expect(a.status).toBe('ok')
+    expect(b.status).toBe('ok')
+    expect((a as { data: { id: string } }).data.id).toBe((b as { data: { id: string } }).data.id)
+  })
+})

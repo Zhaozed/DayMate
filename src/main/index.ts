@@ -5,7 +5,7 @@
 
 import { app, BrowserWindow } from 'electron'
 import { openRobot, openWorkbench } from './windows'
-import { registerIpcHandlers } from './ipc/handlers'
+import { registerIpcHandlers, bootstrapContainer } from './ipc/handlers'
 import { installContentSecurityPolicy } from './security/csp'
 
 // Single-instance lock — the robot is a persistent ambient surface.
@@ -21,6 +21,9 @@ app.on('second-instance', () => {
 
 function bootstrap(): void {
   installContentSecurityPolicy()
+  // Open the DB, seed presets, start the scheduler — must happen after app
+  // is ready so app.getPath('userData') resolves.
+  bootstrapContainer()
   registerIpcHandlers()
   // Persistent robot first (ambient surface), workbench on demand.
   openRobot()

@@ -84,9 +84,27 @@ main + preload are CommonJS (no `"type": "module"`) so the sandboxed preload
 loads; CSP is set via session header (dev-permissive for Vite HMR, prod-strict);
 renderer windows load `/robot/index.html` and `/workbench/index.html`.
 
-**Next: Milestone 1 — domain and Routine foundation.** SQLite + Drizzle schema,
-Activity/Task services, Tool Registry, Routine Schema + Engine (schema-driven,
-resumable, idempotent, observable), manual trigger + node-cron, mock providers.
+**Milestone 1 — domain and Routine foundation** ✅ complete
+
+Verified: mock Morning Brief Routine runs end-to-end (engine integration test);
+Activity page shows every step; SQLite DB persists across restart (DB file in
+userData, WAL mode); typecheck + lint + 28 tests + build all pass; app boots
+cleanly with DB init + preset seeding + scheduler start.
+
+Key decisions in `docs/decisions/0002-m1-routine-engine-and-store.md`:
+- persistence behind a `RoutineStore` interface (`SqliteStore` for prod via
+  drizzle + better-sqlite3, `InMemoryStore` for tests) so the engine is
+  testable without loading the native addon;
+- `better-sqlite3` rebuilt for Electron via `predev`/`prebuild` (`rebuild:native`);
+- hand-written idempotent `CREATE TABLE` migrations (no `drizzle-kit` yet);
+- deterministic mock `generate_morning_brief` agent step (real LLM in M3);
+- run-level + task-level idempotency; Tool Registry gates R2/R3 tools
+  (`needs_approval` → run pauses → `engine.resume()`).
+
+**Next: Milestone 2 — email integrations.** Email Provider interface, Gmail
+OAuth + Provider, 163 IMAP/SMTP Provider, normalized email feed, Auto Inbox
+classification, draft creation, Approval Service (execute the paused/resume
+path), approved send, duplicate-send protection.
 
 ## Working rules (Spec §23)
 

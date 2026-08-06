@@ -12,17 +12,24 @@
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "echo 'Playwright e2e suite — wired in Milestone 4' && exit 0"
+    "test:e2e": "echo 'Playwright e2e suite — wired in Milestone 4' && exit 0",
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3",
+    "predev": "electron-rebuild -f -w better-sqlite3",
+    "prebuild": "electron-rebuild -f -w better-sqlite3"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.83.0",
     "@earendil-works/pi-ai": "^0.83.0",
+    "better-sqlite3": "^11.7.0",
     "drizzle-orm": "^0.36.4",
     "node-cron": "^3.0.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
     "@tailwindcss/vite": "^4.0.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node-cron": "^3.0.3",
     "@types/node": "^22.10.5",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
@@ -47,6 +54,6 @@
     "node": ">=20"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["electron", "esbuild", "protobufjs"]
+    "onlyBuiltDependencies": ["electron", "esbuild", "protobufjs", "better-sqlite3"]
   }
 }

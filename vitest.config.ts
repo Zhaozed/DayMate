@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitest/config'
 import { resolve } from 'node:path'
 
-// Unit tests for main/shared logic. Renderer e2e uses Playwright (M4).
+// Unit + integration tests for main/shared logic. Renderer e2e uses Playwright (M4).
 export default defineConfig({
   resolve: {
     alias: {
@@ -9,7 +9,7 @@ export default defineConfig({
     }
   },
   test: {
-    include: ['tests/unit/**/*.test.ts'],
+    include: ['tests/unit/**/*.test.ts', 'tests/integration/**/*.test.ts'],
     environment: 'node'
   }
 })

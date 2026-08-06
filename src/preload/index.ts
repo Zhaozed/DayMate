@@ -14,7 +14,30 @@ const api: DaymateApi = {
   getAppInfo: () => ipcRenderer.invoke(IPC.GET_APP_INFO),
   getRobotState: () => ipcRenderer.invoke(IPC.GET_ROBOT_STATE),
   setRobotState: (state) => ipcRenderer.invoke(IPC.SET_ROBOT_STATE, state),
-  openWindow: (name) => ipcRenderer.invoke(IPC.OPEN_WINDOW, name)
+  openWindow: (name) => ipcRenderer.invoke(IPC.OPEN_WINDOW, name),
+
+  // Routines (M1)
+  listRoutines: () => ipcRenderer.invoke(IPC.ROUTINE_LIST),
+  runRoutine: (routineId) => ipcRenderer.invoke(IPC.ROUTINE_RUN, routineId),
+  listRoutineRuns: (routineId) => ipcRenderer.invoke(IPC.ROUTINE_LIST_RUNS, routineId),
+  getRoutineRun: (runId) => ipcRenderer.invoke(IPC.ROUTINE_GET_RUN, runId),
+  setRoutineEnabled: (routineId, enabled) =>
+    ipcRenderer.invoke(IPC.ROUTINE_SET_ENABLED, routineId, enabled),
+
+  // Tasks (M1)
+  listTasks: () => ipcRenderer.invoke(IPC.TASK_LIST),
+  updateTask: (id, patch) => ipcRenderer.invoke(IPC.TASK_UPDATE, id, patch),
+
+  // Need to Know (M1)
+  listNeedToKnow: () => ipcRenderer.invoke(IPC.NEED_TO_KNOW_LIST),
+
+  // Activity (M1)
+  listActivity: (runId) => ipcRenderer.invoke(IPC.ACTIVITY_LIST, runId),
+  onActivityChanged: (cb) => {
+    const listener = (_e: unknown, events: Parameters<typeof cb>[0]): void => cb(events)
+    ipcRenderer.on(IPC.ACTIVITY_CHANGED, listener)
+    return () => ipcRenderer.removeListener(IPC.ACTIVITY_CHANGED, listener)
+  }
 }
 
 // contextIsolation is on; this is the safe way to give the renderer a typed API.
