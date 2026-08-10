@@ -12,8 +12,8 @@ import type { RoutineTemplate } from './morning-brief'
 
 export const autoInboxTemplate: RoutineTemplate = {
   id: 'auto_inbox',
-  name: 'Auto Inbox',
-  description: 'Classify incoming mail across accounts into reply / follow-up / info / ignore',
+  name: '自动收件箱',
+  description: '分类各账户收件箱为 回复 / 跟进 / 参考 / 忽略',
   version: 1,
   enabled: true,
   trigger: {
@@ -30,21 +30,43 @@ export const autoInboxTemplate: RoutineTemplate = {
       type: 'tool',
       tool: 'email.list',
       args: { accountId: 'mock-gmail-001', unreadOnly: true, limit: 50 },
-      outputKey: 'gmailEmails'
+      outputKey: 'gmailEmails',
+      // Spec M3 partial-failure: if Gmail is unreachable, 163 mail is still
+      // triaged and the outage is recorded as `provider_unavailable`.
+      continueOnError: true
     },
     {
       id: 'mail163_emails',
       type: 'tool',
       tool: 'email.list',
       args: { accountId: 'mock-163-001', unreadOnly: true, limit: 50 },
-      outputKey: 'mail163Emails'
+      outputKey: 'mail163Emails',
+      continueOnError: true
+    },
+    {
+      id: 'memory',
+      type: 'tool',
+      tool: 'memory.search',
+      args: { query: '' },
+      outputKey: 'memory'
     },
     {
       id: 'classify',
       type: 'agent',
       action: 'classify_inbox',
-      inputs: { gmailEmails: '{{gmailEmails}}', mail163Emails: '{{mail163Emails}}' },
+      inputs: {
+        gmailEmails: '{{gmailEmails}}',
+        mail163Emails: '{{mail163Emails}}',
+        memory: '{{memory}}'
+      },
       outputKey: 'classified'
+    },
+    {
+      id: 'save_memory',
+      type: 'tool',
+      tool: 'memory.save_proposals',
+      args: { proposals: '{{classified.memoryProposals}}' },
+      continueOnError: true
     },
     {
       id: 'create_tasks',
@@ -56,17 +78,17 @@ export const autoInboxTemplate: RoutineTemplate = {
     {
       id: 'publish',
       type: 'need_to_know',
-      title: 'Inbox classified',
+      title: '收件箱已分类',
       summary:
-        'Reply: {{classified.counts.reply}}, follow-up: {{classified.counts.follow_up}}, info: {{classified.counts.information}}, ignored: {{classified.counts.ignore}}. {{createdTasks.count}} task(s) created.',
-      reason: 'Auto Inbox triaged unread mail across Gmail and 163. Untrusted / SPAM items were ignored.',
+        '费用/账单：{{classified.topicCounts.fees_billing}}，求职：{{classified.topicCounts.recruiting}}，会议：{{classified.topicCounts.meeting}}，广告：{{classified.topicCounts.ads}}（已忽略），其他：{{classified.topicCounts.general}}。待回复：{{classified.counts.reply}}，跟进：{{classified.counts.follow_up}}，参考：{{classified.counts.information}}。已创建 {{createdTasks.count}} 个任务。',
+      reason: '自动收件箱已对 Gmail 与 163 的未读邮件进行分类。不可信 / 垃圾邮件已被忽略。',
       priority: 'medium'
     },
     {
       id: 'notify',
       type: 'notify',
       channel: 'desktop_robot',
-      message: 'Inbox reviewed — {{createdTasks.count}} actionable item(s).'
+      message: '收件箱已审阅 —— {{createdTasks.count}} 个待办事项。'
     }
   ],
   approvalPolicy: 'writes_only',

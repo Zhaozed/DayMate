@@ -29,6 +29,8 @@ describe.runIf(nativeOk)('SqliteStore persistence (real better-sqlite3)', () => 
     const { TaskService } = await import('../../src/main/services/task-service')
     const { NeedToKnowService } = await import('../../src/main/services/need-to-know-service')
     const { ApprovalService } = await import('../../src/main/services/approval-service')
+    const { MemoryService } = await import('../../src/main/services/memory-service')
+    const { createDeterministicAgentRuntime } = await import('../../src/main/agent/agent-runtime')
     const { createToolRegistry } = await import('../../src/main/agent/tool-registry')
     const { RoutineEngine } = await import('../../src/main/routines/engine')
     const { seedPresets } = await import('../../src/main/routines/presets')
@@ -48,9 +50,10 @@ describe.runIf(nativeOk)('SqliteStore persistence (real better-sqlite3)', () => 
       taskService: new TaskService(store1),
       needToKnowService: new NeedToKnowService(store1),
       approvalService: new ApprovalService(store1),
+      memoryService: new MemoryService(store1),
       emailProviders: [new MockEmailProvider()],
       calendarProvider: new MockCalendarProvider(),
-      memory: new Map(),
+      agentRuntime: createDeterministicAgentRuntime(),
       notify: () => {}
     })
     seedPresets(store1)

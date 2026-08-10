@@ -4,6 +4,7 @@ import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ActivityService } from '../../src/main/services/activity-service'
 import { TaskService } from '../../src/main/services/task-service'
 import { NeedToKnowService } from '../../src/main/services/need-to-know-service'
+import { MemoryService } from '../../src/main/services/memory-service'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
 
@@ -17,7 +18,7 @@ function buildContext(overrides: Partial<ToolContext> = {}): ToolContext {
     taskService: new TaskService(store),
     needToKnowService: new NeedToKnowService(store),
     activityService: new ActivityService(store),
-    memory: new Map(),
+    memoryService: new MemoryService(store),
     notify: () => {},
     ...overrides
   }
@@ -32,6 +33,23 @@ describe('tool registry', () => {
     const data = (res as { status: 'ok'; data: unknown[] }).data
     expect(Array.isArray(data)).toBe(true)
     expect(data.length).toBeGreaterThan(0)
+  })
+
+  it('email.list_sent returns the user own sent mail as a tone corpus (R0)', async () => {
+    const res = await registry.execute('email.list_sent', { limit: 10 }, buildContext())
+    expect(res.status).toBe('ok')
+    const data = (res as { status: 'ok'; data: { to: { address: string }[]; subject: string }[] }).data
+    expect(data.length).toBeGreaterThan(0)
+    // Sent mail is the user's own voice — every item is FROM me TO a contact.
+    expect(data.every((m) => m.to.length > 0)).toBe(true)
+    // Filtering by recipient narrows the corpus to that contact's tone.
+    const res2 = await registry.execute(
+      'email.list_sent',
+      { toAddress: 'alice@example.com' },
+      buildContext()
+    )
+    const data2 = (res2 as { status: 'ok'; data: { to: { address: string }[] }[] }).data
+    expect(data2.every((m) => m.to.some((t) => t.address === 'alice@example.com'))).toBe(true)
   })
 
   it('validates parameters and rejects bad args', async () => {

@@ -88,7 +88,7 @@ export class MockCalendarProvider implements CalendarProvider {
 
   async getEvent(eventId: string): Promise<CalendarEvent> {
     const evt = FIXTURES.find((e) => e.eventId === eventId)
-    if (!evt) throw new Error(`Event not found: ${eventId}`)
+    if (!evt) throw new Error(`未找到事件：${eventId}`)
     return evt
   }
 

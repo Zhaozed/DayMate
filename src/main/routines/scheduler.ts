@@ -1,6 +1,9 @@
-// Routine scheduler (Spec §12 triggers). Uses node-cron for `schedule` triggers
-// and setInterval for `email_poll` triggers. `calendar_before` is P1 — not
-// implemented here.
+// Routine scheduler (Spec §12 triggers). Uses node-cron for `schedule`
+// triggers, setInterval for `email_poll` triggers, and a shared poll loop for
+// `calendar_before` triggers (M5 §13.3): every minute it lists upcoming events
+// and fires any routine whose window (now < start <= now+minutesBefore) is
+// reached. Idempotency key `calbefore:<routineId>:<eventId>:<eventDate>` so a
+// refire (same tick, restart mid-window) is a no-op rather than a duplicate run.
 //
 // Idempotency: each fire builds a time-bucket idempotency key so a duplicate
 // trigger (Spec §20 "Routine duplicated trigger") or an in-app double-fire is
@@ -9,18 +12,27 @@
 import cron from 'node-cron'
 import type { RoutineEngine } from './engine'
 import type { RoutineStore } from '../db/store'
-import type { RoutineDefinition } from '@shared/types'
+import type { CalendarProvider } from '../providers/calendar/calendar-provider'
+import type { CalendarEvent, RoutineDefinition, RoutineTrigger } from '@shared/types'
 
 type ScheduledJob = ReturnType<typeof cron.schedule>
+
+const CAL_BEFORE_POLL_MS = 60_000 // poll every minute
+const CAL_BEFORE_LOOKAHEAD_MS = 24 * 60 * 60 * 1000 // look ahead 24h
 
 export class RoutineScheduler {
   private cronJobs = new Map<string, ScheduledJob>()
   private pollTimers = new Map<string, ReturnType<typeof setInterval>>()
+  private calBeforeTimer: ReturnType<typeof setInterval> | undefined
   private stopped = false
+  /** When true, scheduled triggers are suppressed (M4 context menu). Manual
+   *  runs (runManually / ROUTINE_RUN) are never affected. */
+  private paused = false
 
   constructor(
     private readonly engine: RoutineEngine,
-    private readonly store: RoutineStore
+    private readonly store: RoutineStore,
+    private readonly calendarProvider?: CalendarProvider
   ) {}
 
   /** Start all enabled scheduled/poll routines. Safe to call once at boot. */
@@ -30,12 +42,34 @@ export class RoutineScheduler {
       if (!r.enabled) continue
       this.schedule(r)
     }
+    // Shared `calendar_before` poller — one loop for all such routines.
+    if (this.calendarProvider && !this.calBeforeTimer) {
+      this.calBeforeTimer = setInterval(() => {
+        void this.fireCalendarBefore(new Date())
+      }, CAL_BEFORE_POLL_MS)
+    }
   }
 
   /** Re-load schedules (call after a routine is enabled/disabled/edited). */
   reschedule(): void {
     this.stop()
     this.start()
+  }
+
+  /** Pause all scheduled triggers. Returns the new paused state. */
+  pause(): boolean {
+    this.paused = true
+    return this.paused
+  }
+
+  /** Resume scheduled triggers. Returns the new paused state. */
+  resume(): boolean {
+    this.paused = false
+    return this.paused
+  }
+
+  get isPaused(): boolean {
+    return this.paused
   }
 
   /** Manually trigger a routine now (fresh idempotency key — always runs). */
@@ -59,10 +93,67 @@ export class RoutineScheduler {
       }, ms)
       this.pollTimers.set(r.id, timer)
     }
-    // calendar_before (P1) intentionally not implemented.
+    // calendar_before is handled by the shared poller in `start()` — no
+    // per-routine job here.
+  }
+
+  /**
+   * Poll entry point for `calendar_before` triggers (Spec §13.3). For each
+   * enabled routine with a `calendar_before` trigger, list upcoming events and
+   * fire the routine once per event whose start is within the minutesBefore
+   * window (now < start <= now+minutesBefore). The `targetEventId` is passed
+   * into the run so the routine reads THAT event, not "the next one" — keeping
+   * the agent step deterministic (§13.3). Exposed for tests with a fixed `now`.
+   */
+  async fireCalendarBefore(now: Date): Promise<void> {
+    if (this.paused) return
+    if (!this.calendarProvider) return
+    const nowMs = now.getTime()
+    const routines = this.store
+      .listRoutines()
+      .filter((r) => r.enabled && r.trigger.type === 'calendar_before')
+    if (routines.length === 0) return
+
+    let events: CalendarEvent[]
+    try {
+      events = await this.calendarProvider.listEvents({
+        start: now.toISOString(),
+        end: new Date(nowMs + CAL_BEFORE_LOOKAHEAD_MS).toISOString()
+      })
+    } catch (err) {
+      console.error(
+        '[scheduler] calendar_before listEvents failed:',
+        err instanceof Error ? err.message : err
+      )
+      return
+    }
+
+    for (const r of routines) {
+      const minutesBefore = (r.trigger as Extract<RoutineTrigger, { type: 'calendar_before' }>).minutesBefore
+      const windowMs = minutesBefore * 60_000
+      for (const e of events) {
+        const startMs = new Date(e.start).getTime()
+        // Fire once when we are within the minutesBefore window and the event
+        // has not yet started. The idempotency key (event + date) makes a
+        // refire within the same day a no-op.
+        if (startMs > nowMs && startMs - nowMs <= windowMs) {
+          const eventDate = e.start.slice(0, 10) // YYYY-MM-DD
+          const idempotencyKey = `calbefore:${r.id}:${e.eventId}:${eventDate}`
+          try {
+            await this.engine.run(r.id, { idempotencyKey, inputs: { targetEventId: e.eventId } })
+          } catch (err) {
+            console.error(
+              `[scheduler] calendar_before run ${r.id} for ${e.eventId} failed:`,
+              err instanceof Error ? err.message : err
+            )
+          }
+        }
+      }
+    }
   }
 
   private async fire(r: RoutineDefinition, idempotencyKey: string): Promise<void> {
+    if (this.paused) return // M4 context menu: routines are paused.
     try {
       await this.engine.run(r.id, { idempotencyKey })
     } catch (err) {
@@ -90,6 +181,10 @@ export class RoutineScheduler {
     this.cronJobs.clear()
     for (const t of this.pollTimers.values()) clearInterval(t)
     this.pollTimers.clear()
+    if (this.calBeforeTimer) {
+      clearInterval(this.calBeforeTimer)
+      this.calBeforeTimer = undefined
+    }
     this.stopped = true
   }
 

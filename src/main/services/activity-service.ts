@@ -36,6 +36,8 @@ export interface RecordActivityInput {
 }
 
 export class ActivityService {
+  private readonly listeners = new Set<(e: ActivityEvent) => void>()
+
   constructor(private readonly store: RoutineStore) {}
 
   record(input: RecordActivityInput): ActivityEvent {
@@ -48,7 +50,25 @@ export class ActivityService {
       createdAt: nowIso()
     }
     this.store.createActivity(event)
+    // Notify in-process subscribers (M4: the RobotStateController derives live
+    // robot state from the latest activity event). Errors in a listener must
+    // never break a routine run, so they are swallowed + logged.
+    for (const cb of this.listeners) {
+      try {
+        cb(event)
+      } catch (err) {
+        console.error('[activity] subscriber threw:', err instanceof Error ? err.message : err)
+      }
+    }
     return event
+  }
+
+  /** Subscribe to every recorded event. Returns an unsubscribe function. */
+  subscribe(cb: (e: ActivityEvent) => void): () => void {
+    this.listeners.add(cb)
+    return () => {
+      this.listeners.delete(cb)
+    }
   }
 
   list(runId?: string): ActivityEvent[] {

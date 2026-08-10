@@ -5,7 +5,9 @@
 
 import { app, BrowserWindow } from 'electron'
 import { openRobot, openWorkbench } from './windows'
+import { installRobotContextMenu } from './windows/robot-window'
 import { registerIpcHandlers, bootstrapContainer } from './ipc/handlers'
+import { getContainer } from './app/container'
 import { installContentSecurityPolicy } from './security/csp'
 
 // Single-instance lock — the robot is a persistent ambient surface.
@@ -27,11 +29,26 @@ function bootstrap(): void {
   registerIpcHandlers()
   // Persistent robot first (ambient surface), workbench on demand.
   openRobot()
+  // Native right-click context menu on the robot (M4 §18). Actions inject the
+  // container's scheduler + windows so robot-window stays cycle-free.
+  installRobotContextMenu({
+    onPause: () => getContainer().scheduler.pause(),
+    onResume: () => getContainer().scheduler.resume(),
+    onOpenWorkbench: () => openWorkbench(),
+    onQuit: () => app.quit()
+  })
   openWorkbench()
 }
 
 // Electron is ready.
 app.whenReady().then(() => {
+  // E2E isolation: when Playwright sets DAYMATE_USER_DATA, point userData at a
+  // fresh temp dir BEFORE bootstrap reads it (DB + secrets + settings all live
+  // under userData). Spec §21: DB persists in userData; tests must not clobber
+  // the real user profile.
+  if (process.env.DAYMATE_USER_DATA) {
+    app.setPath('userData', process.env.DAYMATE_USER_DATA)
+  }
   bootstrap()
 
   app.on('activate', () => {

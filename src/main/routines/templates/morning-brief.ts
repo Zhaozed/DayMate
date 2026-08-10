@@ -12,8 +12,8 @@ export type RoutineTemplate = z.infer<typeof routineTemplateSchema>
 
 export const morningBriefTemplate: RoutineTemplate = {
   id: 'morning_brief',
-  name: 'Morning Brief',
-  description: 'Summarize today’s important work',
+  name: '晨报',
+  description: '总结今日重要工作',
   version: 1,
   enabled: true,
   trigger: {
@@ -49,11 +49,26 @@ export const morningBriefTemplate: RoutineTemplate = {
       outputKey: 'tasks'
     },
     {
+      id: 'memory',
+      type: 'tool',
+      tool: 'memory.search',
+      args: { query: '' },
+      outputKey: 'memory'
+    },
+    {
       id: 'brief',
       type: 'agent',
       action: 'generate_morning_brief',
-      inputs: { emails: '{{emails}}', events: '{{events}}', tasks: '{{tasks}}' },
+      inputs: { emails: '{{emails}}', events: '{{events}}', tasks: '{{tasks}}', memory: '{{memory}}' },
       outputKey: 'brief'
+    },
+    {
+      id: 'save_memory',
+      type: 'tool',
+      tool: 'memory.save_proposals',
+      args: { proposals: '{{brief.memoryProposals}}' },
+      // A rejected proposal (forbidden content) is logged, never fatal.
+      continueOnError: true
     },
     {
       id: 'create_task',

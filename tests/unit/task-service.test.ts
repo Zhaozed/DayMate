@@ -28,7 +28,7 @@ describe('task service', () => {
   it('rejects invalid status transitions', () => {
     const svc = new TaskService(new InMemoryStore())
     const t = svc.create({ title: 'X', sourceType: 'email' })
-    expect(() => svc.update(t.id, { status: 'need_to_know' })).toThrow(/Invalid task transition/)
+    expect(() => svc.update(t.id, { status: 'need_to_know' })).toThrow(/无效的任务状态转换/)
   })
 
   it('allows valid transitions and completes', () => {

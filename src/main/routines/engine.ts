@@ -20,19 +20,30 @@ import type { ActivityService } from '../services/activity-service'
 import type { TaskService } from '../services/task-service'
 import type { NeedToKnowService } from '../services/need-to-know-service'
 import type { ApprovalService } from '../services/approval-service'
+import type { MemoryService } from '../services/memory-service'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
+import type { BossProvider } from '../providers/boss/boss-provider'
 import type {
   RoutineDefinition,
   RoutineRun,
   RoutineRunStep,
   RoutineStep
 } from '@shared/types'
-import type { MorningBriefOutput } from '../agent/agent-runtime'
-import { runAgentStep } from '../agent/agent-runtime'
+import type { PublishableBrief, AgentRuntime } from '../agent/agent-runtime'
 import { resolveTemplate } from './template'
 import { newId, nowIso } from '../util/ids'
 import { ROUTINE_MAX_STEPS } from '@shared/constants'
+import { routineTemplateSchema } from '@shared/schemas'
+import { PRESET_IDS } from './presets'
+
+/** The only agent actions a custom Routine may reference (Spec §14). */
+const KNOWN_AGENT_ACTIONS = new Set([
+  'generate_morning_brief',
+  'classify_inbox',
+  'generate_meeting_prep',
+  'generate_work_summary'
+])
 
 export interface RunOptions {
   manual?: boolean
@@ -55,8 +66,16 @@ export interface EngineDeps {
   approvalService: ApprovalService
   emailProviders: EmailProvider[]
   calendarProvider: CalendarProvider
-  /** Shared in-process memory (M1 stub; real Memory Service in M5). */
-  memory: Map<string, string>
+  /** BOSS 直聘 provider (boss-cli); single account. */
+  bossProvider: BossProvider
+  /**
+   * The agent runtime that executes `agent` steps (Spec §12: agent reasoning
+   * only inside explicit agent steps). Key-gated: no LLM key → deterministic
+   * stub; key configured → real model via the ModelGateway (M3).
+   */
+  agentRuntime: AgentRuntime
+  /** Explicit, inspectable, deletable memory (Spec §16). */
+  memoryService: MemoryService
   /** Push a notification to the robot surface. */
   notify: (message: string) => void
 }
@@ -71,13 +90,75 @@ export class RoutineEngine {
   constructor(private readonly deps: EngineDeps) {}
 
   /**
+   * Create a custom routine from builder JSON (Spec §14). The def is parsed
+   * against the Routine Schema — a malformed routine is refused, so users can
+   * never inject arbitrary steps ("Users cannot insert arbitrary code" §14).
+   * Preset ids are reserved; a custom routine cannot shadow one.
+   */
+  async createRoutine(def: Omit<RoutineDefinition, 'createdAt' | 'updatedAt'>): Promise<RoutineDefinition> {
+    const parsed = routineTemplateSchema.parse(def) // throws on malformed shape
+    if (PRESET_IDS.includes(parsed.id)) {
+      throw new Error(`无法创建例程：id「${parsed.id}」是受保留的预设 id`)
+    }
+    if (this.deps.store.getRoutine(parsed.id)) {
+      throw new Error(`id 为「${parsed.id}」的例程已存在`)
+    }
+    // Spec §14 "Users cannot insert arbitrary code": constrain every tool /
+    // approval step to a Tool Registry entry. The schema alone accepts any
+    // string toolName; this is the defence-in-depth gate.
+    for (const step of parsed.steps) {
+      const name = step.type === 'tool' ? step.tool : step.type === 'approval' ? step.toolName : undefined
+      if (name && !this.deps.toolRegistry.get(name)) {
+        throw new Error(`步骤 ${step.id} 中存在未知工具：${name}`)
+      }
+      if (step.type === 'agent' && !KNOWN_AGENT_ACTIONS.has(step.action)) {
+        throw new Error(`步骤 ${step.id} 中存在未知智能动作：${step.action}`)
+      }
+    }
+    const now = nowIso()
+    const full: RoutineDefinition = { ...parsed, createdAt: now, updatedAt: now }
+    this.deps.store.saveRoutine(full)
+    this.deps.activityService.record({
+      type: 'routine_started',
+      summary: `已创建自定义例程：${parsed.name}`,
+      metadata: { routineId: parsed.id, custom: true }
+    })
+    return full
+  }
+
+  /**
+   * Delete a custom routine. Preset routines are reserved and cannot be deleted
+   * (M5 §14). A routine with an in-flight run is refused (§20: a paused run
+   * waiting approval must not be orphaned).
+   */
+  async deleteRoutine(routineId: string): Promise<void> {
+    if (PRESET_IDS.includes(routineId)) {
+      throw new Error(`无法删除预设例程：${routineId}`)
+    }
+    const existing = this.deps.store.getRoutine(routineId)
+    if (!existing) return // idempotent
+    const inflight = this.deps.store
+      .listRuns(routineId)
+      .find((r) => r.status === 'running' || r.status === 'waiting_approval')
+    if (inflight) {
+      throw new Error(`无法删除例程 ${routineId}：存在 ${inflight.status} 状态的运行`)
+    }
+    this.deps.store.deleteRoutine(routineId)
+    this.deps.activityService.record({
+      type: 'routine_completed',
+      summary: `已删除自定义例程：${existing.name}`,
+      metadata: { routineId, deleted: true }
+    })
+  }
+
+  /**
    * Run a Routine. Idempotent by `idempotencyKey`: a second call with the same
    * key returns the existing run and does NOT re-execute (Spec §12.6).
    */
   async run(routineId: string, opts: RunOptions = {}): Promise<RoutineRun> {
     const routine = this.deps.store.getRoutine(routineId)
-    if (!routine) throw new Error(`Routine not found: ${routineId}`)
-    if (!routine.enabled) throw new Error(`Routine is disabled: ${routineId}`)
+    if (!routine) throw new Error(`未找到例程：${routineId}`)
+    if (!routine.enabled) throw new Error(`例程已禁用：${routineId}`)
 
     const idempotencyKey = opts.idempotencyKey ?? this.makeManualKey(routineId)
     const existing = this.deps.store.getRunByIdempotencyKey(idempotencyKey)
@@ -104,7 +185,7 @@ export class RoutineEngine {
     this.deps.activityService.record({
       runId,
       type: 'routine_started',
-      summary: `Routine started: ${routine.name}`,
+      summary: `例程已启动：${routine.name}`,
       metadata: { routineId, trigger: run.triggerType, idempotencyKey }
     })
 
@@ -123,31 +204,35 @@ export class RoutineEngine {
    */
   async resume(runId: string, opts: ResumeOptions): Promise<RoutineRun> {
     const run = this.deps.store.getRun(runId)
-    if (!run) throw new Error(`Run not found: ${runId}`)
-    if (run.status !== 'waiting_approval') throw new Error(`Run is not paused: ${run.status}`)
+    if (!run) throw new Error(`未找到运行：${runId}`)
+    if (run.status !== 'waiting_approval') throw new Error(`运行未暂停：${run.status}`)
     const routine = this.deps.store.getRoutine(run.routineId)
-    if (!routine) throw new Error(`Routine not found: ${run.routineId}`)
+    if (!routine) throw new Error(`未找到例程：${run.routineId}`)
 
     const startIndex = routine.steps.findIndex((s) => s.id === run.currentStepId)
-    if (startIndex < 0) throw new Error(`Cannot resume: current step ${run.currentStepId} not found`)
+    if (startIndex < 0) throw new Error(`无法恢复：找不到当前步骤 ${run.currentStepId}`)
 
     // Spec §15: verify the approval is approved AND the content is unchanged.
     const approval = this.deps.approvalService.get(opts.approval.requestId)
-    if (!approval) throw new Error(`Approval not found: ${opts.approval.requestId}`)
+    if (!approval) throw new Error(`未找到审批：${opts.approval.requestId}`)
     if (approval.routineRunId && approval.routineRunId !== runId) {
-      throw new Error(`Approval does not belong to run ${runId}`)
+      throw new Error(`审批不属于运行 ${runId}`)
     }
     if (approval.status !== 'approved') {
-      throw new Error(`Approval is not approved: ${approval.status}`)
+      throw new Error(`审批未获批准：${approval.status}`)
     }
     const step = routine.steps[startIndex]
-    const resolvedArgs = this.resolveStepArgs(step)
+    // Re-resolve the step's templated args against the run's persisted
+    // stepOutputs — the same outputs that produced them at preview time. They
+    // are stable across pause/resume (earlier steps don't re-run), so the hash
+    // matches unless something genuinely changed (Spec §15).
+    const resolvedArgs = this.resolveStepArgs(step, run)
     if (!this.deps.approvalService.verifyContent(approval, resolvedArgs)) {
-      this.fail(run, `Content changed since approval preview — refusing to execute ${approval.toolName}`)
+      this.fail(run, `审批内容自预览后已变更 —— 拒绝执行 ${approval.toolName}`)
       this.deps.activityService.record({
         runId,
         type: 'approval_resolved',
-        summary: `Approval content mismatch — execution refused`,
+        summary: `审批内容不一致 — 拒绝执行`,
         metadata: { requestId: approval.id, tool: approval.toolName }
       })
       const failed = this.deps.store.getRun(runId)
@@ -157,7 +242,7 @@ export class RoutineEngine {
     this.deps.activityService.record({
       runId,
       type: 'approval_resolved',
-      summary: `Resuming run after approval at step "${run.currentStepId}"`,
+      summary: `审批后从步骤「${run.currentStepId}」恢复运行`,
       metadata: { requestId: opts.approval.requestId }
     })
 
@@ -173,8 +258,8 @@ export class RoutineEngine {
    */
   async cancelPausedRun(runId: string): Promise<RoutineRun> {
     const run = this.deps.store.getRun(runId)
-    if (!run) throw new Error(`Run not found: ${runId}`)
-    if (run.status !== 'waiting_approval') throw new Error(`Run is not paused: ${run.status}`)
+    if (!run) throw new Error(`未找到运行：${runId}`)
+    if (run.status !== 'waiting_approval') throw new Error(`运行未暂停：${run.status}`)
     this.deps.store.updateRun(runId, {
       status: 'cancelled',
       completedAt: nowIso(),
@@ -183,7 +268,7 @@ export class RoutineEngine {
     this.deps.activityService.record({
       runId,
       type: 'approval_resolved',
-      summary: `Run cancelled — approval rejected`,
+      summary: `运行已取消 — 审批被拒绝`,
       metadata: { stepId: run.currentStepId }
     })
     const finalRun = this.deps.store.getRun(runId)
@@ -269,9 +354,20 @@ export class RoutineEngine {
     this.deps.activityService.record({
       runId: run.id,
       type: 'routine_completed',
-      summary: `Routine completed: ${routine.name}`,
+      summary: `例程已完成：${routine.name}`,
       metadata: { routineId: routine.id, steps: steps.length }
     })
+  }
+
+  /**
+   * The template-resolution context for a run: run inputs as the base layer,
+   * overlaid by accumulated step outputs. This lets a trigger pass context
+   * (e.g. the scheduler hands Meeting Prep the target `targetEventId`) that
+   * steps can reference via `{{targetEventId}}`, exactly like step outputs.
+   * stepOutputs take precedence over inputs on key collision.
+   */
+  private ctx(run: RoutineRun): Record<string, unknown> {
+    return { ...run.inputs, ...run.stepOutputs }
   }
 
   private buildContext(run: RoutineRun, approval?: { requestId: string }): ToolContext {
@@ -280,19 +376,25 @@ export class RoutineEngine {
       routineRunId: run.id,
       emailProviders: this.deps.emailProviders,
       calendarProvider: this.deps.calendarProvider,
+      bossProvider: this.deps.bossProvider,
       taskService: this.deps.taskService,
       needToKnowService: this.deps.needToKnowService,
       activityService: this.deps.activityService,
-      memory: this.deps.memory,
+      memoryService: this.deps.memoryService,
       notify: this.deps.notify,
       approval
     }
   }
 
-  /** Resolve a step's tool args against accumulated step outputs (for hashing). */
-  private resolveStepArgs(step: RoutineStep): Record<string, unknown> {
-    if (step.type === 'tool') return resolveTemplate(step.args ?? {}, {}) as Record<string, unknown>
-    if (step.type === 'approval') return resolveTemplate(step.args, {}) as Record<string, unknown>
+  /**
+   * Resolve a step's tool args against the run's accumulated step outputs (for
+   * content-hash verification on resume). Must use the same outputs that
+   * produced the args at preview time, so templated args (`{{gmailEmails[0].…}}`)
+   * hash identically before and after the pause (Spec §15).
+   */
+  private resolveStepArgs(step: RoutineStep, run: RoutineRun): Record<string, unknown> {
+    if (step.type === 'tool') return resolveTemplate(step.args ?? {}, this.ctx(run)) as Record<string, unknown>
+    if (step.type === 'approval') return resolveTemplate(step.args, this.ctx(run)) as Record<string, unknown>
     return {}
   }
 
@@ -309,7 +411,7 @@ export class RoutineEngine {
     result: Extract<ToolResult, { status: 'needs_approval' }>,
     resolvedArgs: Record<string, unknown>
   ): StepOutcome {
-    const title = step.type === 'approval' ? step.title : `Approve: ${toolName}`
+    const title = step.type === 'approval' ? step.title : `批准：${toolName}`
     const request = this.deps.approvalService.create({
       routineRunId: run.id,
       toolCallId: result.toolCallId,
@@ -322,7 +424,7 @@ export class RoutineEngine {
     this.deps.activityService.record({
       runId: run.id,
       type: 'approval_requested',
-      summary: `Approval required for ${toolName} (risk ${result.risk})`,
+      summary: `${toolName} 需要审批（风险等级 ${result.risk}）`,
       metadata: { tool: toolName, toolCallId: result.toolCallId, stepId: step.id, requestId: request.id }
     })
     return { output: undefined, paused: true }
@@ -345,16 +447,16 @@ export class RoutineEngine {
       case 'notify':
         return { output: this.execNotifyStep(step, run, ctx) }
       default:
-        throw new Error(`Unknown step type: ${(step as { type: string }).type}`)
+        throw new Error(`未知步骤类型：${(step as { type: string }).type}`)
     }
   }
 
   private async execToolStep(step: Extract<RoutineStep, { type: 'tool' }>, run: RoutineRun, ctx: ToolContext): Promise<StepOutcome> {
-    const args = resolveTemplate(step.args ?? {}, run.stepOutputs)
+    const args = resolveTemplate(step.args ?? {}, this.ctx(run))
     this.deps.activityService.record({
       runId: run.id,
       type: 'tool_requested',
-      summary: `Tool: ${step.tool}`,
+      summary: `工具：${step.tool}`,
       metadata: { tool: step.tool, stepId: step.id }
     })
     const result: ToolResult = await this.deps.toolRegistry.execute(step.tool, args, ctx)
@@ -364,31 +466,65 @@ export class RoutineEngine {
       return this.pauseForApproval(run, step, step.tool, result, args as Record<string, unknown>)
     }
     if (result.status === 'error') {
+      // Spec M3 partial-failure: a step marked `continueOnError` (e.g. an
+      // email.list against a down provider) records a `provider_unavailable`
+      // outage, stores `undefined`, and lets the run continue with the other
+      // providers. Without the flag, the step fails the run (Spec §12.8/§12.9).
+      if (step.continueOnError) {
+        this.deps.activityService.record({
+          runId: run.id,
+          type: 'provider_unavailable',
+          summary: `提供方不可用：${step.tool} — ${result.error}`,
+          metadata: { tool: step.tool, stepId: step.id, error: result.error }
+        })
+        return { output: undefined }
+      }
       throw new Error(result.error)
     }
     this.deps.activityService.record({
       runId: run.id,
       type: 'tool_completed',
-      summary: `Tool completed: ${step.tool}`,
+      summary: `工具完成：${step.tool}`,
       metadata: { tool: step.tool, stepId: step.id }
     })
     return { output: result.data }
   }
 
   private async execAgentStep(step: Extract<RoutineStep, { type: 'agent' }>, run: RoutineRun): Promise<StepOutcome> {
-    const inputs = resolveTemplate(step.inputs ?? {}, run.stepOutputs)
+    const inputs = resolveTemplate(step.inputs ?? {}, this.ctx(run))
     this.deps.activityService.record({
       runId: run.id,
       type: 'agent_started',
-      summary: `Agent action: ${step.action}`,
+      summary: `智能动作：${step.action}`,
       metadata: { action: step.action, stepId: step.id }
     })
-    const output = await runAgentStep(step.action, inputs as Record<string, unknown>)
-    return { output }
+    try {
+      const output = await this.deps.agentRuntime.runAgentStep(
+        step.action,
+        inputs as Record<string, unknown>,
+        run.id
+      )
+      this.deps.activityService.record({
+        runId: run.id,
+        type: 'agent_completed',
+        summary: `智能步骤完成：${step.action}`,
+        metadata: { action: step.action, stepId: step.id }
+      })
+      return { output }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      this.deps.activityService.record({
+        runId: run.id,
+        type: 'agent_failed',
+        summary: `智能步骤失败：${step.action} — ${message}`,
+        metadata: { action: step.action, stepId: step.id, error: message }
+      })
+      throw err
+    }
   }
 
   private execConditionStep(step: Extract<RoutineStep, { type: 'condition' }>, run: RoutineRun): unknown {
-    const resolved = resolveTemplate(step.expression, run.stepOutputs)
+    const resolved = resolveTemplate(step.expression, this.ctx(run))
     const truthy =
       resolved === 'true' ||
       (resolved !== false &&
@@ -401,11 +537,11 @@ export class RoutineEngine {
   }
 
   private execCreateTaskStep(step: Extract<RoutineStep, { type: 'create_task' }>, run: RoutineRun): unknown {
-    const title = resolveTemplate(step.title, run.stepOutputs)
-    const sourceId = step.sourceId ? resolveTemplate(step.sourceId, run.stepOutputs) : undefined
+    const title = resolveTemplate(step.title, this.ctx(run))
+    const sourceId = step.sourceId ? resolveTemplate(step.sourceId, this.ctx(run)) : undefined
     const task = this.deps.taskService.create({
       title: String(title),
-      description: step.description ? String(resolveTemplate(step.description, run.stepOutputs)) : undefined,
+      description: step.description ? String(resolveTemplate(step.description, this.ctx(run))) : undefined,
       priority: step.priority,
       dueAt: step.dueAt,
       sourceType: 'routine',
@@ -415,7 +551,7 @@ export class RoutineEngine {
     this.deps.activityService.record({
       runId: run.id,
       type: 'tool_completed',
-      summary: `Created task: ${task.title}`,
+      summary: `已创建任务：${task.title}`,
       metadata: { taskId: task.id, stepId: step.id }
     })
     return task
@@ -423,7 +559,7 @@ export class RoutineEngine {
 
   private execNeedToKnowStep(step: Extract<RoutineStep, { type: 'need_to_know' }>, run: RoutineRun): unknown {
     if (step.fromKey) {
-      const brief = resolveTemplate(`{{${step.fromKey}}}`, run.stepOutputs) as MorningBriefOutput | undefined
+      const brief = resolveTemplate(`{{${step.fromKey}}}`, this.ctx(run)) as PublishableBrief | undefined
       if (brief) {
         const item = this.deps.needToKnowService.create({
           title: brief.title,
@@ -437,16 +573,16 @@ export class RoutineEngine {
         this.deps.activityService.record({
           runId: run.id,
           type: 'tool_completed',
-          summary: `Published Need to Know: ${item.title}`,
+          summary: `已发布必读：${item.title}`,
           metadata: { needToKnowId: item.id, stepId: step.id }
         })
         return item
       }
     }
     const item = this.deps.needToKnowService.create({
-      title: step.title ? String(resolveTemplate(step.title, run.stepOutputs)) : 'Untitled',
-      summary: step.summary ? String(resolveTemplate(step.summary, run.stepOutputs)) : '',
-      reason: step.reason ? String(resolveTemplate(step.reason, run.stepOutputs)) : '',
+      title: step.title ? String(resolveTemplate(step.title, this.ctx(run))) : 'Untitled',
+      summary: step.summary ? String(resolveTemplate(step.summary, this.ctx(run))) : '',
+      reason: step.reason ? String(resolveTemplate(step.reason, this.ctx(run))) : '',
       priority: step.priority
     })
     return item
@@ -457,7 +593,7 @@ export class RoutineEngine {
     // ctx.approval) the registry returns needs_approval; we create the
     // ApprovalRequest and pause. On resume (ctx.approval set) the gate passes
     // and the action executes; executeFrom then marks the request executed.
-    const args = resolveTemplate(step.args, run.stepOutputs)
+    const args = resolveTemplate(step.args, this.ctx(run))
     const result = await this.deps.toolRegistry.execute(step.toolName, args, ctx)
     if (result.status === 'needs_approval') {
       return this.pauseForApproval(run, step, step.toolName, result, args as Record<string, unknown>)
@@ -467,14 +603,14 @@ export class RoutineEngine {
   }
 
   private execNotifyStep(step: Extract<RoutineStep, { type: 'notify' }>, run: RoutineRun, ctx: ToolContext): unknown {
-    const message = step.message ? String(resolveTemplate(step.message, run.stepOutputs)) : 'Daymate update'
+    const message = step.message ? String(resolveTemplate(step.message, this.ctx(run))) : 'Daymate update'
     if (step.channel === 'desktop_robot') {
       ctx.notify(message)
     }
     this.deps.activityService.record({
       runId: run.id,
       type: 'tool_completed',
-      summary: `Notified (${step.channel}): ${message}`,
+      summary: `已通知（${step.channel}）：${message}`,
       metadata: { channel: step.channel, stepId: step.id }
     })
     return { notified: true }
@@ -490,7 +626,7 @@ export class RoutineEngine {
     this.deps.activityService.record({
       runId: run.id,
       type: 'routine_failed',
-      summary: `Routine failed: ${message}`,
+      summary: `例程失败：${message}`,
       metadata: { routineId: run.routineId, error: message }
     })
   }

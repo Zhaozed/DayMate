@@ -1,13 +1,25 @@
 import { describe, it, expect } from 'vitest'
 import { routineTemplateSchema, routineDefinitionSchema } from '@shared/schemas'
 import { morningBriefTemplate } from '../../src/main/routines/templates/morning-brief'
+import { autoInboxTemplate } from '../../src/main/routines/templates/auto-inbox'
+import { draftReviewTemplate } from '../../src/main/routines/templates/draft-review'
 import { nowIso } from '../../src/main/util/ids'
 
 describe('routine schema', () => {
   it('accepts the Morning Brief template', () => {
     const parsed = routineTemplateSchema.parse(morningBriefTemplate)
     expect(parsed.id).toBe('morning_brief')
-    expect(parsed.steps.length).toBe(7)
+    // 9 steps: emails, events, tasks, memory(search), brief, save_memory,
+    // create_task, publish, notify.
+    expect(parsed.steps.length).toBe(9)
+  })
+
+  it('accepts every seeded preset (a malformed preset must fail loudly)', () => {
+    // seedPresets parses each against this schema; guard the full set here so a
+    // typo in any preset breaks CI at the schema layer (Spec §12, rule 5).
+    for (const template of [morningBriefTemplate, autoInboxTemplate, draftReviewTemplate]) {
+      expect(() => routineTemplateSchema.parse(template)).not.toThrow()
+    }
   })
 
   it('accepts a full RoutineDefinition with timestamps', () => {

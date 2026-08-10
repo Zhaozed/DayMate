@@ -14,7 +14,10 @@ import type {
   Task,
   NeedToKnow,
   ActivityEvent,
-  ApprovalRequest
+  ApprovalRequest,
+  MemoryItem,
+  Application,
+  ApplicationEvent
 } from '@shared/types'
 
 export interface RoutineStore {
@@ -23,6 +26,7 @@ export interface RoutineStore {
   getRoutine(id: string): RoutineDefinition | undefined
   saveRoutine(def: RoutineDefinition): void
   setRoutineEnabled(id: string, enabled: boolean): RoutineDefinition | undefined
+  deleteRoutine(id: string): void
 
   // Routine runs
   createRun(run: RoutineRun): void
@@ -56,4 +60,26 @@ export interface RoutineStore {
   getApproval(id: string): ApprovalRequest | undefined
   listApprovals(pendingOnly?: boolean): ApprovalRequest[]
   updateApprovalStatus(id: string, status: ApprovalRequest['status'], resolvedAt: string): ApprovalRequest | undefined
+
+  // Memory (Spec §16)
+  createMemory(item: MemoryItem): void
+  getMemory(id: string): MemoryItem | undefined
+  listMemory(): MemoryItem[]
+  updateMemory(id: string, patch: Partial<MemoryItem>): MemoryItem | undefined
+  deleteMemory(id: string): void
+  /** Delete every memory item for a key (used when confirming a revision). */
+  deleteMemoryByKey(key: string): void
+
+  // Job applications (boss-cli integration) — the cross-channel funnel.
+  // Applications are upserted by `bossSecurityId` on boss sync; manual entries
+  // have no securityId. Events are idempotent by `sourceRef` (emailId/bossChatId).
+  createApplication(app: Application): void
+  getApplication(id: string): Application | undefined
+  getApplicationByBossSecurityId(securityId: string): Application | undefined
+  listApplications(): Application[]
+  updateApplication(id: string, patch: Partial<Application>): Application | undefined
+
+  createApplicationEvent(event: ApplicationEvent): void
+  getApplicationEventBySourceRef(applicationId: string, sourceRef: string): ApplicationEvent | undefined
+  listApplicationEvents(applicationId: string): ApplicationEvent[]
 }

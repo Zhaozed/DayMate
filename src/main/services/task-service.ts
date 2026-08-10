@@ -65,12 +65,12 @@ export class TaskService {
 
   update(id: string, patch: TaskUpdate): Task {
     const existing = this.store.getTask(id)
-    if (!existing) throw new Error(`Task not found: ${id}`)
+    if (!existing) throw new Error(`未找到任务：${id}`)
     if (patch.status && !isAllowedTransition(existing.status, patch.status)) {
-      throw new Error(`Invalid task transition: ${existing.status} -> ${patch.status}`)
+      throw new Error(`无效的任务状态转换：${existing.status} -> ${patch.status}`)
     }
     const updated = this.store.updateTask(id, patch)
-    if (!updated) throw new Error(`Task update failed: ${id}`)
+    if (!updated) throw new Error(`任务更新失败：${id}`)
     return updated
   }
 

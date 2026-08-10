@@ -1,27 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import type { ReactElement } from 'react'
 import type { ApprovalRequest } from '@shared/types'
+import { useAsync } from '../hooks/useAsync'
+import { Loading, EmptyState, ErrorState } from '../components/states'
+import { APPROVAL_STATUS_LABEL, statusLabel } from '../labels'
 
 // Approval Center (Spec §18). Pending requests first, with full preview
 // (recipients / subject / body / source). Approve → the gated action runs;
 // Reject → the run is cancelled and nothing is sent (Spec §15). Expired
 // requests are disabled; executed ones show their result.
 export function ApprovalsPage(): ReactElement {
-  const [approvals, setApprovals] = useState<ApprovalRequest[]>([])
+  const { data: approvals, loading, error, setData, refetch } = useAsync<ApprovalRequest[]>(
+    () => window.daymate.listApprovals()
+  )
 
-  const refresh = async (): Promise<void> => {
-    try {
-      setApprovals(await window.daymate.listApprovals())
-    } catch (err) {
-      console.error(err)
-    }
-  }
-
+  // Live push: main re-sends the full list whenever an approval changes.
   useEffect(() => {
-    void refresh()
-    const off = window.daymate.onApprovalChanged(() => void refresh())
-    return off
-  }, [])
+    return window.daymate.onApprovalChanged((next) => setData(next))
+  }, [setData])
 
   const approve = async (id: string): Promise<void> => {
     try {
@@ -29,7 +25,7 @@ export function ApprovalsPage(): ReactElement {
     } catch (err) {
       console.error(err)
     }
-    void refresh()
+    refetch()
   }
 
   const reject = async (id: string): Promise<void> => {
@@ -38,21 +34,25 @@ export function ApprovalsPage(): ReactElement {
     } catch (err) {
       console.error(err)
     }
-    void refresh()
+    refetch()
   }
 
-  const pending = approvals.filter((a) => a.status === 'pending')
-  const resolved = approvals.filter((a) => a.status !== 'pending')
+  if (loading) return <Loading label="正在加载审批…" />
+  if (error) return <ErrorState message={error.message} onRetry={refetch} />
+
+  const list = approvals ?? []
+  const pending = list.filter((a) => a.status === 'pending')
+  const resolved = list.filter((a) => a.status !== 'pending')
 
   return (
     <div>
-      <h1 className="text-xl font-semibold text-white">Approvals</h1>
+      <h1 className="text-xl font-semibold text-white">审批</h1>
       <p className="mt-1 text-sm text-white/45">
-        Every external write needs your sign-off. Nothing sends until you approve.
+        每个外部写入都需要你确认。在你批准之前，什么都不会发出。
       </p>
 
       {pending.length === 0 ? (
-        <p className="mt-6 text-sm text-white/40">No pending approvals.</p>
+        <EmptyState title="无待审批" hint="外部写入会在此暂停，等你确认。" />
       ) : (
         <div className="mt-6 space-y-3">
           {pending.map((a) => (
@@ -63,7 +63,7 @@ export function ApprovalsPage(): ReactElement {
 
       {resolved.length > 0 && (
         <section className="mt-8">
-          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/40">Resolved</h2>
+          <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/40">已处理</h2>
           <div className="space-y-2">
             {resolved.slice(0, 20).map((a) => (
               <div
@@ -73,7 +73,9 @@ export function ApprovalsPage(): ReactElement {
               >
                 <span className="text-xs text-white/50">{a.toolName}</span>
                 <span className="flex-1 truncate text-sm text-white/70">{a.title}</span>
-                <span className={`text-xs ${statusColor(a.status)}`}>{a.status}</span>
+                <span className={`text-xs ${statusColor(a.status)}`}>
+                  {statusLabel(APPROVAL_STATUS_LABEL, a.status)}
+                </span>
               </div>
             ))}
           </div>
@@ -109,18 +111,18 @@ function ApprovalCard({
       <div className="mt-3 space-y-1 text-sm text-white/70">
         {to.length > 0 && (
           <div>
-            <span className="text-white/40">To: </span>
+            <span className="text-white/40">收件人：</span>
             {to.map((r) => r.name ?? r.address).join(', ')}
           </div>
         )}
         {subject && (
           <div>
-            <span className="text-white/40">Subject: </span>
+            <span className="text-white/40">主题：</span>
             {subject}
           </div>
         )}
         {draftId && (
-          <div className="text-xs text-white/35">draft: {draftId}</div>
+          <div className="text-xs text-white/35">草稿：{draftId}</div>
         )}
         {body && (
           <pre className="mt-2 whitespace-pre-wrap rounded bg-black/20 p-2 text-xs text-white/60">{body}</pre>
@@ -132,13 +134,13 @@ function ApprovalCard({
           onClick={() => onApprove(approval.id)}
           className="rounded bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600"
         >
-          Approve & send
+          批准并发送
         </button>
         <button
           onClick={() => onReject(approval.id)}
           className="rounded bg-white/5 px-3 py-1.5 text-xs text-white/70 hover:bg-white/10"
         >
-          Reject
+          拒绝
         </button>
       </div>
     </div>

@@ -3,7 +3,9 @@ import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ActivityService } from '../../src/main/services/activity-service'
 import { TaskService } from '../../src/main/services/task-service'
 import { NeedToKnowService } from '../../src/main/services/need-to-know-service'
+import { MemoryService } from '../../src/main/services/memory-service'
 import { createToolRegistry } from '../../src/main/agent/tool-registry'
+import { createDeterministicAgentRuntime } from '../../src/main/agent/agent-runtime'
 import { RoutineEngine, type EngineDeps } from '../../src/main/routines/engine'
 import { seedPresets } from '../../src/main/routines/presets'
 import { ApprovalService } from '../../src/main/services/approval-service'
@@ -24,7 +26,8 @@ function buildEngine(): { engine: RoutineEngine; store: InMemoryStore; deps: Eng
     approvalService: new ApprovalService(store),
     emailProviders: [new MockEmailProvider()],
     calendarProvider: new MockCalendarProvider(),
-    memory: new Map(),
+    agentRuntime: createDeterministicAgentRuntime(),
+    memoryService: new MemoryService(store),
     notify: () => {}
   }
   return { engine: new RoutineEngine(deps), store, deps }
@@ -39,13 +42,14 @@ describe('routine engine — Morning Brief end to end', () => {
     expect(run.status).toBe('completed')
 
     const activity = store.listActivity(run.id)
-    // routine_started, 3× (tool_requested+tool_completed), agent_started,
-    // create_task completed, need_to_know completed, notify completed, routine_completed.
+    // routine_started, 5× (tool_requested+tool_completed: email.list, calendar.list,
+    // task.list, memory.search, memory.save_proposals), agent_started, create_task
+    // completed, need_to_know completed, notify completed, routine_completed.
     const types = activity.map((e) => e.type)
     expect(types).toContain('routine_started')
     expect(types).toContain('routine_completed')
-    expect(types.filter((t) => t === 'tool_requested').length).toBe(3)
-    expect(types.filter((t) => t === 'tool_completed').length).toBeGreaterThanOrEqual(4)
+    expect(types.filter((t) => t === 'tool_requested').length).toBe(5)
+    expect(types.filter((t) => t === 'tool_completed').length).toBeGreaterThanOrEqual(6)
     expect(types).toContain('agent_started')
 
     // A Task was created from the brief's suggested action.
@@ -58,6 +62,13 @@ describe('routine engine — Morning Brief end to end', () => {
     const ntk = store.listNeedToKnow()
     expect(ntk.length).toBe(1)
     expect(ntk[0].sourceRefs.length).toBeGreaterThan(0)
+
+    // A passive memory proposal landed from the brief (§16): the priority
+    // sender became a proposed (NOT yet confirmed) `contact` entry.
+    const memory = store.listMemory()
+    const proposed = memory.filter((m) => !m.confirmed)
+    expect(proposed.length).toBeGreaterThan(0)
+    expect(proposed.some((m) => m.key === 'contact' && m.value.includes('alice@example.com'))).toBe(true)
   })
 
   it('is idempotent: a second run with the same key is a no-op and does not duplicate Tasks', async () => {

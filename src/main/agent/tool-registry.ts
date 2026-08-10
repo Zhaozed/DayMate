@@ -14,14 +14,16 @@
 // Service (Spec §11).
 
 import { z } from 'zod'
-import type { RiskLevel } from '@shared/types'
+import type { RiskLevel, MemoryKey } from '@shared/types'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
+import type { BossProvider } from '../providers/boss/boss-provider'
 import type { TaskService } from '../services/task-service'
 import type { NeedToKnowService } from '../services/need-to-know-service'
 import type { ActivityService } from '../services/activity-service'
+import type { MemoryService } from '../services/memory-service'
 import { newId } from '../util/ids'
-import { taskPrioritySchema, taskStatusSchema, classificationSchema } from '@shared/schemas'
+import { taskPrioritySchema, taskStatusSchema, classificationSchema, memoryKeySchema } from '@shared/schemas'
 
 export interface ToolContext {
   runId?: string
@@ -29,11 +31,13 @@ export interface ToolContext {
   /** All connected email providers; email tools select by `accountId` (Spec §9). */
   emailProviders: EmailProvider[]
   calendarProvider: CalendarProvider
+  /** BOSS 直聘 provider (boss-cli); single account, no accountId selection. */
+  bossProvider: BossProvider
   taskService: TaskService
   needToKnowService: NeedToKnowService
   activityService: ActivityService
-  /** M1 in-process memory stub (real Memory Service is M5). */
-  memory: Map<string, string>
+  /** Explicit, inspectable, deletable memory (Spec §16). */
+  memoryService: MemoryService
   notify: (message: string) => void
   /** Present only when executing an already-approved action (M2). */
   approval?: { requestId: string }
@@ -102,7 +106,7 @@ export class ToolRegistry {
       ctx.activityService.record({
         runId: ctx.runId,
         type: 'approval_requested',
-        summary: `Approval requested for ${name}`,
+        summary: `${name} 需要审批`,
         metadata: { tool: name, risk: tool.risk, toolCallId }
       })
       return {
@@ -121,7 +125,7 @@ export class ToolRegistry {
       ctx.activityService.record({
         runId: ctx.runId,
         type: 'tool_failed',
-        summary: `${name} failed: ${message}`,
+        summary: `${name} 失败：${message}`,
         metadata: { tool: name, error: message }
       })
       return { status: 'error', error: message }
@@ -171,6 +175,29 @@ export function createToolRegistry(): ToolRegistry {
       const a = args as { accountId?: string; unreadOnly?: boolean; sinceHours?: number; limit?: number }
       const provider = emailProviderFor(ctx, a.accountId)
       const items = await provider.listMessages(a)
+      return { status: 'ok', data: items }
+    }
+  })
+
+  // The user's OWN sent mail — the prior-reply tone corpus for draft-mirroring
+  // (Spec §13.5). Read-only (R0): sent mail is the user's voice, the opposite
+  // of §17-untrusted inbound mail; it is only ever a tone reference, never an
+  // instruction source, and never sent anywhere without a separate approval.
+  registry.register({
+    name: 'email.list_sent',
+    description: "List the user's own sent mail as a tone corpus for draft-mirroring (Spec §13.5). Read-only.",
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({
+      accountId: z.string().optional(),
+      toAddress: z.string().optional(),
+      sinceHours: z.number().optional(),
+      limit: z.number().optional()
+    }),
+    async execute(args, ctx) {
+      const a = args as { accountId?: string; toAddress?: string; sinceHours?: number; limit?: number }
+      const provider = emailProviderFor(ctx, a.accountId)
+      const items = await provider.listSent(a)
       return { status: 'ok', data: items }
     }
   })
@@ -369,7 +396,7 @@ export function createToolRegistry(): ToolRegistry {
         // Ignore / untrusted items never produce a Task (Spec §17).
         if (c.classification === 'ignore' || c.untrusted) continue
         const task = ctx.taskService.create({
-          title: `${c.classification === 'follow_up' ? 'Follow up' : 'Reply'}: ${c.suggestedAction?.label ?? c.messageId}`,
+          title: `${c.classification === 'follow_up' ? '跟进' : '回复'}：${c.suggestedAction?.label ?? c.messageId}`,
           sourceType: 'email',
           sourceId: `${c.provider}:${c.messageId}`,
           priority: c.classification === 'follow_up' ? 'high' : 'medium',
@@ -381,46 +408,98 @@ export function createToolRegistry(): ToolRegistry {
     }
   })
 
-  // ── Memory (R0/R1; real Memory Service is M5) ─────────────────────────────
+  // ── Memory (Spec §16) — search = R0; save/delete = R1 (local writes) ──────
+  // memory.save lands a PROPOSED item (confirmed:false); the user confirms it
+  // in the Memory page. It is never active until confirmed. Forbidden content
+  // (tokens, full email bodies, inferred traits …) is rejected by the service.
   registry.register({
     name: 'memory.search',
-    description: 'Search saved memory entries (M1 stub).',
+    description: 'Search confirmed memory entries by free-text query.',
     risk: 'R0',
     requiresApproval: false,
     parameters: z.object({ query: z.string() }),
     async execute(args, ctx) {
-      const q = (args as { query: string }).query.toLowerCase()
-      const out: Record<string, string> = {}
-      for (const [k, v] of ctx.memory) {
-        if (k.toLowerCase().includes(q) || v.toLowerCase().includes(q)) out[k] = v
-      }
-      return { status: 'ok', data: out }
+      const q = (args as { query: string }).query
+      const items = ctx.memoryService.search(q)
+      return { status: 'ok', data: items }
     }
   })
 
   registry.register({
     name: 'memory.save',
-    description: 'Save a memory entry (M1 stub; real confirmation flow in M5).',
+    description:
+      'Propose a memory entry. Lands as proposed (not active) until the user confirms it (Spec §16).',
     risk: 'R1',
     requiresApproval: false,
-    parameters: z.object({ key: z.string(), value: z.string() }),
+    parameters: z.object({
+      key: memoryKeySchema,
+      value: z.string().min(1).max(2000)
+    }),
     async execute(args, ctx) {
-      const a = args as { key: string; value: string }
-      ctx.memory.set(a.key, a.value)
-      return { status: 'ok', data: { key: a.key } }
+      const a = args as { key: MemoryKey; value: string }
+      const item = ctx.memoryService.save({
+        key: a.key,
+        value: a.value,
+        source: 'agent',
+        routineRunId: ctx.routineRunId
+      })
+      return { status: 'ok', data: { id: item.id, key: item.key, confirmed: item.confirmed } }
+    }
+  })
+
+  // Save a batch of passive memory proposals from an agent step (Spec §16 —
+  // "town"-style: agent proposes, user confirms). Each proposal loops through
+  // MemoryService.save → confirmed:false. Per-item try/catch: a rejected item
+  // (validateMemoryContent throws on a secret / full email body / forbidden
+  // inferred trait) becomes a logged Activity, never fails the run. R0: these
+  // are local proposed-only writes, not external actions.
+  registry.register({
+    name: 'memory.save_proposals',
+    description:
+      'Save a batch of passive memory proposals (Spec §16). Each lands proposed (confirmed:false) for the user to confirm. Per-item failures are logged, not fatal.',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({
+      proposals: z.array(z.object({ key: memoryKeySchema, value: z.string().min(1).max(2000) })).optional().default([])
+    }),
+    async execute(args, ctx) {
+      const a = args as { proposals?: Array<{ key: MemoryKey; value: string }> }
+      const proposals = a.proposals ?? []
+      const saved: { id: string; key: MemoryKey; confirmed: boolean }[] = []
+      const rejected: { key: string; reason: string }[] = []
+      for (const p of proposals) {
+        try {
+          const item = ctx.memoryService.save({
+            key: p.key,
+            value: p.value,
+            source: 'agent',
+            routineRunId: ctx.routineRunId
+          })
+          saved.push({ id: item.id, key: item.key, confirmed: item.confirmed })
+        } catch (e) {
+          const reason = e instanceof Error ? e.message : String(e)
+          rejected.push({ key: p.key, reason })
+          ctx.activityService.record({
+            runId: ctx.routineRunId,
+            type: 'tool_requested',
+            summary: `记忆提议被拒绝（${p.key}）：${reason}`
+          })
+        }
+      }
+      return { status: 'ok', data: { saved, savedCount: saved.length, rejectedCount: rejected.length } }
     }
   })
 
   registry.register({
     name: 'memory.delete',
-    description: 'Delete a memory entry (M1 stub).',
+    description: 'Delete a memory entry by id.',
     risk: 'R1',
     requiresApproval: false,
-    parameters: z.object({ key: z.string() }),
+    parameters: z.object({ id: z.string() }),
     async execute(args, ctx) {
-      const a = args as { key: string }
-      ctx.memory.delete(a.key)
-      return { status: 'ok', data: { deleted: a.key } }
+      const a = args as { id: string }
+      ctx.memoryService.delete(a.id)
+      return { status: 'ok', data: { deleted: a.id } }
     }
   })
 
@@ -435,6 +514,88 @@ export function createToolRegistry(): ToolRegistry {
       const message = (args as { message?: string }).message ?? 'Daymate update'
       ctx.notify(message)
       return { status: 'ok', data: { notified: true } }
+    }
+  })
+
+  // ── BOSS 直聘 (boss-cli) — all reads R0 (Spec §11). Boss data is untrusted
+  // external text (§17): the agent sees it only in a user message, never in the
+  // host-set system prompt; enforceTrust is applied after model output. The one
+  // write (boss.greet) is R3-approval-gated and lands in a later pass.
+  registry.register({
+    name: 'boss.applied',
+    description: 'List jobs the user has applied to on BOSS 直聘 (`boss applied`).',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({}),
+    async execute(_args, ctx) {
+      const items = await ctx.bossProvider.listApplications()
+      return { status: 'ok', data: items }
+    }
+  })
+
+  registry.register({
+    name: 'boss.interviews',
+    description: 'List interview invitations on BOSS 直聘 (`boss interviews`).',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({}),
+    async execute(_args, ctx) {
+      const items = await ctx.bossProvider.listInterviews()
+      return { status: 'ok', data: items }
+    }
+  })
+
+  registry.register({
+    name: 'boss.chat',
+    description: 'List communicated recruiters on BOSS 直聘 (`boss chat`).',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({}),
+    async execute(_args, ctx) {
+      const items = await ctx.bossProvider.listChats()
+      return { status: 'ok', data: items }
+    }
+  })
+
+  registry.register({
+    name: 'boss.detail',
+    description: 'Get full job details by securityId (`boss detail`).',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({ securityId: z.string() }),
+    async execute(args, ctx) {
+      const a = args as { securityId: string }
+      const job = await ctx.bossProvider.getJobDetail(a.securityId)
+      return { status: 'ok', data: job }
+    }
+  })
+
+  registry.register({
+    name: 'boss.search',
+    description: 'Search jobs on BOSS 直聘 (`boss search`).',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({
+      keyword: z.string(),
+      city: z.string().optional(),
+      salary: z.string().optional(),
+      experience: z.string().optional(),
+      degree: z.string().optional(),
+      page: z.number().optional(),
+      limit: z.number().optional()
+    }),
+    async execute(args, ctx) {
+      const a = args as {
+        keyword: string
+        city?: string
+        salary?: string
+        experience?: string
+        degree?: string
+        page?: number
+        limit?: number
+      }
+      const items = await ctx.bossProvider.searchJobs(a)
+      return { status: 'ok', data: items }
     }
   })
 

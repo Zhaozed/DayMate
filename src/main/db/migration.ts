@@ -118,7 +118,40 @@ CREATE TABLE IF NOT EXISTS memory_items (
   value TEXT NOT NULL,
   source TEXT NOT NULL,
   confirmed TEXT NOT NULL,
+  routine_run_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_memory_key ON memory_items(key);
+
+CREATE TABLE IF NOT EXISTS applications (
+  id TEXT PRIMARY KEY,
+  company TEXT NOT NULL,
+  position TEXT NOT NULL,
+  source TEXT NOT NULL,
+  boss_security_id TEXT,
+  applied_at TEXT NOT NULL,
+  channel_ref TEXT,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_boss_sid ON applications(boss_security_id);
+
+CREATE TABLE IF NOT EXISTS application_events (
+  id TEXT PRIMARY KEY,
+  application_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  round TEXT,
+  role TEXT,
+  sub_state TEXT,
+  source TEXT NOT NULL,
+  source_ref TEXT,
+  evidence TEXT,
+  locked TEXT NOT NULL,
+  event_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_app_events_app ON application_events(application_id);
+CREATE INDEX IF NOT EXISTS idx_app_events_ref ON application_events(source_ref);
 `

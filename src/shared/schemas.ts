@@ -18,7 +18,13 @@ import {
   INTEGRATION_STATUSES,
   RISK_LEVELS,
   APPROVAL_STATUSES,
-  EMAIL_CLASSIFICATIONS
+  EMAIL_CLASSIFICATIONS,
+  EMAIL_TOPICS,
+  LLM_PROVIDERS,
+  DEFAULT_LLM_MODEL_IDS,
+  MEMORY_KEYS,
+  APPLICATION_SOURCES,
+  APPLICATION_EVENT_TYPES
 } from './constants'
 
 // ── Robot / app ──────────────────────────────────────────────────────────────
@@ -118,7 +124,8 @@ export const routineStepSchema = z.discriminatedUnion('type', [
     type: z.literal('tool'),
     tool: z.string(),
     args: z.record(z.unknown()).optional(),
-    outputKey: z.string().optional()
+    outputKey: z.string().optional(),
+    continueOnError: z.boolean().optional()
   }),
   z.object({
     id: z.string(),
@@ -200,6 +207,7 @@ export const stepStatusSchema = z.enum(STEP_STATUSES)
 // action (Spec §15 content immutability).
 export const approvalStatusSchema = z.enum(APPROVAL_STATUSES)
 export const emailClassificationSchema = z.enum(EMAIL_CLASSIFICATIONS)
+export const emailTopicSchema = z.enum(EMAIL_TOPICS)
 
 export const approvalRequestSchema = z.object({
   id: z.string(),
@@ -225,13 +233,240 @@ export const suggestedActionSchema = z.object({
   args: z.record(z.unknown()).optional()
 })
 
+// Memory key + a passive memory proposal (Spec §16). Declared here (before the
+// output schemas) because the agent-step outputs carry optional memoryProposals.
+export const memoryKeySchema = z.enum(MEMORY_KEYS)
+
+// A passive memory proposal. Optional on every agent-step output so the model
+// may omit it without failing validation; the deterministic stubs populate it
+// when there is something worth remembering. `memory.save_proposals` loops
+// these through MemoryService.save → each lands confirmed:false.
+export const memoryProposalSchema = z.object({
+  key: memoryKeySchema,
+  value: z.string().min(1).max(2000)
+})
+
 export const classificationSchema = z.object({
   provider: z.enum(['gmail', 'mail163']),
   accountId: z.string(),
   messageId: z.string(),
   classification: emailClassificationSchema,
+  topic: emailTopicSchema,
   untrusted: z.boolean(),
   reason: z.string(),
   suggestedAction: suggestedActionSchema.optional()
+})
+
+// ── LLM configuration (M3) ──────────────────────────────────────────────────
+export const llmProviderSchema = z.enum(LLM_PROVIDERS)
+
+export const llmConfigInputSchema = z.object({
+  provider: llmProviderSchema,
+  modelId: z.string().min(1)
+})
+
+// Full LLM config surfaced to the renderer (key is represented only as a flag).
+export const llmConfigSchema = llmConfigInputSchema.extend({
+  keyConfigured: z.boolean()
+})
+
+// ── Agent-step output schemas (M3) ───────────────────────────────────────────
+// Authoritative Zod schemas for the two agent-step outputs. The deterministic
+// stubs produce values matching these shapes; the real LLM path validates the
+// model's captured tool args against the same schemas before returning. These
+// are the load-bearing contracts downstream routine templates read.
+export const sourceRefSchema = z.object({
+  type: z.enum(['email', 'calendar', 'task', 'activity']),
+  id: z.string(),
+  label: z.string().optional()
+})
+
+export const morningBriefOutputSchema = z.object({
+  title: z.string(),
+  summary: z.string(),
+  reason: z.string(),
+  priority: z.enum(['medium', 'high', 'urgent']),
+  sourceRefs: z.array(sourceRefSchema),
+  suggestedActions: z.array(suggestedActionSchema),
+  taskToCreate: z
+    .object({
+      title: z.string(),
+      sourceId: z.string(),
+      priority: z.enum(['low', 'medium', 'high', 'urgent'])
+    })
+    .nullable(),
+  memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+export const classifyInboxOutputSchema = z.object({
+  results: z.array(classificationSchema),
+  counts: z.object({
+    reply: z.number(),
+    follow_up: z.number(),
+    information: z.number(),
+    ignore: z.number()
+  }),
+  topicCounts: z.object({
+    fees_billing: z.number(),
+    recruiting: z.number(),
+    ads: z.number(),
+    meeting: z.number(),
+    general: z.number()
+  }),
+  memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+// Default model id helper (re-exported for the settings UI / gateway).
+export function defaultModelIdFor(provider: 'anthropic' | 'openai'): string {
+  return DEFAULT_LLM_MODEL_IDS[provider]
+}
+
+// ── Memory (Spec §16) ───────────────────────────────────────────────────────
+// (memoryKeySchema + memoryProposalSchema are declared above, near the agent
+// output schemas that reference them.)
+
+export const memoryItemSchema = z.object({
+  id: z.string(),
+  key: memoryKeySchema,
+  value: z.string(),
+  source: z.string(),
+  confirmed: z.boolean(),
+  routineRunId: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+})
+
+// ── Meeting Prep agent-step output (Spec §13.3) ─────────────────────────────
+// Produces the meeting objective, context, and questions to publish as a Need
+// to Know. `sourceRefs` tie each claim back to the email/calendar data so the
+// user can verify (Spec §17.15: show source references).
+export const meetingPrepOutputSchema = z.object({
+  title: z.string(),
+  summary: z.string(),
+  reason: z.string(),
+  priority: z.enum(['medium', 'high', 'urgent']),
+  objective: z.string(),
+  context: z.array(z.string()),
+  questions: z.array(z.string()),
+  openActions: z.array(z.string()),
+  sourceRefs: z.array(sourceRefSchema),
+  suggestedActions: z.array(suggestedActionSchema),
+  memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+// ── Daily Work Summary agent-step output (Spec §13.4) ────────────────────────
+// Built ONLY from data Daymate actually handled (processed emails, created/
+// completed tasks, meetings attended, waiting items, tomorrow's events). Must
+// NOT infer productivity or slacking time (§13.4).
+export const workSummaryOutputSchema = z.object({
+  title: z.string(),
+  summary: z.string(),
+  reason: z.string(),
+  priority: z.enum(['medium', 'high', 'urgent']),
+  processedEmails: z.number().int(),
+  tasksCreated: z.number().int(),
+  tasksCompleted: z.number().int(),
+  meetingsAttended: z.number().int(),
+  waitingItems: z.array(z.string()),
+  tomorrowHighlights: z.array(z.string()),
+  sourceRefs: z.array(sourceRefSchema),
+  suggestedActions: z.array(suggestedActionSchema),
+  memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+// ── Draft Reply agent-step output (Spec §13.5 tone-mirroring) ────────────────
+// The body mirrors the user's own prior-reply voice. Never produced for an
+// untrusted email (§17 — the deterministic overlay refuses + the model is
+// instructed to decline). The approval step wraps `email.create_draft` with
+// this body; contentHash is over the resolved args (§15).
+export const draftReplyOutputSchema = z.object({
+  to: z.array(mailAddressSchema),
+  subject: z.string(),
+  body: z.string().min(1),
+  memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+// ── Job applications (boss-cli integration) ──────────────────────────────────
+// `source` and event `type` are closed enums so a malformed payload (from a
+// routine step arg or a manual IPC call) is rejected (Spec §5 Zod validation).
+export const applicationSourceSchema = z.enum(APPLICATION_SOURCES)
+export const applicationEventTypeSchema = z.enum(APPLICATION_EVENT_TYPES)
+
+export const applicationSchema = z.object({
+  id: z.string(),
+  company: z.string(),
+  position: z.string(),
+  source: applicationSourceSchema,
+  bossSecurityId: z.string().optional(),
+  appliedAt: z.string(),
+  channelRef: z.string().optional(),
+  notes: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+})
+
+export const applicationEventSchema = z.object({
+  id: z.string(),
+  applicationId: z.string(),
+  type: applicationEventTypeSchema,
+  round: z.number().int().positive().optional(),
+  role: z.enum(['hr', 'tech', 'business', 'cross']).optional(),
+  subState: z.enum(['scheduled', 'done']).optional(),
+  source: z.enum(['boss', 'email', 'manual']),
+  sourceRef: z.string().optional(),
+  evidence: z.string().optional(),
+  locked: z.boolean().optional(),
+  eventAt: z.string(),
+  createdAt: z.string()
+})
+
+export const applicationViewSchema = z.object({
+  application: applicationSchema,
+  events: z.array(applicationEventSchema),
+  currentStatus: applicationEventTypeSchema,
+  currentRound: z.number().int().positive().optional(),
+  isTerminal: z.boolean(),
+  lastEventAt: z.string().optional(),
+  daysSinceLastEvent: z.number().optional()
+})
+
+// Inputs from the renderer (manual create / manual event). Narrower than the
+// stored shape — the service fills id/timestamps/source.
+export const applicationCreateInputSchema = z.object({
+  company: z.string().min(1),
+  position: z.string().min(1),
+  source: applicationSourceSchema.optional(),
+  appliedAt: z.string().optional(),
+  channelRef: z.string().optional(),
+  notes: z.string().optional()
+})
+
+export const applicationEventInputSchema = z.object({
+  applicationId: z.string().min(1),
+  type: applicationEventTypeSchema,
+  round: z.number().int().positive().optional(),
+  role: z.enum(['hr', 'tech', 'business', 'cross']).optional(),
+  subState: z.enum(['scheduled', 'done']).optional(),
+  eventAt: z.string().optional(),
+  evidence: z.string().optional(),
+  locked: z.boolean().optional()
+})
+
+// boss-cli DTOs surfaced by the boss.* tools. Fields are optional/defensive
+// because the real boss-cli envelope shape is reverse-engineered and may vary;
+// the provider maps what it can. Mock fixtures fill the same shape.
+export const bossJobSchema = z.object({
+  provider: z.literal('boss'),
+  accountId: z.string(),
+  securityId: z.string(),
+  jobName: z.string(),
+  companyName: z.string(),
+  salary: z.string().optional(),
+  city: z.string().optional(),
+  experience: z.string().optional(),
+  degree: z.string().optional(),
+  hrName: z.string().optional(),
+  brandName: z.string().optional(),
+  jobLabels: z.array(z.string()).optional()
 })
 

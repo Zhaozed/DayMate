@@ -44,7 +44,7 @@ describe('approval service', () => {
     const svc = makeService()
     const req = svc.create(baseInput)
     svc.approve(req.id)
-    expect(() => svc.approve(req.id)).toThrow(/already resolved/)
+    expect(() => svc.approve(req.id)).toThrow(/已处理/)
   })
 
   it('markExecuted flips an approved request to executed', () => {
@@ -90,7 +90,7 @@ describe('approval service', () => {
     const req = svc.create(baseInput)
     // Backdate the stored record by re-inserting it with an old createdAt.
     store.createApproval({ ...req, createdAt: new Date(Date.now() - 25 * 3600_000).toISOString() })
-    expect(() => svc.approve(req.id)).toThrow(/expired/i)
+    expect(() => svc.approve(req.id)).toThrow(/已过期/)
     expect(svc.get(req.id)?.status).toBe('expired')
   })
 })

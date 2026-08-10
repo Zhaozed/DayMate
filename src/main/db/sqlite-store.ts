@@ -15,7 +15,10 @@ import {
   routineRunSteps as runStepsTbl,
   activityEvents as activityTbl,
   needToKnow as ntkTbl,
-  approvalRequests as approvalsTbl
+  approvalRequests as approvalsTbl,
+  memoryItems as memoryTbl,
+  applications as applicationsTbl,
+  applicationEvents as applicationEventsTbl
 } from './schema'
 import type {
   RoutineDefinition,
@@ -24,7 +27,10 @@ import type {
   Task,
   NeedToKnow,
   ActivityEvent,
-  ApprovalRequest
+  ApprovalRequest,
+  MemoryItem,
+  Application,
+  ApplicationEvent
 } from '@shared/types'
 
 type TaskRow = typeof tasksTbl.$inferSelect
@@ -34,6 +40,9 @@ type RunStepRow = typeof runStepsTbl.$inferSelect
 type ActivityRow = typeof activityTbl.$inferSelect
 type NtkRow = typeof ntkTbl.$inferSelect
 type ApprovalRow = typeof approvalsTbl.$inferSelect
+type MemoryRow = typeof memoryTbl.$inferSelect
+type ApplicationRow = typeof applicationsTbl.$inferSelect
+type ApplicationEventRow = typeof applicationEventsTbl.$inferSelect
 
 const parseJson = <T>(raw: string | null, fallback: T): T => {
   if (raw == null) return fallback
@@ -149,6 +158,51 @@ function rowToApproval(r: ApprovalRow): ApprovalRequest {
   }
 }
 
+function rowToMemory(r: MemoryRow): MemoryItem {
+  return {
+    id: r.id,
+    key: r.key as MemoryItem['key'],
+    value: r.value,
+    source: r.source,
+    confirmed: r.confirmed === '1',
+    routineRunId: r.routineRunId ?? undefined,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt
+  }
+}
+
+function rowToApplication(r: ApplicationRow): Application {
+  return {
+    id: r.id,
+    company: r.company,
+    position: r.position,
+    source: r.source as Application['source'],
+    bossSecurityId: r.bossSecurityId ?? undefined,
+    appliedAt: r.appliedAt,
+    channelRef: r.channelRef ?? undefined,
+    notes: r.notes ?? undefined,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt
+  }
+}
+
+function rowToApplicationEvent(r: ApplicationEventRow): ApplicationEvent {
+  return {
+    id: r.id,
+    applicationId: r.applicationId,
+    type: r.type as ApplicationEvent['type'],
+    round: r.round != null ? Number(r.round) : undefined,
+    role: (r.role as ApplicationEvent['role']) ?? undefined,
+    subState: (r.subState as ApplicationEvent['subState']) ?? undefined,
+    source: r.source as ApplicationEvent['source'],
+    sourceRef: r.sourceRef ?? undefined,
+    evidence: r.evidence ?? undefined,
+    locked: r.locked === '1',
+    eventAt: r.eventAt,
+    createdAt: r.createdAt
+  }
+}
+
 export class SqliteStore implements RoutineStore {
   constructor(private readonly db: AppDb) {}
 
@@ -202,6 +256,9 @@ export class SqliteStore implements RoutineStore {
       .where(eq(routinesTbl.id, id))
       .run()
     return this.getRoutine(id)
+  }
+  deleteRoutine(id: string): void {
+    this.db.delete(routinesTbl).where(eq(routinesTbl.id, id)).run()
   }
 
   // ── Runs ──────────────────────────────────────────────────────────────────
@@ -436,5 +493,152 @@ export class SqliteStore implements RoutineStore {
       .run()
     const r = this.db.select().from(approvalsTbl).where(eq(approvalsTbl.id, id)).get()
     return r ? rowToApproval(r) : undefined
+  }
+
+  // ── Memory (Spec §16) ──────────────────────────────────────────────────────
+  createMemory(item: MemoryItem): void {
+    this.db
+      .insert(memoryTbl)
+      .values({
+        id: item.id,
+        key: item.key,
+        value: item.value,
+        source: item.source,
+        confirmed: item.confirmed ? '1' : '0',
+        routineRunId: item.routineRunId ?? null,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt
+      })
+      .run()
+  }
+  getMemory(id: string): MemoryItem | undefined {
+    const r = this.db.select().from(memoryTbl).where(eq(memoryTbl.id, id)).get()
+    return r ? rowToMemory(r) : undefined
+  }
+  listMemory(): MemoryItem[] {
+    return this.db.select().from(memoryTbl).orderBy(desc(memoryTbl.createdAt)).all().map(rowToMemory)
+  }
+  updateMemory(id: string, patch: Partial<MemoryItem>): MemoryItem | undefined {
+    const set: Record<string, unknown> = {}
+    if (patch.value !== undefined) set.value = patch.value
+    if (patch.confirmed !== undefined) set.confirmed = patch.confirmed ? '1' : '0'
+    if (patch.routineRunId !== undefined) set.routineRunId = patch.routineRunId ?? null
+    set.updatedAt = new Date().toISOString()
+    this.db.update(memoryTbl).set(set).where(eq(memoryTbl.id, id)).run()
+    const r = this.db.select().from(memoryTbl).where(eq(memoryTbl.id, id)).get()
+    return r ? rowToMemory(r) : undefined
+  }
+  deleteMemory(id: string): void {
+    this.db.delete(memoryTbl).where(eq(memoryTbl.id, id)).run()
+  }
+  deleteMemoryByKey(key: string): void {
+    this.db.delete(memoryTbl).where(eq(memoryTbl.key, key)).run()
+  }
+
+  // ── Job applications (boss-cli integration) ────────────────────────────────
+  createApplication(app: Application): void {
+    this.db
+      .insert(applicationsTbl)
+      .values({
+        id: app.id,
+        company: app.company,
+        position: app.position,
+        source: app.source,
+        bossSecurityId: app.bossSecurityId ?? null,
+        appliedAt: app.appliedAt,
+        channelRef: app.channelRef ?? null,
+        notes: app.notes ?? null,
+        createdAt: app.createdAt,
+        updatedAt: app.updatedAt
+      })
+      .onConflictDoUpdate({
+        target: applicationsTbl.id,
+        set: {
+          company: app.company,
+          position: app.position,
+          source: app.source,
+          bossSecurityId: app.bossSecurityId ?? null,
+          appliedAt: app.appliedAt,
+          channelRef: app.channelRef ?? null,
+          notes: app.notes ?? null,
+          updatedAt: app.updatedAt
+        }
+      })
+      .run()
+  }
+  getApplication(id: string): Application | undefined {
+    const r = this.db.select().from(applicationsTbl).where(eq(applicationsTbl.id, id)).get()
+    return r ? rowToApplication(r) : undefined
+  }
+  getApplicationByBossSecurityId(securityId: string): Application | undefined {
+    const r = this.db
+      .select()
+      .from(applicationsTbl)
+      .where(eq(applicationsTbl.bossSecurityId, securityId))
+      .get()
+    return r ? rowToApplication(r) : undefined
+  }
+  listApplications(): Application[] {
+    return this.db
+      .select()
+      .from(applicationsTbl)
+      .orderBy(desc(applicationsTbl.appliedAt))
+      .all()
+      .map(rowToApplication)
+  }
+  updateApplication(id: string, patch: Partial<Application>): Application | undefined {
+    const set: Record<string, unknown> = {}
+    if (patch.company !== undefined) set.company = patch.company
+    if (patch.position !== undefined) set.position = patch.position
+    if (patch.source !== undefined) set.source = patch.source
+    if (patch.bossSecurityId !== undefined) set.bossSecurityId = patch.bossSecurityId ?? null
+    if (patch.appliedAt !== undefined) set.appliedAt = patch.appliedAt
+    if (patch.channelRef !== undefined) set.channelRef = patch.channelRef ?? null
+    if (patch.notes !== undefined) set.notes = patch.notes ?? null
+    set.updatedAt = new Date().toISOString()
+    this.db.update(applicationsTbl).set(set).where(eq(applicationsTbl.id, id)).run()
+    return this.getApplication(id)
+  }
+
+  createApplicationEvent(event: ApplicationEvent): void {
+    this.db
+      .insert(applicationEventsTbl)
+      .values({
+        id: event.id,
+        applicationId: event.applicationId,
+        type: event.type,
+        round: event.round != null ? String(event.round) : null,
+        role: event.role ?? null,
+        subState: event.subState ?? null,
+        source: event.source,
+        sourceRef: event.sourceRef ?? null,
+        evidence: event.evidence ?? null,
+        locked: event.locked ? '1' : '0',
+        eventAt: event.eventAt,
+        createdAt: event.createdAt
+      })
+      .run()
+  }
+  getApplicationEventBySourceRef(applicationId: string, sourceRef: string): ApplicationEvent | undefined {
+    const r = this.db
+      .select()
+      .from(applicationEventsTbl)
+      .where(
+        and(
+          eq(applicationEventsTbl.applicationId, applicationId),
+          eq(applicationEventsTbl.sourceRef, sourceRef)
+        )
+      )
+      .get()
+    return r ? rowToApplicationEvent(r) : undefined
+  }
+  listApplicationEvents(applicationId: string): ApplicationEvent[] {
+    return this.db
+      .select()
+      .from(applicationEventsTbl)
+      .where(eq(applicationEventsTbl.applicationId, applicationId))
+      .orderBy(applicationEventsTbl.eventAt)
+      .all()
+      .map(rowToApplicationEvent)
   }
 }

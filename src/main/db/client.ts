@@ -47,5 +47,7 @@ function addColumnIfMissing(sqlite: Database.Database, table: string, column: st
 
 function applyGuardedAlters(sqlite: Database.Database) {
   addColumnIfMissing(sqlite, 'approval_requests', 'content_hash', 'TEXT NOT NULL DEFAULT \'\'')
+  // M5: traceability column on memory_items (older dev DBs created in M1 lack it).
+  addColumnIfMissing(sqlite, 'memory_items', 'routine_run_id', 'TEXT')
 }
 

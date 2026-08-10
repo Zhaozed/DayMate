@@ -6,6 +6,7 @@ export { IPC } from '@shared/constants'
 export type {
   DaymateApi,
   RobotState,
+  RobotView,
   AppInfo,
   WindowName,
   TaskUpdate,
@@ -13,7 +14,22 @@ export type {
   RoutineDefinition,
   RoutineRun,
   RoutineRunStep,
+  RoutineUpdate,
   NeedToKnow,
   ActivityEvent,
-  ApprovalRequest
+  ApprovalRequest,
+  LlmConfig,
+  LlmConfigInput,
+  LlmTestResult,
+  LlmProvider,
+  RobotNotify,
+  WorkbenchPage,
+  MemoryItem,
+  MemorySaveInput,
+  MemoryUpdate,
+  MemoryKey,
+  ApplicationView,
+  ApplicationCreateInput,
+  ApplicationEventInput,
+  BossStatus
 } from '@shared/types'

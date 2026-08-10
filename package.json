@@ -12,7 +12,9 @@
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "echo 'Playwright e2e suite — wired in Milestone 4' && exit 0",
+    "test:e2e": "pnpm build && playwright test",
+    "dist": "electron-vite build && electron-builder --mac",
+    "dist:dir": "electron-vite build && electron-builder --mac --dir",
     "rebuild:native": "electron-rebuild -f -w better-sqlite3",
     "predev": "electron-rebuild -f -w better-sqlite3",
     "prebuild": "electron-rebuild -f -w better-sqlite3"
@@ -22,22 +24,29 @@
     "@earendil-works/pi-ai": "^0.83.0",
     "better-sqlite3": "^11.7.0",
     "drizzle-orm": "^0.36.4",
+    "imapflow": "^1.6.6",
+    "mailparser": "^3.9.15",
     "node-cron": "^3.0.3",
+    "nodemailer": "^9.0.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
+    "@eslint/js": "^9.18.0",
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.0.0",
     "@types/better-sqlite3": "^7.6.12",
-    "@types/node-cron": "^3.0.3",
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^22.10.5",
+    "@types/node-cron": "^3.0.3",
+    "@types/nodemailer": "^8.0.1",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@typescript-eslint/eslint-plugin": "^8.20.0",
     "@typescript-eslint/parser": "^8.20.0",
-    "@eslint/js": "^9.18.0",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
     "eslint": "^9.18.0",
     "eslint-plugin-react": "^7.37.4",
@@ -54,6 +63,11 @@
     "node": ">=20"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["electron", "esbuild", "protobufjs", "better-sqlite3"]
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild",
+      "protobufjs",
+      "better-sqlite3"
+    ]
   }
 }

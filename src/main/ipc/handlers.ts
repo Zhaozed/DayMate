@@ -2,15 +2,34 @@
 // Everything here runs in main: no credential or token ever crosses to the
 // renderer — only validated, plain-data responses do.
 
-import { app, ipcMain, BrowserWindow } from 'electron'
+import { app, ipcMain } from 'electron'
 import { IPC } from './contracts'
-import type { AppInfo, RobotState, WindowName, TaskUpdate, ApprovalRequest } from './contracts'
+import type {
+  AppInfo,
+  RobotState,
+  RobotView,
+  WindowName,
+  TaskUpdate,
+  ApprovalRequest,
+  LlmConfigInput,
+  RobotNotify,
+  WorkbenchPage,
+  RoutineUpdate,
+  MemorySaveInput,
+  MemoryUpdate,
+  RoutineDefinition,
+  ApplicationCreateInput,
+  ApplicationEventInput
+} from './contracts'
 import { APP_NAME, WINDOWS } from '@shared/constants'
 import { openWorkbench, openRobot } from '../windows'
+import { getRobotWindow, setRobotView } from '../windows/robot-window'
+import { getWorkbenchWindow } from '../windows/workbench-window'
 import { getContainer, initContainer } from '../app/container'
+import { nowIso } from '../util/ids'
 
-// M0 in-memory robot state. From M1 onward the agent runtime drives this via
-// the notify callback (container.ts); it is still surfaced to the renderer
+// M0 in-memory robot state. From M4 onward the RobotStateController drives this
+// from Activity events (container.ts); it is still surfaced to the renderer
 // through getRobotState/setRobotState.
 let currentRobotState: RobotState = 'idle'
 
@@ -20,12 +39,18 @@ export function getRobotState(): RobotState {
 
 export function setRobotState(next: RobotState): RobotState {
   currentRobotState = next
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.title === `${APP_NAME} Robot` || win.title === 'Daymate Robot') {
-      win.webContents.send('daymate:robot-state-changed', next)
-    }
-  }
+  getRobotWindow()?.webContents.send(IPC.ROBOT_STATE_CHANGED, next)
   return currentRobotState
+}
+
+/** Push a proactive bubble to the robot window (M4 §18). */
+export function pushRobotNotify(msg: RobotNotify): void {
+  getRobotWindow()?.webContents.send(IPC.ROBOT_NOTIFY, msg)
+}
+
+/** Deep-link the workbench to a page (M4 — e.g. Approvals from the robot). */
+export function navigateWorkbench(page: WorkbenchPage): void {
+  getWorkbenchWindow()?.webContents.send(IPC.WORKBENCH_NAV, page)
 }
 
 function buildAppInfo(): AppInfo {
@@ -50,6 +75,19 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.GET_ROBOT_STATE, () => getRobotState())
   ipcMain.handle(IPC.SET_ROBOT_STATE, (_e, state: RobotState) => setRobotState(state))
   ipcMain.handle(IPC.OPEN_WINDOW, (_e, name: WindowName) => openWindowByName(name))
+  // Open the workbench and deep-link it to a page (M4 — robot "Review" button).
+  ipcMain.handle(IPC.OPEN_WORKBENCH_AT, (_e, page: WorkbenchPage) => {
+    openWorkbench()
+    navigateWorkbench(page)
+  })
+  // App lifecycle (M4 context menu).
+  ipcMain.handle(IPC.APP_QUIT, () => {
+    app.quit()
+  })
+  // Resize the ambient robot window to a view (M4 §18).
+  ipcMain.handle(IPC.SET_ROBOT_VIEW, (_e, view: RobotView) => {
+    setRobotView(view)
+  })
 
   const container = getContainer()
 
@@ -74,6 +112,36 @@ export function registerIpcHandlers(): void {
     const next = container.store.setRoutineEnabled(routineId, enabled)
     container.scheduler.reschedule()
     return next
+  })
+  // Patch a routine's trigger/enabled config (M4); steps are not editable yet.
+  ipcMain.handle(IPC.ROUTINE_UPDATE, (_e, routineId: string, patch: RoutineUpdate) => {
+    const existing = container.store.getRoutine(routineId)
+    if (!existing) throw new Error(`未找到例程：${routineId}`)
+    const updated: typeof existing = {
+      ...existing,
+      ...(patch.trigger ? { trigger: patch.trigger } : {}),
+      ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+      updatedAt: nowIso()
+    }
+    container.store.saveRoutine(updated)
+    container.scheduler.reschedule()
+    return updated
+  })
+  // Pause / resume all scheduled triggers (M4 context menu). Manual runs still work.
+  ipcMain.handle(IPC.ROUTINE_PAUSE_ALL, () => container.scheduler.pause())
+  ipcMain.handle(IPC.ROUTINE_RESUME_ALL, () => container.scheduler.resume())
+  // Create a custom routine from validated builder JSON (M5 §14). The builder
+  // output is parsed against the Routine Schema here — a malformed routine is
+  // refused, so users can never inject arbitrary steps (§14: "Users cannot
+  // insert arbitrary code").
+  ipcMain.handle(IPC.ROUTINE_CREATE, async (_e, def: Omit<RoutineDefinition, 'createdAt' | 'updatedAt'>) => {
+    const created = await container.engine.createRoutine(def)
+    container.scheduler.reschedule()
+    return created
+  })
+  ipcMain.handle(IPC.ROUTINE_DELETE, async (_e, routineId: string) => {
+    await container.engine.deleteRoutine(routineId)
+    container.scheduler.reschedule()
   })
 
   // Tasks
@@ -118,9 +186,214 @@ export function registerIpcHandlers(): void {
     container.broadcastApprovals()
     return container.approvalService.get(id) as ApprovalRequest
   })
+
+  // LLM configuration (M3 — Spec §17.6/§17.8). The API key is WRITE-ONLY: it is
+  // accepted here, encrypted at rest by the SecretStore, and never read back.
+  // `getLlmConfig` returns only { provider, modelId, keyConfigured } — the key
+  // string never crosses to the renderer, never enters model context, and is
+  // never logged (the SDK resolves it into StreamOptions.apiKey at call time).
+  ipcMain.handle(IPC.LLM_GET_CONFIG, () => container.modelGateway.getLlmConfig())
+  ipcMain.handle(IPC.LLM_SET_CONFIG, (_e, input: LlmConfigInput) =>
+    container.modelGateway.setLlmConfig(input)
+  )
+  ipcMain.handle(IPC.LLM_SET_KEY, (_e, key: string) =>
+    container.modelGateway.setLlmKey(key)
+  )
+  ipcMain.handle(IPC.LLM_DELETE_KEY, () => container.modelGateway.deleteLlmKey())
+  ipcMain.handle(IPC.LLM_TEST, () => container.modelGateway.testLlm())
+
+  // Gmail integration (Spec §9). client_id/secret + tokens are credentials in
+  // the SecretStore; these handlers never return a token, auth code, or the
+  // client secret — only opaque status + the connected email address. Connect
+  // opens the OAuth browser flow on a loopback callback; the real provider is
+  // swapped into emailProviders[0] so `email.list` picks it.
+  const gmailStatus = async () => ({
+    status: await container.gmailProvider.getStatus(),
+    hasClient: await container.gmailProvider.hasClient(),
+    email: await container.gmailProvider.getEmailAddress()
+  })
+  ipcMain.handle(IPC.GMAIL_SET_CLIENT, async (_e, input: { clientId: string; clientSecret: string }) => {
+    await container.gmailProvider.setClient(input.clientId, input.clientSecret)
+    return gmailStatus()
+  })
+  ipcMain.handle(IPC.GMAIL_GET_STATUS, gmailStatus)
+  ipcMain.handle(IPC.GMAIL_CONNECT, async () => {
+    await container.gmailProvider.connect()
+    await container.refreshEmailProviders()
+    return gmailStatus()
+  })
+  ipcMain.handle(IPC.GMAIL_DISCONNECT, async () => {
+    await container.gmailProvider.disconnect()
+    await container.refreshEmailProviders()
+    return gmailStatus()
+  })
+  ipcMain.handle(IPC.GMAIL_TEST, async () => {
+    try {
+      const msgs = await container.gmailProvider.listMessages({ limit: 1 })
+      return {
+        ok: true,
+        message: msgs[0]
+          ? `已连接 —— 读取到 1 封邮件（id ${msgs[0].messageId}）。`
+          : '已连接 —— 邮箱可读，暂无匹配邮件。',
+        sampleMessageId: msgs[0]?.messageId
+      }
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  // 163 Mail (Spec §9). IMAP/SMTP authorized by the mailbox's 授权码; the
+  // 授权码 is a credential in the SecretStore and never crosses to the renderer.
+  // Connect validates by actually logging in to IMAP; the real provider is
+  // swapped into emailProviders so `email.list` can pick it.
+  const mail163Status = async () => ({
+    status: await container.mail163Provider.getStatus(),
+    hasClient: await container.mail163Provider.hasClient(),
+    email: await container.mail163Provider.getEmailAddress()
+  })
+  ipcMain.handle(IPC.MAIL163_SET_CLIENT, async (_e, input: { email: string; authCode: string }) => {
+    await container.mail163Provider.setClient(input.email, input.authCode)
+    return mail163Status()
+  })
+  ipcMain.handle(IPC.MAIL163_HAS_CLIENT, () => container.mail163Provider.hasClient())
+  ipcMain.handle(IPC.MAIL163_GET_STATUS, mail163Status)
+  ipcMain.handle(IPC.MAIL163_CONNECT, async () => {
+    await container.mail163Provider.connect()
+    await container.refreshEmailProviders()
+    return mail163Status()
+  })
+  ipcMain.handle(IPC.MAIL163_DISCONNECT, async () => {
+    await container.mail163Provider.disconnect()
+    await container.refreshEmailProviders()
+    return mail163Status()
+  })
+  ipcMain.handle(IPC.MAIL163_TEST, async () => {
+    try {
+      const msgs = await container.mail163Provider.listMessages({ limit: 1 })
+      return {
+        ok: true,
+        message: msgs[0]
+          ? `已连接 —— 读取到 1 封邮件（id ${msgs[0].messageId}）。`
+          : '已连接 —— 邮箱可读，暂无匹配邮件。',
+        sampleMessageId: msgs[0]?.messageId
+      }
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  // Feishu Calendar (Spec §10). User-OAuth (user_access_token reads the user's
+  // primary calendar); app_id/app_secret + user refresh token are credentials
+  // in the SecretStore and never cross to the renderer. Connect opens the
+  // browser authorize flow on a fixed-port loopback; the swappable calendar
+  // delegate flips to the real provider so Meeting Prep / Daily Work Summary
+  // read real events.
+  const feishuStatus = async () => ({
+    status: await container.feishuProvider.getStatus(),
+    hasClient: await container.feishuProvider.hasClient()
+  })
+  ipcMain.handle(IPC.FEISHU_SET_CLIENT, async (_e, input: { appId: string; appSecret: string }) => {
+    await container.feishuProvider.setClient(input.appId, input.appSecret)
+    return feishuStatus()
+  })
+  ipcMain.handle(IPC.FEISHU_HAS_CLIENT, () => container.feishuProvider.hasClient())
+  ipcMain.handle(IPC.FEISHU_GET_STATUS, feishuStatus)
+  ipcMain.handle(IPC.FEISHU_CONNECT, async () => {
+    await container.feishuProvider.connect()
+    await container.refreshCalendarProvider()
+    return feishuStatus()
+  })
+  ipcMain.handle(IPC.FEISHU_DISCONNECT, async () => {
+    await container.feishuProvider.disconnect()
+    await container.refreshCalendarProvider()
+    return feishuStatus()
+  })
+  ipcMain.handle(IPC.FEISHU_TEST, async () => {
+    try {
+      const start = new Date()
+      start.setHours(0, 0, 0, 0)
+      const end = new Date(start)
+      end.setHours(23, 59, 59, 999)
+      const events = await container.feishuProvider.listEvents({
+        start: start.toISOString(),
+        end: end.toISOString()
+      })
+      return {
+        ok: true,
+        message:
+          events.length > 0
+            ? `已连接 —— 今日读取到 ${events.length} 个日历事件。`
+            : '已连接 —— 主日历可读，今日无事件。',
+        eventCount: events.length,
+        sampleEventTitle: events[0]?.title
+      }
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) }
+    }
+  })
+  ipcMain.handle(IPC.MEMORY_LIST, () => container.memoryService.list())
+  ipcMain.handle(IPC.MEMORY_SAVE, (_e, input: MemorySaveInput) => {
+    const item = container.memoryService.save(input)
+    container.broadcastMemory()
+    return item
+  })
+  ipcMain.handle(IPC.MEMORY_UPDATE, (_e, id: string, patch: MemoryUpdate) => {
+    const item = container.memoryService.update(id, patch)
+    container.broadcastMemory()
+    return item
+  })
+  ipcMain.handle(IPC.MEMORY_DELETE, (_e, id: string) => {
+    container.memoryService.delete(id)
+    container.broadcastMemory()
+  })
+
+  // Job applications (boss-cli integration) — the cross-channel funnel panel.
+  // Manual create / add-event are local R1 writes (no approval); boss sync
+  // pulls `boss applied/interviews/chat` into the funnel and is idempotent.
+  ipcMain.handle(IPC.APPLICATION_LIST, () => container.applicationService.list())
+  ipcMain.handle(IPC.APPLICATION_CREATE, (_e, input: ApplicationCreateInput) => {
+    const view = container.applicationService.create(input)
+    container.broadcastApplications()
+    return view
+  })
+  ipcMain.handle(IPC.APPLICATION_ADD_EVENT, (_e, input: ApplicationEventInput) => {
+    const view = container.applicationService.addEvent(input)
+    container.broadcastApplications()
+    return view
+  })
+  ipcMain.handle(IPC.APPLICATION_SYNC_BOSS, async () => {
+    const result = await container.applicationService.syncFromBoss()
+    container.broadcastApplications()
+    // Reconcile the boss delegate after a sync (auth may have changed).
+    void container.refreshBossProvider()
+    return result
+  })
+  // boss-cli login/cookie health (never a cookie crosses to the renderer).
+  ipcMain.handle(IPC.BOSS_GET_STATUS, async () => {
+    try {
+      const status = await container.bossCliProvider.getStatus()
+      return {
+        status,
+        authenticated: status === 'connected',
+        message: status === 'connected' ? 'BOSS 直聘已连接' : 'BOSS 直聘未连接（请安装 boss-cli 并在浏览器登录 zhipin.com）'
+      }
+    } catch (e) {
+      return {
+        status: 'disconnected' as const,
+        authenticated: false,
+        message: e instanceof Error ? e.message : String(e)
+      }
+    }
+  })
 }
 
 // Called from bootstrap once the app is ready and the DB path is resolvable.
 export function bootstrapContainer(): void {
-  initContainer()
+  const c = initContainer()
+  // If real-provider tokens are already in the Keychain from a prior session,
+  // swap the real providers back in now so a restart reconnects automatically
+  // (Spec §9). Fire-and-forget — the scheduler runs mock-safe until it resolves.
+  void c.refreshEmailProviders()
+  void c.refreshCalendarProvider()
+  void c.refreshBossProvider()
 }

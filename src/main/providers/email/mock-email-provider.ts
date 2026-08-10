@@ -14,12 +14,14 @@ import type {
   EmailQuery,
   EmailDraft,
   EmailDraftInput,
-  EmailSendResult
+  EmailSendResult,
+  SentMailQuery
 } from '@shared/types'
 import type { EmailProvider } from './email-provider'
 import { newId, nowIso } from '../../util/ids'
 
 const ACCOUNT_ID = 'mock-gmail-001'
+const MY_ADDRESS = 'me@example.com'
 
 const FIXTURES: NormalizedEmail[] = [
   {
@@ -72,6 +74,46 @@ const FIXTURES: NormalizedEmail[] = [
   }
 ]
 
+// The user's OWN sent mail — the prior-reply tone corpus (Spec §13.5). These
+// are the user's voice (the opposite of §17-untrusted inbound mail): a concise
+// reply and a formal reply, sent to Alice, so tone-mirroring is demonstrable
+// credential-free and the e2e can assert a tone-mirrored draft body differs
+// from the canned string.
+const SENT_FIXTURES: NormalizedEmail[] = [
+  {
+    provider: 'gmail',
+    accountId: ACCOUNT_ID,
+    messageId: 'mock-sent-001',
+    threadId: 'mock-thread-001',
+    from: { name: 'Me', address: MY_ADDRESS },
+    to: [{ name: 'Alice Chen', address: 'alice@example.com' }],
+    cc: [],
+    subject: 'Re: Q3 roadmap review — decision needed by Friday',
+    textBody:
+      'Hi Alice, got it — I will review the roadmap today and circle back by EOD. Thanks for the heads up.',
+    receivedAt: new Date(Date.now() - 1 * 3600_000).toISOString(),
+    unread: false,
+    labels: ['SENT'],
+    sourceUrl: 'https://mail.google.com/mail/u/0/#sent/mock-sent-001'
+  },
+  {
+    provider: 'gmail',
+    accountId: ACCOUNT_ID,
+    messageId: 'mock-sent-002',
+    threadId: 'mock-thread-002',
+    from: { name: 'Me', address: MY_ADDRESS },
+    to: [{ name: 'Alice Chen', address: 'alice@example.com' }],
+    cc: [],
+    subject: 'Re: Follow-up on our discussion',
+    textBody:
+      'Dear Alice, thank you for following up. I have reviewed the materials and confirm I will proceed as discussed. Please let me know if anything else is needed. Best regards.',
+    receivedAt: new Date(Date.now() - 26 * 3600_000).toISOString(),
+    unread: false,
+    labels: ['SENT'],
+    sourceUrl: 'https://mail.google.com/mail/u/0/#sent/mock-sent-002'
+  }
+]
+
 export class MockEmailProvider implements EmailProvider {
   readonly provider = 'gmail' as const
   readonly accountId = ACCOUNT_ID
@@ -114,7 +156,7 @@ export class MockEmailProvider implements EmailProvider {
 
   async getMessage(messageId: string): Promise<NormalizedEmail> {
     const msg = FIXTURES.find((m) => m.messageId === messageId)
-    if (!msg) throw new Error(`Message not found: ${messageId}`)
+    if (!msg) throw new Error(`未找到邮件：${messageId}`)
     return msg
   }
 
@@ -124,6 +166,20 @@ export class MockEmailProvider implements EmailProvider {
       (m) => m.subject.toLowerCase().includes(q) || m.textBody.toLowerCase().includes(q)
     )
     if (limit) items = items.slice(0, limit)
+    return items
+  }
+
+  async listSent(query: SentMailQuery): Promise<NormalizedEmail[]> {
+    let items = [...SENT_FIXTURES]
+    if (query.toAddress) {
+      const addr = query.toAddress.toLowerCase()
+      items = items.filter((m) => m.to.some((t) => t.address.toLowerCase() === addr))
+    }
+    if (query.sinceHours) {
+      const cutoff = Date.now() - query.sinceHours * 3600_000
+      items = items.filter((m) => new Date(m.receivedAt).getTime() >= cutoff)
+    }
+    if (query.limit) items = items.slice(0, query.limit)
     return items
   }
 
@@ -143,7 +199,7 @@ export class MockEmailProvider implements EmailProvider {
 
   async sendDraft(draftId: string): Promise<EmailSendResult> {
     const draft = this.drafts.get(draftId)
-    if (!draft) throw new Error(`Draft not found: ${draftId}`)
+    if (!draft) throw new Error(`未找到草稿：${draftId}`)
     // Mock send — never actually transmits. Real SMTP/Gmail send lands in M2
     // and must route through the Approval Service first (Spec §15).
     this.drafts.delete(draftId)

@@ -122,13 +122,54 @@ export const approvalRequests = sqliteTable('approval_requests', {
   resolvedAt: text('resolved_at')
 })
 
-// ── Memory items (M5; table ready now) ───────────────────────────────────────
+// ── Memory items (Spec §16; M5) ─────────────────────────────────────────────
+// Agent proposals land `confirmed:'0'`; the user confirms them in the Memory
+// page, flipping to `'1'`. Only confirmed items are active (searchable).
 export const memoryItems = sqliteTable('memory_items', {
   id: text('id').primaryKey(),
   key: text('key').notNull(),
   value: text('value').notNull(),
   source: text('source').notNull(),
   confirmed: text('confirmed').notNull(), // '0' | '1'
+  routineRunId: text('routine_run_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull()
+})
+
+// ── Job applications (boss-cli integration) ──────────────────────────────────
+// An Application = one job the user applied to (boss-cli sync or manual).
+// `boss_security_id` is the upsert key for boss-synced rows (NULL for manual).
+// `source` ∈ boss|manual|web|referral|other.
+export const applications = sqliteTable('applications', {
+  id: text('id').primaryKey(),
+  company: text('company').notNull(),
+  position: text('position').notNull(),
+  source: text('source').notNull(),
+  bossSecurityId: text('boss_security_id'),
+  appliedAt: text('applied_at').notNull(),
+  channelRef: text('channel_ref'),
+  notes: text('notes'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull()
+})
+
+// ── Application progress events (Spec §4.1 event timeline) ──────────────────
+// Each row is one detected stage (applied/communicated/assessment/written_test
+// /interview/offer/rejected/withdrawn). The latest event is the current stage;
+// offer/rejected/withdrawn are terminal. `locked` = user-pinned, auto-detection
+// (P2) will not silently move status past it. `source_ref` is the idempotency
+// key for boss-synced / email-detected events (emailId / bossChatId).
+export const applicationEvents = sqliteTable('application_events', {
+  id: text('id').primaryKey(),
+  applicationId: text('application_id').notNull(),
+  type: text('type').notNull(),
+  round: text('round'), // int as TEXT
+  role: text('role'),
+  subState: text('sub_state'),
+  source: text('source').notNull(), // boss|email|manual
+  sourceRef: text('source_ref'),
+  evidence: text('evidence'),
+  locked: text('locked').notNull(), // '0' | '1'
+  eventAt: text('event_at').notNull(),
+  createdAt: text('created_at').notNull()
 })

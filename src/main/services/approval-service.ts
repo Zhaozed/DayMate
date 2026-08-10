@@ -70,40 +70,40 @@ export class ApprovalService {
    */
   approve(id: string): ApprovalRequest {
     const existing = this.store.getApproval(id)
-    if (!existing) throw new Error(`Approval not found: ${id}`)
+    if (!existing) throw new Error(`未找到审批：${id}`)
     if (existing.status !== 'pending') {
-      throw new Error(`Approval already resolved: ${existing.status}`)
+      throw new Error(`审批已处理：${existing.status}`)
     }
     if (isApprovalStale(existing)) {
       this.store.updateApprovalStatus(id, 'expired', nowIso())
-      throw new Error(`Approval expired (past TTL): ${id}`)
+      throw new Error(`审批已过期（超过有效期）：${id}`)
     }
     const updated = this.store.updateApprovalStatus(id, 'approved', nowIso())
-    if (!updated) throw new Error(`Approval approve failed: ${id}`)
+    if (!updated) throw new Error(`审批批准失败：${id}`)
     return updated
   }
 
   /** Mark a pending request rejected. The action never executes. */
   reject(id: string): ApprovalRequest {
     const existing = this.store.getApproval(id)
-    if (!existing) throw new Error(`Approval not found: ${id}`)
+    if (!existing) throw new Error(`未找到审批：${id}`)
     if (existing.status !== 'pending') {
-      throw new Error(`Approval already resolved: ${existing.status}`)
+      throw new Error(`审批已处理：${existing.status}`)
     }
     const updated = this.store.updateApprovalStatus(id, 'rejected', nowIso())
-    if (!updated) throw new Error(`Approval reject failed: ${id}`)
+    if (!updated) throw new Error(`审批拒绝失败：${id}`)
     return updated
   }
 
   /** Flip an approved request to executed after the action runs. */
   markExecuted(id: string): ApprovalRequest {
     const existing = this.store.getApproval(id)
-    if (!existing) throw new Error(`Approval not found: ${id}`)
+    if (!existing) throw new Error(`未找到审批：${id}`)
     if (existing.status !== 'approved') {
-      throw new Error(`Cannot mark executed from status: ${existing.status}`)
+      throw new Error(`无法从状态 ${existing.status} 标记为已执行`)
     }
     const updated = this.store.updateApprovalStatus(id, 'executed', nowIso())
-    if (!updated) throw new Error(`Approval markExecuted failed: ${id}`)
+    if (!updated) throw new Error(`审批标记执行失败：${id}`)
     return updated
   }
 

@@ -12,12 +12,14 @@ import type {
   EmailQuery,
   EmailDraft,
   EmailDraftInput,
-  EmailSendResult
+  EmailSendResult,
+  SentMailQuery
 } from '@shared/types'
 import type { EmailProvider } from './email-provider'
 import { newId, nowIso } from '../../util/ids'
 
 const ACCOUNT_ID = 'mock-163-001'
+const MY_ADDRESS = 'me@163.com'
 
 const FIXTURES: NormalizedEmail[] = [
   {
@@ -70,6 +72,27 @@ const FIXTURES: NormalizedEmail[] = [
   }
 ]
 
+// The user's own sent 163 mail — tone corpus (Spec §13.5). One concise reply
+// to Bob so the mock 163 path can demonstrate tone-mirroring credential-free.
+const SENT_FIXTURES: NormalizedEmail[] = [
+  {
+    provider: 'mail163',
+    accountId: ACCOUNT_ID,
+    messageId: 'mock-163-sent-001',
+    threadId: 'mock-163-001',
+    from: { name: 'Me', address: MY_ADDRESS },
+    to: [{ name: 'Bob Li', address: 'bob@163.com' }],
+    cc: [],
+    subject: 'Re: contract amendment — please reply today',
+    textBody:
+      'Bob, 收到，我今天会确认合同修订并回复你，感谢提醒。',
+    receivedAt: new Date(Date.now() - 2 * 3600_000).toISOString(),
+    unread: false,
+    labels: ['SENT'],
+    sourceUrl: 'https://mail.163.com/'
+  }
+]
+
 export class MockMail163Provider implements EmailProvider {
   readonly provider = 'mail163' as const
   readonly accountId = ACCOUNT_ID
@@ -112,7 +135,7 @@ export class MockMail163Provider implements EmailProvider {
 
   async getMessage(messageId: string): Promise<NormalizedEmail> {
     const msg = FIXTURES.find((m) => m.messageId === messageId)
-    if (!msg) throw new Error(`Message not found: ${messageId}`)
+    if (!msg) throw new Error(`未找到邮件：${messageId}`)
     return msg
   }
 
@@ -122,6 +145,20 @@ export class MockMail163Provider implements EmailProvider {
       (m) => m.subject.toLowerCase().includes(q) || m.textBody.toLowerCase().includes(q)
     )
     if (limit) items = items.slice(0, limit)
+    return items
+  }
+
+  async listSent(query: SentMailQuery): Promise<NormalizedEmail[]> {
+    let items = [...SENT_FIXTURES]
+    if (query.toAddress) {
+      const addr = query.toAddress.toLowerCase()
+      items = items.filter((m) => m.to.some((t) => t.address.toLowerCase() === addr))
+    }
+    if (query.sinceHours) {
+      const cutoff = Date.now() - query.sinceHours * 3600_000
+      items = items.filter((m) => new Date(m.receivedAt).getTime() >= cutoff)
+    }
+    if (query.limit) items = items.slice(0, query.limit)
     return items
   }
 
@@ -141,7 +178,7 @@ export class MockMail163Provider implements EmailProvider {
 
   async sendDraft(draftId: string): Promise<EmailSendResult> {
     const draft = this.drafts.get(draftId)
-    if (!draft) throw new Error(`Draft not found: ${draftId}`)
+    if (!draft) throw new Error(`未找到草稿：${draftId}`)
     // Mock send — never actually transmits. Real SMTP must route through the
     // Approval Service first (Spec §15).
     this.drafts.delete(draftId)

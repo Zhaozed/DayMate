@@ -4,7 +4,9 @@ import { ActivityService } from '../../src/main/services/activity-service'
 import { TaskService } from '../../src/main/services/task-service'
 import { NeedToKnowService } from '../../src/main/services/need-to-know-service'
 import { ApprovalService } from '../../src/main/services/approval-service'
+import { MemoryService } from '../../src/main/services/memory-service'
 import { createToolRegistry } from '../../src/main/agent/tool-registry'
+import { createDeterministicAgentRuntime } from '../../src/main/agent/agent-runtime'
 import { RoutineEngine, type EngineDeps } from '../../src/main/routines/engine'
 import { seedPresets } from '../../src/main/routines/presets'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
@@ -23,7 +25,8 @@ function buildEngine() {
     approvalService: new ApprovalService(store),
     emailProviders: [new MockEmailProvider(), new MockMail163Provider()],
     calendarProvider: new MockCalendarProvider(),
-    memory: new Map(),
+    agentRuntime: createDeterministicAgentRuntime(),
+    memoryService: new MemoryService(store),
     notify: () => {}
   }
   return { engine: new RoutineEngine(deps), store, deps }
@@ -51,7 +54,7 @@ describe('auto inbox', () => {
     // A Need to Know summarizing the buckets was published.
     const ntk = store.listNeedToKnow()
     expect(ntk.length).toBe(1)
-    expect(ntk[0].title).toBe('Inbox classified')
+    expect(ntk[0].title).toBe('收件箱已分类')
 
     // Activity captured every step.
     const events = store.listActivity(run.id)

@@ -6,6 +6,11 @@ out/
 dist/
 *.tsbuildinfo
 
+# Playwright e2e artifacts
+test-results/
+playwright-report/
+blob-report/
+
 # Electron-vite / Vite
 .electron-vite/
 
@@ -30,3 +35,6 @@ logs/
 
 # Drizzle
 drizzle/meta/_journal.json.bak
+
+# Vendored third-party tools (e.g. boss-cli cloned for editable install)
+vendor/

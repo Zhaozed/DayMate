@@ -12,7 +12,8 @@ import type {
   EmailQuery,
   EmailDraft,
   EmailDraftInput,
-  EmailSendResult
+  EmailSendResult,
+  SentMailQuery
 } from '@shared/types'
 
 export interface EmailProvider {
@@ -26,6 +27,14 @@ export interface EmailProvider {
   listMessages(query: EmailQuery): Promise<NormalizedEmail[]>
   getMessage(messageId: string): Promise<NormalizedEmail>
   searchMessages(query: string, limit?: number): Promise<NormalizedEmail[]>
+
+  /**
+   * The user's OWN sent mail — a tone corpus for draft-mirroring (Spec §13.5).
+   * Sent mail is the user's voice, the opposite of §17-untrusted inbound mail;
+   * it is only ever a tone reference, never an instruction source. Filtering by
+   * `toAddress` lets the corpus mirror the voice used with a specific contact.
+   */
+  listSent(query: SentMailQuery): Promise<NormalizedEmail[]>
 
   createDraft(input: EmailDraftInput): Promise<EmailDraft>
   sendDraft(draftId: string): Promise<EmailSendResult>

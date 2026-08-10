@@ -1,0 +1,28 @@
+# macOS packaging (Spec §21 M4). Produces a local, UNSIGNED Daymate.app + .dmg.
+# No code signing / notarization — that needs a paid Apple Developer ID and is
+# deferred (the unsigned app opens on the build machine; Gatekeeper may warn).
+#
+# Host-architecture only (no cross-arch electron download) — the deliverable is
+# a local .app that runs on THIS machine. arm64+x64 universal is a later step.
+appId: com.daymate.app
+productName: Daymate
+directories:
+  output: dist
+  buildResources: build
+# Package only the built app + manifest; never tests / docs / src.
+files:
+  - out/**/*
+  - package.json
+asar: true
+# Native modules must sit outside the asar (better-sqlite3's .node).
+asarUnpack:
+  - '**/better-sqlite3/**'
+mac:
+  category: public.app-category.productivity
+  target:
+    - dir
+    - dmg
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  darkModeSupport: true

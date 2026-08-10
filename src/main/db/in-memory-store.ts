@@ -10,7 +10,10 @@ import type {
   Task,
   NeedToKnow,
   ActivityEvent,
-  ApprovalRequest
+  ApprovalRequest,
+  MemoryItem,
+  Application,
+  ApplicationEvent
 } from '@shared/types'
 
 export class InMemoryStore implements RoutineStore {
@@ -21,6 +24,9 @@ export class InMemoryStore implements RoutineStore {
   private needToKnow = new Map<string, NeedToKnow>()
   private activity: ActivityEvent[] = []
   private approvals = new Map<string, ApprovalRequest>()
+  private memory = new Map<string, MemoryItem>()
+  private applications = new Map<string, Application>()
+  private applicationEvents = new Map<string, ApplicationEvent>()
 
   // ── Routines ──────────────────────────────────────────────────────────────
   listRoutines(): RoutineDefinition[] {
@@ -38,6 +44,9 @@ export class InMemoryStore implements RoutineStore {
     const next = { ...r, enabled, updatedAt: new Date().toISOString() }
     this.routines.set(id, next)
     return next
+  }
+  deleteRoutine(id: string): void {
+    this.routines.delete(id)
   }
 
   // ── Runs ──────────────────────────────────────────────────────────────────
@@ -169,5 +178,77 @@ export class InMemoryStore implements RoutineStore {
     const next = { ...a, status, resolvedAt }
     this.approvals.set(id, next)
     return { ...next, preview: { ...next.preview } }
+  }
+
+  // ── Memory (Spec §16) ──────────────────────────────────────────────────────
+  createMemory(item: MemoryItem): void {
+    this.memory.set(item.id, { ...item })
+  }
+  getMemory(id: string): MemoryItem | undefined {
+    const m = this.memory.get(id)
+    return m ? { ...m } : undefined
+  }
+  listMemory(): MemoryItem[] {
+    return [...this.memory.values()]
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .map((m) => ({ ...m }))
+  }
+  updateMemory(id: string, patch: Partial<MemoryItem>): MemoryItem | undefined {
+    const m = this.memory.get(id)
+    if (!m) return undefined
+    const next = { ...m, ...patch, updatedAt: new Date().toISOString() }
+    this.memory.set(id, next)
+    return { ...next }
+  }
+  deleteMemory(id: string): void {
+    this.memory.delete(id)
+  }
+  deleteMemoryByKey(key: string): void {
+    for (const [id, m] of [...this.memory.entries()]) {
+      if (m.key === key) this.memory.delete(id)
+    }
+  }
+
+  // ── Job applications ──────────────────────────────────────────────────────
+  createApplication(app: Application): void {
+    this.applications.set(app.id, { ...app })
+  }
+  getApplication(id: string): Application | undefined {
+    const a = this.applications.get(id)
+    return a ? { ...a } : undefined
+  }
+  getApplicationByBossSecurityId(securityId: string): Application | undefined {
+    for (const a of this.applications.values()) {
+      if (a.bossSecurityId === securityId) return { ...a }
+    }
+    return undefined
+  }
+  listApplications(): Application[] {
+    return [...this.applications.values()]
+      .sort((a, b) => (a.appliedAt < b.appliedAt ? 1 : -1))
+      .map((a) => ({ ...a }))
+  }
+  updateApplication(id: string, patch: Partial<Application>): Application | undefined {
+    const a = this.applications.get(id)
+    if (!a) return undefined
+    const next = { ...a, ...patch, updatedAt: new Date().toISOString() }
+    this.applications.set(id, next)
+    return { ...next }
+  }
+
+  createApplicationEvent(event: ApplicationEvent): void {
+    this.applicationEvents.set(event.id, { ...event })
+  }
+  getApplicationEventBySourceRef(applicationId: string, sourceRef: string): ApplicationEvent | undefined {
+    for (const e of this.applicationEvents.values()) {
+      if (e.applicationId === applicationId && e.sourceRef === sourceRef) return { ...e }
+    }
+    return undefined
+  }
+  listApplicationEvents(applicationId: string): ApplicationEvent[] {
+    return [...this.applicationEvents.values()]
+      .filter((e) => e.applicationId === applicationId)
+      .sort((a, b) => (a.eventAt < b.eventAt ? -1 : 1))
+      .map((e) => ({ ...e }))
   }
 }

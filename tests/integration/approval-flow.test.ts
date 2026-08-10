@@ -4,7 +4,9 @@ import { ActivityService } from '../../src/main/services/activity-service'
 import { TaskService } from '../../src/main/services/task-service'
 import { NeedToKnowService } from '../../src/main/services/need-to-know-service'
 import { ApprovalService } from '../../src/main/services/approval-service'
+import { MemoryService } from '../../src/main/services/memory-service'
 import { createToolRegistry } from '../../src/main/agent/tool-registry'
+import { createDeterministicAgentRuntime } from '../../src/main/agent/agent-runtime'
 import { RoutineEngine, type EngineDeps } from '../../src/main/routines/engine'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
@@ -25,7 +27,8 @@ function buildEngine() {
     approvalService,
     emailProviders,
     calendarProvider: new MockCalendarProvider(),
-    memory: new Map(),
+    agentRuntime: createDeterministicAgentRuntime(),
+    memoryService: new MemoryService(store),
     notify: () => {}
   }
   return { engine: new RoutineEngine(deps), store, deps, emailProviders }
@@ -101,7 +104,7 @@ describe('approval flow', () => {
     // No draft was created (the gated action never ran).
     const provider = deps.emailProviders[0]
     // Sending the (nonexistent) draft throws — proving it was never created.
-    await expect(provider.sendDraft('no-such-draft')).rejects.toThrow(/Draft not found/)
+    await expect(provider.sendDraft('no-such-draft')).rejects.toThrow(/未找到草稿/)
     // And the follow-up task never ran.
     expect(store.listTasks().length).toBe(0)
     // Approval stays rejected, not executed.
@@ -122,10 +125,10 @@ describe('approval flow', () => {
 
     const resumed = await engine.resume(run.id, { approval: { requestId: req.id } })
     expect(resumed.status).toBe('failed')
-    expect(resumed.error).toMatch(/content changed/i)
+    expect(resumed.error).toMatch(/内容.*变更/)
     // The gated action never executed — no draft created.
     const provider = deps.emailProviders[0]
-    await expect(provider.sendDraft('no-such-draft')).rejects.toThrow(/Draft not found/)
+    await expect(provider.sendDraft('no-such-draft')).rejects.toThrow(/未找到草稿/)
   })
 
   it('a duplicate send run (same idempotency key) is a no-op — no duplicate send', async () => {
@@ -145,5 +148,69 @@ describe('approval flow', () => {
     expect(run2.status).toBe('completed')
     // Only one approval ever existed for this run.
     expect(deps.approvalService.list().filter((a) => a.routineRunId === run1.id).length).toBe(1)
+  })
+
+  // Regression: an approval step whose args are FIELD-TEMPLATED against an
+  // earlier step's output (e.g. `{{gmailEmails[0].from.address}}`) must hash
+  // identically at preview and resume. Earlier the resume path resolved args
+  // against EMPTY outputs → every token collapsed → hash mismatch → the
+  // approved action was refused ("content changed"). This is the shape the
+  // Draft Review preset (M4) relies on.
+  it('templated approval args hash-match at resume (content immutability holds)', async () => {
+    const { engine, store, deps } = buildEngine()
+    const now = nowIso()
+    store.saveRoutine({
+      id: 'draft_templated',
+      name: 'Draft Templated',
+      description: 'approval-gated draft with field-templated args',
+      version: 1,
+      enabled: true,
+      trigger: { type: 'manual' },
+      inputs: {},
+      steps: [
+        {
+          id: 'gmail_emails',
+          type: 'tool',
+          tool: 'email.list',
+          args: { accountId: 'mock-gmail-001', unreadOnly: true, limit: 10 },
+          outputKey: 'gmailEmails'
+        },
+        {
+          id: 'draft_reply',
+          type: 'approval',
+          toolName: 'email.create_draft',
+          title: 'Draft a reply to {{gmailEmails[0].from.name}}',
+          args: {
+            accountId: '{{gmailEmails[0].accountId}}',
+            threadId: '{{gmailEmails[0].threadId}}',
+            to: [{ address: '{{gmailEmails[0].from.address}}', name: '{{gmailEmails[0].from.name}}' }],
+            subject: 'Re: {{gmailEmails[0].subject}}',
+            body: 'Thanks — I will review and get back to you shortly.'
+          }
+        }
+      ],
+      approvalPolicy: 'writes_only',
+      output: 'task',
+      createdAt: now,
+      updatedAt: now
+    })
+
+    const run = await engine.run('draft_templated', { idempotencyKey: 'af-tmpl' })
+    expect(run.status).toBe('waiting_approval')
+
+    const req = deps.approvalService.list(true)[0]
+    // The preview args were resolved with the real first-unread fixture.
+    expect(req.preview).toMatchObject({
+      accountId: 'mock-gmail-001',
+      threadId: 'mock-thread-001',
+      to: [{ address: 'alice@example.com', name: 'Alice Chen' }],
+      subject: 'Re: Q3 roadmap review — decision needed by Friday'
+    })
+
+    deps.approvalService.approve(req.id)
+    const resumed = await engine.resume(run.id, { approval: { requestId: req.id } })
+    // Must complete — NOT fail with "content changed".
+    expect(resumed.status).toBe('completed')
+    expect(deps.approvalService.get(req.id)?.status).toBe('executed')
   })
 })
