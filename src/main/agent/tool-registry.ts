@@ -14,7 +14,7 @@
 // Service (Spec §11).
 
 import { z } from 'zod'
-import type { RiskLevel, MemoryKey } from '@shared/types'
+import type { RiskLevel, MemoryKey, NormalizedEmail } from '@shared/types'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
 import type { BossProvider } from '../providers/boss/boss-provider'
@@ -176,6 +176,60 @@ export function createToolRegistry(): ToolRegistry {
       const provider = emailProviderFor(ctx, a.accountId)
       const items = await provider.listMessages(a)
       return { status: 'ok', data: items }
+    }
+  })
+
+  // List messages across ALL connected email accounts (Spec §9 multi-provider),
+  // deduped by messageId — a forwarded mail present in both Gmail and 163 is
+  // triaged once. Per-provider outages are logged as `provider_unavailable` and
+  // skipped so the run continues with the surviving providers' mail (Spec M3
+  // partial-failure). Account-agnostic: no accountId, so the Auto Inbox
+  // Routine works unchanged across mock↔real provider swaps (real Gmail + 163
+  // replace the mocks at index 0/1 via refreshEmailProviders).
+  registry.register({
+    name: 'email.list_all',
+    description:
+      'List messages across ALL connected email accounts, deduped by messageId. Per-provider outages are logged and skipped.',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({
+      unreadOnly: z.boolean().optional(),
+      sinceHours: z.number().optional(),
+      limit: z.number().optional()
+    }),
+    async execute(args, ctx) {
+      const a = args as { unreadOnly?: boolean; sinceHours?: number; limit?: number }
+      if (ctx.emailProviders.length === 0) throw new Error('No email provider connected')
+      // Fan out to every provider in parallel; each failure is isolated so one
+      // down account never kills the unified feed.
+      const perProvider = await Promise.all(
+        ctx.emailProviders.map(async (p) => {
+          try {
+            return await p.listMessages(a)
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e)
+            ctx.activityService.record({
+              runId: ctx.runId,
+              type: 'provider_unavailable',
+              summary: `提供方不可用：${p.provider} (${p.accountId}) — ${message}`,
+              metadata: { provider: p.provider, accountId: p.accountId, error: message }
+            })
+            return [] as NormalizedEmail[]
+          }
+        })
+      )
+      const all = perProvider.flat()
+      // Cross-provider dedupe by RFC822 messageId (same mail forwarded to two
+      // accounts is one triage item). Per-account dedup also runs in the
+      // classify stub as a belt-and-suspenders guard.
+      const seen = new Set<string>()
+      const deduped: NormalizedEmail[] = []
+      for (const e of all) {
+        if (seen.has(e.messageId)) continue
+        seen.add(e.messageId)
+        deduped.push(e)
+      }
+      return { status: 'ok', data: deduped }
     }
   })
 
