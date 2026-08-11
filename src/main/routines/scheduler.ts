@@ -13,17 +13,21 @@ import cron from 'node-cron'
 import type { RoutineEngine } from './engine'
 import type { RoutineStore } from '../db/store'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
+import type { ApplicationService } from '../services/application-service'
 import type { CalendarEvent, RoutineDefinition, RoutineTrigger } from '@shared/types'
 
 type ScheduledJob = ReturnType<typeof cron.schedule>
 
 const CAL_BEFORE_POLL_MS = 60_000 // poll every minute
 const CAL_BEFORE_LOOKAHEAD_MS = 24 * 60 * 60 * 1000 // look ahead 24h
+const APP_STATUS_POLL_MS = 60_000 // shared poll for application_status triggers
 
 export class RoutineScheduler {
   private cronJobs = new Map<string, ScheduledJob>()
   private pollTimers = new Map<string, ReturnType<typeof setInterval>>()
   private calBeforeTimer: ReturnType<typeof setInterval> | undefined
+  private appStatusTimer: ReturnType<typeof setInterval> | undefined
+  private maintenanceJob: ScheduledJob | undefined
   private stopped = false
   /** When true, scheduled triggers are suppressed (M4 context menu). Manual
    *  runs (runManually / ROUTINE_RUN) are never affected. */
@@ -32,7 +36,8 @@ export class RoutineScheduler {
   constructor(
     private readonly engine: RoutineEngine,
     private readonly store: RoutineStore,
-    private readonly calendarProvider?: CalendarProvider
+    private readonly calendarProvider?: CalendarProvider,
+    private readonly applicationService?: ApplicationService
   ) {}
 
   /** Start all enabled scheduled/poll routines. Safe to call once at boot. */
@@ -47,6 +52,38 @@ export class RoutineScheduler {
       this.calBeforeTimer = setInterval(() => {
         void this.fireCalendarBefore(new Date())
       }, CAL_BEFORE_POLL_MS)
+    }
+    // Shared `application_status` poller — one loop for all such routines.
+    if (this.applicationService && !this.appStatusTimer) {
+      this.appStatusTimer = setInterval(() => {
+        void this.fireApplicationStatus()
+      }, APP_STATUS_POLL_MS)
+    }
+    // Daily maintenance sweep (§3.1/§5): purge 30d-soft-deleted rows, auto-
+    // archive 30d-rejected, demote 14d-stale. A 30d/14d window needs no tighter
+    // cadence — daily cron, NOT the 60s poll. This is an internal housekeeping
+    // job, not a user-visible Routine (it does not appear in the Routines page);
+    // it runs even when routines are paused (unrelated to routine execution).
+    if (this.applicationService && !this.maintenanceJob) {
+      this.maintenanceJob = cron.schedule('0 3 * * *', () => {
+        void this.runMaintenance()
+      })
+    }
+  }
+
+  /** Daily maintenance: purge / auto-archive / auto-demote (§3.1/§5). */
+  private async runMaintenance(): Promise<void> {
+    if (!this.applicationService) return
+    try {
+      const result = this.applicationService.runMaintenance()
+      console.log(
+        `[scheduler] maintenance: purged=${result.purged} archived=${result.archived} demoted=${result.demoted}`
+      )
+    } catch (err) {
+      console.error(
+        '[scheduler] maintenance failed:',
+        err instanceof Error ? err.message : err
+      )
     }
   }
 
@@ -152,6 +189,42 @@ export class RoutineScheduler {
     }
   }
 
+  /**
+   * Poll entry point for `application_status` triggers (Milestone A §F). For
+   * each enabled routine with an `application_status` trigger, list
+   * applications whose current status is `interview` and that have no prep
+   * material yet, and fire the routine once per app. The `targetApplicationId`
+   * is passed into the run inputs so the routine reads THAT app (determinism).
+   * Idempotency key `appstatus:<rid>:<appId>:interview` so a refire (same tick,
+   * restart) is a no-op — and once a prep material is saved the app drops out
+   * of the candidate list anyway. Exposed for tests.
+   */
+  async fireApplicationStatus(): Promise<void> {
+    if (this.paused) return
+    if (!this.applicationService) return
+    const routines = this.store
+      .listRoutines()
+      .filter((r) => r.enabled && r.trigger.type === 'application_status')
+    if (routines.length === 0) return
+
+    const apps = this.applicationService.listInterviewStatusApps()
+    if (apps.length === 0) return
+
+    for (const r of routines) {
+      for (const v of apps) {
+        const idempotencyKey = `appstatus:${r.id}:${v.application.id}:interview`
+        try {
+          await this.engine.run(r.id, { idempotencyKey, inputs: { targetApplicationId: v.application.id } })
+        } catch (err) {
+          console.error(
+            `[scheduler] application_status run ${r.id} for ${v.application.id} failed:`,
+            err instanceof Error ? err.message : err
+          )
+        }
+      }
+    }
+  }
+
   private async fire(r: RoutineDefinition, idempotencyKey: string): Promise<void> {
     if (this.paused) return // M4 context menu: routines are paused.
     try {
@@ -184,6 +257,14 @@ export class RoutineScheduler {
     if (this.calBeforeTimer) {
       clearInterval(this.calBeforeTimer)
       this.calBeforeTimer = undefined
+    }
+    if (this.appStatusTimer) {
+      clearInterval(this.appStatusTimer)
+      this.appStatusTimer = undefined
+    }
+    if (this.maintenanceJob) {
+      this.maintenanceJob.stop()
+      this.maintenanceJob = undefined
     }
     this.stopped = true
   }

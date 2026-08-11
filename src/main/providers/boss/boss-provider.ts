@@ -54,6 +54,11 @@ export interface BossProvider {
   getJobDetail(securityId: string): Promise<BossJob>
   /** `boss search` / `boss recommend` — candidate jobs (P4 recommendation). */
   searchJobs(query: BossSearchQuery): Promise<BossJob[]>
+  /** Same as `searchJobs` but also surfaces boss's `hasMore` (another page
+   *  exists) so the renderer can offer "load more" without a blind probe.
+   *  `searchJobs` is a thin wrapper dropping `hasMore` (kept for the
+   *  `boss.search` tool + routine, which don't paginate). */
+  searchJobsPaged(query: BossSearchQuery): Promise<{ jobs: BossJob[]; hasMore: boolean }>
 }
 
 /**
@@ -105,5 +110,8 @@ export class SwappableBossProvider implements BossProvider {
   }
   async searchJobs(query: BossSearchQuery): Promise<BossJob[]> {
     return this.current.searchJobs(query)
+  }
+  async searchJobsPaged(query: BossSearchQuery): Promise<{ jobs: BossJob[]; hasMore: boolean }> {
+    return this.current.searchJobsPaged(query)
   }
 }

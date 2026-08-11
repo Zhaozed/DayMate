@@ -111,6 +111,73 @@ const JOB_DETAILS: Record<string, BossJob> = {
   }
 }
 
+// Search-only fixtures split by `jobType` so the dual-bucket (实习 / 秋招正职)
+// service path returns DISTINCT securityIds per bucket — the service splits
+// scored results back into buckets by securityId, so without distinct sets both
+// buckets would collapse into one. Intern salaries use the 元/天 style real
+// intern postings use; campus uses K style. The applied/interviews/chat
+// fixtures above stay keyed by SID_GOLANG/SID_FRONTEND (unchanged).
+const INTERN_JOBS: BossJob[] = [
+  {
+    provider: 'boss',
+    accountId: ACCOUNT_ID,
+    securityId: 'mock-sid-intern-go',
+    jobName: 'Go 后端实习生',
+    companyName: '腾讯',
+    salary: '200-300元/天',
+    city: '北京',
+    experience: '在校/应届',
+    degree: '本科',
+    hrName: '王HR',
+    brandName: '腾讯',
+    jobLabels: ['Go', '实习']
+  },
+  {
+    provider: 'boss',
+    accountId: ACCOUNT_ID,
+    securityId: 'mock-sid-intern-fe',
+    jobName: '前端实习生',
+    companyName: '阿里巴巴',
+    salary: '180-250元/天',
+    city: '杭州',
+    experience: '在校/应届',
+    degree: '本科',
+    hrName: '陈HR',
+    brandName: '阿里巴巴',
+    jobLabels: ['React', '实习']
+  }
+]
+const CAMPUS_JOBS: BossJob[] = [
+  {
+    provider: 'boss',
+    accountId: ACCOUNT_ID,
+    securityId: 'mock-sid-campus-go',
+    jobName: 'Go 后端工程师（校招）',
+    companyName: '字节跳动',
+    salary: '25-40K·15薪',
+    city: '北京',
+    experience: '在校/应届',
+    degree: '本科',
+    hrName: '张HR',
+    brandName: '字节跳动',
+    jobLabels: ['Go', '校招']
+  },
+  {
+    provider: 'boss',
+    accountId: ACCOUNT_ID,
+    securityId: 'mock-sid-campus-fe',
+    jobName: '前端工程师（校招）',
+    companyName: '美团',
+    salary: '20-35K·14薪',
+    city: '上海',
+    experience: '在校/应届',
+    degree: '本科',
+    hrName: '李HR',
+    brandName: '美团',
+    jobLabels: ['React', '校招']
+  }
+]
+
 export class MockBossProvider implements BossProvider {
   readonly provider = 'boss' as const
   readonly accountId = ACCOUNT_ID
@@ -157,10 +224,24 @@ export class MockBossProvider implements BossProvider {
   }
 
   async searchJobs(query: BossSearchQuery): Promise<BossJob[]> {
+    return (await this.searchJobsPaged(query)).jobs
+  }
+  async searchJobsPaged(query: BossSearchQuery): Promise<{ jobs: BossJob[]; hasMore: boolean }> {
     const kw = (query.keyword ?? '').toLowerCase()
-    const all = Object.values(JOB_DETAILS)
-    const matched = kw ? all.filter((j) => j.jobName.toLowerCase().includes(kw)) : all
+    // Branch by jobType so the dual-bucket service path (实习 vs 全职) returns
+    // distinct securityIds per bucket. No jobType → all fixtures (legacy
+    // `boss.search` tool / routine preset path).
+    let pool: BossJob[]
+    if (query.jobType === '实习') pool = INTERN_JOBS
+    else if (query.jobType === '全职') pool = CAMPUS_JOBS
+    else pool = Object.values(JOB_DETAILS)
+    const matched = kw ? pool.filter((j) => j.jobName.toLowerCase().includes(kw)) : pool
     const limit = query.limit ?? matched.length
-    return matched.slice(0, limit).map((j) => ({ ...j }))
+    const jobs = matched.slice(0, limit).map((j) => ({ ...j }))
+    // Mock: pretend more pages exist when the match set exceeds the slice, OR
+    // when the caller explicitly asks for page > 1 (simulates pagination —
+    // append/load-more exercises the service's page-increment path).
+    const hasMore = matched.length > limit || Boolean(query.page && query.page > 1 && matched.length > 0)
+    return { jobs, hasMore }
   }
 }

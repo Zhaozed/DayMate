@@ -10,6 +10,8 @@ import { autoInboxTemplate } from './templates/auto-inbox'
 import { draftReviewTemplate } from './templates/draft-review'
 import { meetingPrepTemplate } from './templates/meeting-prep'
 import { dailyWorkSummaryTemplate } from './templates/daily-work-summary'
+import { interviewPrepTemplate } from './templates/interview-prep'
+import { jobRecommendationTemplate } from './templates/job-recommendation'
 import { nowIso } from '../util/ids'
 
 const PRESETS = [
@@ -17,7 +19,9 @@ const PRESETS = [
   autoInboxTemplate,
   draftReviewTemplate,
   meetingPrepTemplate,
-  dailyWorkSummaryTemplate
+  dailyWorkSummaryTemplate,
+  interviewPrepTemplate,
+  jobRecommendationTemplate
 ]
 
 /** IDs of built-in preset routines — they cannot be deleted (M5 §14). Mirrors

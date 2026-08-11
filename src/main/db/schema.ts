@@ -149,6 +149,17 @@ export const applications = sqliteTable('applications', {
   appliedAt: text('applied_at').notNull(),
   channelRef: text('channel_ref'),
   notes: text('notes'),
+  // Milestone A rich fields:
+  city: text('city'),
+  salaryRange: text('salary_range'),
+  jdText: text('jd_text'),
+  stage: text('stage'),
+  stageDeadline: text('stage_deadline'),
+  interviewLink: text('interview_link'),
+  priority: text('priority').notNull(), // 'normal' | 'back'
+  emailRefId: text('email_ref_id'),
+  deletedAt: text('deleted_at'),
+  archivedAt: text('archived_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull()
 })
@@ -172,4 +183,45 @@ export const applicationEvents = sqliteTable('application_events', {
   locked: text('locked').notNull(), // '0' | '1'
   eventAt: text('event_at').notNull(),
   createdAt: text('created_at').notNull()
+})
+
+// ── Resume versions (Milestone A §4.2) ───────────────────────────────────────
+// Per-application versioned AI-tailored HTML resumes. Latest `version` is
+// active. `promptHash` = SHA-256 of (baseResume + jdText) to short-circuit a
+// re-request whose inputs are unchanged.
+export const resumeVersions = sqliteTable('resume_versions', {
+  id: text('id').primaryKey(),
+  applicationId: text('application_id').notNull(),
+  version: text('version').notNull(), // int as TEXT
+  html: text('html').notNull(),
+  modelId: text('model_id'),
+  promptHash: text('prompt_hash'),
+  createdAt: text('created_at').notNull()
+})
+
+// ── Interview prep materials (Milestone A §4.3) ──────────────────────────────
+// Per-application versioned interview-prep transcript (structured HTML).
+export const prepMaterials = sqliteTable('prep_materials', {
+  id: text('id').primaryKey(),
+  applicationId: text('application_id').notNull(),
+  version: text('version').notNull(),
+  html: text('html').notNull(),
+  modelId: text('model_id'),
+  promptHash: text('prompt_hash'),
+  createdAt: text('created_at').notNull()
+})
+
+// ── 面经库 (Milestone A §6) ───────────────────────────────────────────────────
+// Standalone post-interview experience note (not tied to one application).
+// `tags` is a JSON string[]. `source` is 'manual' | 'agent'.
+export const interviewNotes = sqliteTable('interview_notes', {
+  id: text('id').primaryKey(),
+  company: text('company'),
+  position: text('position'),
+  applicationId: text('application_id'),
+  tags: text('tags').notNull(), // JSON string[]
+  content: text('content').notNull(),
+  source: text('source').notNull(), // manual|agent
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull()
 })

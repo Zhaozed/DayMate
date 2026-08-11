@@ -44,6 +44,12 @@ export interface OutputSchemas {
   submit_meeting_prep: TSchema
   submit_work_summary: TSchema
   submit_draft_reply: TSchema
+  submit_resume: TSchema
+  submit_interview_transcript: TSchema
+  submit_application_email_classifications: TSchema
+  submit_funnel_review: TSchema
+  submit_score_job_matches: TSchema
+  submit_daily_fortune: TSchema
 }
 
 /**
@@ -195,7 +201,129 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
     memoryProposals: Type.Optional(Type.Array(memoryProposal))
   })
 
-  return { submit_brief, submit_classifications, submit_meeting_prep, submit_work_summary, submit_draft_reply }
+  // ── Milestone A: resume / transcript / application-email classification ──────
+  const submit_resume = Type.Object({
+    html: Type.String(),
+    summary: Type.String(),
+    memoryProposals: Type.Optional(Type.Array(memoryProposal))
+  })
+
+  const submit_interview_transcript = Type.Object({
+    html: Type.String(),
+    selfIntro: Type.String(),
+    starProjects: Type.Array(
+      Type.Object({
+        title: Type.String(),
+        situation: Type.String(),
+        task: Type.String(),
+        action: Type.String(),
+        result: Type.String()
+      })
+    ),
+    commonQA: Type.Array(
+      Type.Object({
+        question: Type.String(),
+        answer: Type.String()
+      })
+    ),
+    reverseQuestions: Type.Array(Type.String()),
+    memoryProposals: Type.Optional(Type.Array(memoryProposal))
+  })
+
+  const applicationEventType = Type.Union([
+    Type.Literal('applied'),
+    Type.Literal('communicated'),
+    Type.Literal('assessment'),
+    Type.Literal('written_test'),
+    Type.Literal('interview'),
+    Type.Literal('offer'),
+    Type.Literal('rejected'),
+    Type.Literal('withdrawn')
+  ])
+  const confidence = Type.Union([
+    Type.Literal('high'),
+    Type.Literal('medium'),
+    Type.Literal('low')
+  ])
+  const submit_application_email_classifications = Type.Object({
+    results: Type.Array(
+      Type.Object({
+        messageId: Type.String(),
+        eventType: applicationEventType,
+        company: Type.Optional(Type.String()),
+        position: Type.Optional(Type.String()),
+        confidence,
+        evidence: Type.String(),
+        untrusted: Type.Boolean()
+      })
+    ),
+    matched: Type.Number(),
+    pending: Type.Number(),
+    ignored: Type.Number()
+  })
+
+  // ── Milestone B: funnel review (descriptive recap) ──────────────────────────
+  const submit_funnel_review = Type.Object({
+    ...publishable,
+    highlights: Type.Array(Type.String()),
+    riskApps: Type.Array(
+      Type.Object({
+        company: Type.String(),
+        position: Type.Optional(Type.String()),
+        issue: Type.String()
+      })
+    ),
+    memoryProposals: Type.Optional(Type.Array(memoryProposal))
+  })
+
+  // ── Milestone C: score job matches ───────────────────────────────────────────
+  // PublishableBrief shape + `results` (per-job score/reason). Publishable to
+  // NTK via `need_to_know fromKey`; the renderer lists `results`.
+  const jobTier = Type.Union([
+    Type.Literal('high'),
+    Type.Literal('medium'),
+    Type.Literal('low'),
+    Type.Literal('skip')
+  ])
+  const submit_score_job_matches = Type.Object({
+    ...publishable,
+    results: Type.Array(
+      Type.Object({
+        securityId: Type.String(),
+        jobName: Type.String(),
+        companyName: Type.String(),
+        score: Type.Number(),
+        tier: jobTier,
+        reasons: Type.Array(Type.String()),
+        recommend: Type.Boolean(),
+        salary: Type.Optional(Type.String()),
+        city: Type.Optional(Type.String())
+      })
+    ),
+    memoryProposals: Type.Optional(Type.Array(memoryProposal))
+  })
+
+  // Milestone E — daily 运势 output (NOT a PublishableBrief; never NTK).
+  const submit_daily_fortune = Type.Object({
+    title: Type.String(),
+    summary: Type.String(),
+    tip: Type.String(),
+    mood: Type.Number()
+  })
+
+  return {
+    submit_brief,
+    submit_classifications,
+    submit_meeting_prep,
+    submit_work_summary,
+    submit_draft_reply,
+    submit_resume,
+    submit_interview_transcript,
+    submit_application_email_classifications,
+    submit_funnel_review,
+    submit_score_job_matches,
+    submit_daily_fortune
+  }
 }
 
 /**

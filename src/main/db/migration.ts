@@ -133,10 +133,26 @@ CREATE TABLE IF NOT EXISTS applications (
   applied_at TEXT NOT NULL,
   channel_ref TEXT,
   notes TEXT,
+  -- Milestone A rich fields:
+  city TEXT,
+  salary_range TEXT,
+  jd_text TEXT,
+  stage TEXT,
+  stage_deadline TEXT,
+  interview_link TEXT,
+  priority TEXT NOT NULL DEFAULT 'normal',
+  email_ref_id TEXT,
+  deleted_at TEXT,
+  archived_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_boss_sid ON applications(boss_security_id);
+-- NOTE: idx_applications_deleted is created in applyGuardedAlters (client.ts),
+-- AFTER the guarded ALTERs add deleted_at/archived_at to pre-Milestone-A
+-- dev DBs. Creating it here would fail on those DBs: CREATE TABLE IF NOT EXISTS
+-- is a no-op on the existing table (column not added), so the index references
+-- a non-existent column.
 
 CREATE TABLE IF NOT EXISTS application_events (
   id TEXT PRIMARY KEY,
@@ -154,4 +170,47 @@ CREATE TABLE IF NOT EXISTS application_events (
 );
 CREATE INDEX IF NOT EXISTS idx_app_events_app ON application_events(application_id);
 CREATE INDEX IF NOT EXISTS idx_app_events_ref ON application_events(source_ref);
+
+-- Milestone A: per-application versioned AI artefacts. The latest version
+-- is active; no separate active flag. prompt_hash short-circuits a re-request
+-- whose inputs are unchanged (skip the LLM call).
+CREATE TABLE IF NOT EXISTS resume_versions (
+  id TEXT PRIMARY KEY,
+  application_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  html TEXT NOT NULL,
+  model_id TEXT,
+  prompt_hash TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_resume_versions_app ON resume_versions(application_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_resume_versions_app_ver ON resume_versions(application_id, version);
+
+CREATE TABLE IF NOT EXISTS prep_materials (
+  id TEXT PRIMARY KEY,
+  application_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  html TEXT NOT NULL,
+  model_id TEXT,
+  prompt_hash TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prep_materials_app ON prep_materials(application_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prep_materials_app_ver ON prep_materials(application_id, version);
+
+-- 面经库 (Spec §6). Standalone (not tied to one application) so a note for
+-- company X is reusable across applications. tags is a JSON string[].
+CREATE TABLE IF NOT EXISTS interview_notes (
+  id TEXT PRIMARY KEY,
+  company TEXT,
+  position TEXT,
+  application_id TEXT,
+  tags TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_interview_notes_company ON interview_notes(company);
+CREATE INDEX IF NOT EXISTS idx_interview_notes_app ON interview_notes(application_id);
 `

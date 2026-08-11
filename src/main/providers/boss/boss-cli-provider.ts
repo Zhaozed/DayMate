@@ -114,6 +114,9 @@ function str(obj: Record<string, unknown>, keys: string[]): string | undefined {
   return typeof v === 'string' ? v : v != null ? String(v) : undefined
 }
 
+/** `boss search`/`recommend` job shape (from search.py `_render_job_table`):
+ *  flat `{securityId, jobName, brandName, salaryDesc, jobExperience, jobDegree,
+ *  cityName, areaDistrict, skills}`. */
 function mapJob(d: Record<string, unknown>): BossJob {
   return {
     provider: 'boss',
@@ -121,28 +124,80 @@ function mapJob(d: Record<string, unknown>): BossJob {
     securityId: String(d.securityId ?? d.security_id ?? d.encryptId ?? d.encrypt_id ?? ''),
     jobName: String(d.jobName ?? d.job_name ?? d.position ?? d.postName ?? ''),
     companyName: String(d.companyName ?? d.brandName ?? d.company ?? ''),
-    salary: str(d, ['salary', 'salaryDesc']),
-    city: str(d, ['cityName', 'city', 'locationName']),
-    experience: str(d, ['experienceName', 'experience', 'postAge']),
-    degree: str(d, ['degreeName', 'degree', 'education']),
+    salary: str(d, ['salaryDesc', 'salary']),
+    city: str(d, ['cityName', 'city', 'locationName', 'areaDistrict']),
+    experience: str(d, ['jobExperience', 'experienceName', 'experience', 'postAge']),
+    degree: str(d, ['jobDegree', 'degreeName', 'degree', 'education']),
     hrName: str(d, ['bossName', 'hrName', 'activeTimeDesc']),
     brandName: str(d, ['brandName', 'companyName']),
-    jobLabels: Array.isArray(d.jobLabels) ? (d.jobLabels as string[]) : undefined
+    jobLabels: Array.isArray(d.skills)
+      ? (d.skills as string[])
+      : Array.isArray(d.jobLabels)
+        ? (d.jobLabels as string[])
+        : undefined
   }
 }
 
-function mapApplication(d: Record<string, unknown>): BossApplication {
+/** `boss detail <securityId>` data shape (from search.py `_render_detail`):
+ *  nested `{jobInfo:{jobName,salaryDesc,experienceName|jobExperience,degreeName|jobDegree,
+ *  locationName|cityName,skills,postDescription|jobDesc}, bossInfo:{name,title},
+ *  brandComInfo:{brandName,…}}`. `jobInfo` may be absent → fall back to `data`
+ *  itself (some envelopes inline the job at the top level). */
+function mapJobDetail(d: Record<string, unknown>, securityId: string): BossJob {
+  const job = (d.jobInfo as Record<string, unknown> | undefined) ?? d
+  const brand = (d.brandComInfo as Record<string, unknown> | undefined) ?? (d.brandInfo as Record<string, unknown> | undefined) ?? d
+  const boss = (d.bossInfo as Record<string, unknown> | undefined) ?? {}
   return {
     provider: 'boss',
     accountId: ACCOUNT_ID,
-    securityId: String(d.securityId ?? d.security_id ?? d.encryptJobId ?? ''),
-    jobName: String(d.jobName ?? d.job_name ?? d.positionName ?? ''),
-    companyName: String(d.companyName ?? d.brandName ?? d.companyShortName ?? ''),
-    salary: str(d, ['salary', 'salaryDesc']),
-    city: str(d, ['cityName', 'city']),
-    brandName: str(d, ['brandName', 'companyName']),
-    hrName: str(d, ['bossName', 'hrName', 'friendName']),
-    appliedAt: str(d, ['addTime', 'applyTime', 'createTime'])
+    securityId: String(job.securityId ?? securityId ?? ''),
+    jobName: String(str(job, ['jobName', 'job_name', 'positionName']) ?? ''),
+    companyName: String(str(brand, ['brandName', 'companyName']) ?? ''),
+    salary: str(job, ['salaryDesc', 'salary']),
+    city: str(job, ['locationName', 'cityName', 'city', 'areaDistrict']),
+    experience: str(job, ['experienceName', 'jobExperience', 'experience']),
+    degree: str(job, ['degreeName', 'jobDegree', 'degree']),
+    hrName: str(boss, ['name', 'bossName', 'hrName']),
+    hrTitle: str(boss, ['title', 'bossTitle']),
+    brandName: str(brand, ['brandName', 'companyName']),
+    industry: str(brand, ['industryName', 'industry']),
+    scale: str(brand, ['scaleName', 'companyScale', 'scale']),
+    stage: str(brand, ['stageName', 'financeStage', 'stage']),
+    areaDistrict: str(job, ['areaDistrict', 'area']),
+    businessDistrict: str(job, ['businessDistrict']),
+    // JD body (postDescription|jobDesc) — untrusted boss data; the renderer
+    // renders as text (React escapes) never as HTML (§17.12/§17.13).
+    jobDescription: str(job, ['postDescription', 'jobDesc', 'jobDescHtml', 'description']),
+    jobLabels: Array.isArray(job.skills)
+      ? (job.skills as string[])
+      : Array.isArray(job.jobLabels)
+        ? (job.jobLabels as string[])
+        : undefined
+  }
+}
+
+/** `boss applied` card shape (from personal.py `_render`): nested
+ *  `{jobInfo:{jobName,salaryDesc,securityId,…}, brandInfo:{brandName,…},
+ *  deliverStatusDesc|statusDesc, updateTimeDesc|createTimeDesc}`.
+ *  `jobInfo`/`brandInfo` may be absent in some envelope variants → fall back
+ *  to the card itself (defensive, matches the render code's `card.get(jobInfo, card)`). */
+function mapApplication(d: Record<string, unknown>): BossApplication {
+  const job = (d.jobInfo as Record<string, unknown> | undefined) ?? d
+  const brand = (d.brandInfo as Record<string, unknown> | undefined) ?? d
+  return {
+    provider: 'boss',
+    accountId: ACCOUNT_ID,
+    securityId: String(
+      pick(job, ['securityId', 'security_id', 'encryptId', 'encryptJobId']) ??
+      pick(d, ['securityId', 'security_id', 'encryptJobId']) ?? ''
+    ),
+    jobName: String(str(job, ['jobName', 'job_name', 'positionName']) ?? ''),
+    companyName: String(str(brand, ['brandName', 'companyName', 'companyShortName']) ?? ''),
+    salary: str(job, ['salaryDesc', 'salary']),
+    city: str(job, ['cityName', 'city', 'locationName']),
+    brandName: str(brand, ['brandName', 'companyName']),
+    hrName: str(d, ['bossName', 'hrName', 'friendName', 'name']),
+    appliedAt: str(d, ['updateTimeDesc', 'createTimeDesc', 'addTime', 'applyTime', 'createTime'])
   }
 }
 
@@ -165,27 +220,37 @@ function mapChat(d: Record<string, unknown>): BossChat {
   return {
     provider: 'boss',
     accountId: ACCOUNT_ID,
-    friendId: String(d.encryptUid ?? d.friendId ?? d.encryptFriendId ?? d.id ?? ''),
-    hrName: str(d, ['bossName', 'hrName', 'friendName']),
+    friendId: String(d.encryptUid ?? d.friendId ?? d.encryptFriendId ?? d.encryptGeekId ?? d.id ?? ''),
+    hrName: str(d, ['name', 'bossName', 'hrName', 'friendName']),
     companyName: str(d, ['companyName', 'brandName']),
     jobName: str(d, ['jobName', 'positionName']),
-    lastMessage: str(d, ['lastContent', 'lastMessage', 'lastMsg']),
+    lastMessage: str(d, ['lastMsg', 'lastText', 'lastContent', 'lastMessage']),
     lastTime: str(d, ['lastTime', 'updateTime', 'lastCreateTime']),
     unread: typeof d.unread === 'boolean' ? d.unread : undefined,
     securityId: str(d, ['securityId', 'security_id', 'encryptJobId']) as string | undefined
   }
 }
 
-/** Normalize `boss <cmd> --json` `data` (object, array, or {list:[…]}) → array. */
+/** Normalize `boss <cmd> --json` `data` (object, array, or {<containerKey>:[…]}) → array.
+ *  Container keys are the real boss-cli envelope field names, derived from the
+ *  command render code: `cardList` (applied), `interviewList` (interviews),
+ *  `result`/`friendList` (chat), `jobList` (search/recommend/history). The legacy
+ *  generic keys (`list`,`results`…) stay as a tail fallback. */
 function asArray(data: unknown): Record<string, unknown>[] {
   if (Array.isArray(data)) return data as Record<string, unknown>[]
   if (data && typeof data === 'object') {
     const o = data as Record<string, unknown>
-    for (const k of ['list', 'applications', 'jobs', 'zpData', 'results']) {
+    for (const k of [
+      'cardList', 'interviewList', 'friendList', 'result', 'jobList',
+      'list', 'applications', 'jobs', 'zpData', 'results'
+    ]) {
       if (Array.isArray(o[k])) return o[k] as Record<string, unknown>[]
     }
-    // Single object → wrap.
-    return [o]
+    // `boss chat` with no conversations returns `data: {}` (no list key).
+    // An empty object is NOT a record — return [] so we don't synthesize a
+    // single all-empty entry. A non-empty object without a list key (rare
+    // inline-record envelope) is wrapped as a single item.
+    return Object.keys(o).length > 0 ? [o] : []
   }
   return []
 }
@@ -284,18 +349,41 @@ export class BossCliProvider implements BossProvider {
 
   async getJobDetail(securityId: string): Promise<BossJob> {
     const data = await runBoss<Record<string, unknown>>(['detail', securityId])
-    return mapJob(data)
+    return mapJobDetail(data, securityId)
   }
 
   async searchJobs(query: BossSearchQuery): Promise<BossJob[]> {
+    return (await this.searchJobsPaged(query)).jobs
+  }
+  async searchJobsPaged(query: BossSearchQuery): Promise<{ jobs: BossJob[]; hasMore: boolean }> {
     const args = ['search', query.keyword]
     if (query.city) args.push('--city', query.city)
     if (query.salary) args.push('--salary', query.salary)
     if (query.experience) args.push('--exp', query.experience)
     if (query.degree) args.push('--degree', query.degree)
+    if (query.industry) args.push('--industry', query.industry)
+    if (query.scale) args.push('--scale', query.scale)
+    if (query.stage) args.push('--stage', query.stage)
+    if (query.jobType) args.push('--job-type', query.jobType)
     if (query.page) args.push('-p', String(query.page))
     const data = await runBoss<unknown>(args)
+    // boss search envelope: data = { jobList: [...], hasMore: bool }. Pull
+    // `hasMore` from the data object before asArray flattens to the job list.
+    const obj = data && typeof data === 'object' ? (data as Record<string, unknown>) : {}
+    const hasMore = obj.hasMore === true || obj.has_more === true
     const jobs = asArray(data).map(mapJob)
-    return query.limit ? jobs.slice(0, query.limit) : jobs
+    return { jobs: query.limit ? jobs.slice(0, query.limit) : jobs, hasMore }
   }
+}
+
+// Exported for unit tests that lock mappers to real boss-cli envelope shapes
+// (derived from boss_cli/commands/*.py render code). These are pure data
+// transforms with no side effects.
+export {
+  asArray,
+  mapJob,
+  mapJobDetail,
+  mapApplication,
+  mapInterview,
+  mapChat
 }

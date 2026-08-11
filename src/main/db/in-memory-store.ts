@@ -13,7 +13,10 @@ import type {
   ApprovalRequest,
   MemoryItem,
   Application,
-  ApplicationEvent
+  ApplicationEvent,
+  ResumeVersion,
+  PrepMaterial,
+  InterviewNote
 } from '@shared/types'
 
 export class InMemoryStore implements RoutineStore {
@@ -27,6 +30,9 @@ export class InMemoryStore implements RoutineStore {
   private memory = new Map<string, MemoryItem>()
   private applications = new Map<string, Application>()
   private applicationEvents = new Map<string, ApplicationEvent>()
+  private resumeVersions = new Map<string, ResumeVersion>()
+  private prepMaterials = new Map<string, PrepMaterial>()
+  private interviewNotes = new Map<string, InterviewNote>()
 
   // ── Routines ──────────────────────────────────────────────────────────────
   listRoutines(): RoutineDefinition[] {
@@ -225,7 +231,20 @@ export class InMemoryStore implements RoutineStore {
   }
   listApplications(): Application[] {
     return [...this.applications.values()]
+      .filter((a) => !a.deletedAt && !a.archivedAt)
       .sort((a, b) => (a.appliedAt < b.appliedAt ? 1 : -1))
+      .map((a) => ({ ...a }))
+  }
+  listDeletedApplications(): Application[] {
+    return [...this.applications.values()]
+      .filter((a) => a.deletedAt)
+      .sort((a, b) => ((a.deletedAt ?? '') < (b.deletedAt ?? '') ? 1 : -1))
+      .map((a) => ({ ...a }))
+  }
+  listArchivedApplications(): Application[] {
+    return [...this.applications.values()]
+      .filter((a) => a.archivedAt && !a.deletedAt)
+      .sort((a, b) => ((a.archivedAt ?? '') < (b.archivedAt ?? '') ? 1 : -1))
       .map((a) => ({ ...a }))
   }
   updateApplication(id: string, patch: Partial<Application>): Application | undefined {
@@ -234,6 +253,34 @@ export class InMemoryStore implements RoutineStore {
     const next = { ...a, ...patch, updatedAt: new Date().toISOString() }
     this.applications.set(id, next)
     return { ...next }
+  }
+  softDeleteApplication(id: string, deletedAt: string): void {
+    const a = this.applications.get(id)
+    if (!a) return
+    this.applications.set(id, { ...a, deletedAt, updatedAt: new Date().toISOString() })
+  }
+  restoreApplication(id: string): void {
+    const a = this.applications.get(id)
+    if (!a) return
+    const next: Application = { ...a, deletedAt: undefined, updatedAt: new Date().toISOString() }
+    this.applications.set(id, next)
+  }
+  purgeApplication(id: string): void {
+    this.applications.delete(id)
+    for (const [eid, e] of [...this.applicationEvents.entries()]) {
+      if (e.applicationId === id) this.applicationEvents.delete(eid)
+    }
+    for (const [rid, r] of [...this.resumeVersions.entries()]) {
+      if (r.applicationId === id) this.resumeVersions.delete(rid)
+    }
+    for (const [pid, p] of [...this.prepMaterials.entries()]) {
+      if (p.applicationId === id) this.prepMaterials.delete(pid)
+    }
+  }
+  archiveApplication(id: string, archivedAt: string): void {
+    const a = this.applications.get(id)
+    if (!a) return
+    this.applications.set(id, { ...a, archivedAt, updatedAt: new Date().toISOString() })
   }
 
   createApplicationEvent(event: ApplicationEvent): void {
@@ -250,5 +297,59 @@ export class InMemoryStore implements RoutineStore {
       .filter((e) => e.applicationId === applicationId)
       .sort((a, b) => (a.eventAt < b.eventAt ? -1 : 1))
       .map((e) => ({ ...e }))
+  }
+
+  // ── Resume versions (Milestone A) ──────────────────────────────────────────
+  createResumeVersion(v: ResumeVersion): void {
+    this.resumeVersions.set(v.id, { ...v })
+  }
+  listResumeVersions(applicationId: string): ResumeVersion[] {
+    return [...this.resumeVersions.values()]
+      .filter((r) => r.applicationId === applicationId)
+      .sort((a, b) => (a.version < b.version ? 1 : -1))
+      .map((r) => ({ ...r }))
+  }
+  getLatestResumeVersion(applicationId: string): ResumeVersion | undefined {
+    const list = this.listResumeVersions(applicationId)
+    return list[0] ? { ...list[0] } : undefined
+  }
+
+  // ── Prep materials (Milestone A) ───────────────────────────────────────────
+  createPrepMaterial(m: PrepMaterial): void {
+    this.prepMaterials.set(m.id, { ...m })
+  }
+  listPrepMaterials(applicationId: string): PrepMaterial[] {
+    return [...this.prepMaterials.values()]
+      .filter((m) => m.applicationId === applicationId)
+      .sort((a, b) => (a.version < b.version ? 1 : -1))
+      .map((m) => ({ ...m }))
+  }
+  getLatestPrepMaterial(applicationId: string): PrepMaterial | undefined {
+    const list = this.listPrepMaterials(applicationId)
+    return list[0] ? { ...list[0] } : undefined
+  }
+
+  // ── 面经库 (Milestone A) ───────────────────────────────────────────────────
+  createInterviewNote(n: InterviewNote): void {
+    this.interviewNotes.set(n.id, { ...n })
+  }
+  getInterviewNote(id: string): InterviewNote | undefined {
+    const n = this.interviewNotes.get(id)
+    return n ? { ...n } : undefined
+  }
+  listInterviewNotes(): InterviewNote[] {
+    return [...this.interviewNotes.values()]
+      .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+      .map((n) => ({ ...n }))
+  }
+  updateInterviewNote(id: string, patch: Partial<InterviewNote>): InterviewNote | undefined {
+    const n = this.interviewNotes.get(id)
+    if (!n) return undefined
+    const next = { ...n, ...patch, updatedAt: new Date().toISOString() }
+    this.interviewNotes.set(id, next)
+    return { ...next }
+  }
+  deleteInterviewNote(id: string): void {
+    this.interviewNotes.delete(id)
   }
 }

@@ -17,7 +17,10 @@ import type {
   ApprovalRequest,
   MemoryItem,
   Application,
-  ApplicationEvent
+  ApplicationEvent,
+  ResumeVersion,
+  PrepMaterial,
+  InterviewNote
 } from '@shared/types'
 
 export interface RoutineStore {
@@ -78,8 +81,33 @@ export interface RoutineStore {
   getApplicationByBossSecurityId(securityId: string): Application | undefined
   listApplications(): Application[]
   updateApplication(id: string, patch: Partial<Application>): Application | undefined
+  /** Soft-delete (sets deletedAt); visible in the recycle bin until purged. */
+  softDeleteApplication(id: string, deletedAt: string): void
+  restoreApplication(id: string): void
+  /** Hard delete by id (manual early-delete from recycle bin, or auto-purge). */
+  purgeApplication(id: string): void
+  listDeletedApplications(): Application[]
+  listArchivedApplications(): Application[]
+  archiveApplication(id: string, archivedAt: string): void
 
   createApplicationEvent(event: ApplicationEvent): void
   getApplicationEventBySourceRef(applicationId: string, sourceRef: string): ApplicationEvent | undefined
   listApplicationEvents(applicationId: string): ApplicationEvent[]
+
+  // Resume versions (Milestone A §4.2). Latest version = active.
+  createResumeVersion(v: ResumeVersion): void
+  listResumeVersions(applicationId: string): ResumeVersion[]
+  getLatestResumeVersion(applicationId: string): ResumeVersion | undefined
+
+  // Interview prep materials (Milestone A §4.3).
+  createPrepMaterial(m: PrepMaterial): void
+  listPrepMaterials(applicationId: string): PrepMaterial[]
+  getLatestPrepMaterial(applicationId: string): PrepMaterial | undefined
+
+  // 面经库 (Milestone A §6). Standalone, tagged, searchable.
+  createInterviewNote(n: InterviewNote): void
+  getInterviewNote(id: string): InterviewNote | undefined
+  listInterviewNotes(): InterviewNote[]
+  updateInterviewNote(id: string, patch: Partial<InterviewNote>): InterviewNote | undefined
+  deleteInterviewNote(id: string): void
 }

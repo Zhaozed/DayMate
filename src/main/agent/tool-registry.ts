@@ -22,8 +22,19 @@ import type { TaskService } from '../services/task-service'
 import type { NeedToKnowService } from '../services/need-to-know-service'
 import type { ActivityService } from '../services/activity-service'
 import type { MemoryService } from '../services/memory-service'
+import type { ApplicationService } from '../services/application-service'
+import type { Settings } from '../util/settings'
 import { newId } from '../util/ids'
-import { taskPrioritySchema, taskStatusSchema, classificationSchema, memoryKeySchema } from '@shared/schemas'
+import {
+  taskPrioritySchema,
+  taskStatusSchema,
+  classificationSchema,
+  memoryKeySchema,
+  applicationCreateInputSchema,
+  applicationUpdateFieldsSchema,
+  applicationEventTypeSchema,
+  interviewNoteInputSchema
+} from '@shared/schemas'
 
 export interface ToolContext {
   runId?: string
@@ -38,6 +49,12 @@ export interface ToolContext {
   activityService: ActivityService
   /** Explicit, inspectable, deletable memory (Spec §16). */
   memoryService: MemoryService
+  /** 投递漏斗 service (Milestone A) — applications + resume/prep/面经. */
+  applicationService: ApplicationService
+  /** Plain (non-secret) app settings (LLM config + jobSearch). Read-only for
+   *  tools that need user-configured criteria (e.g. `job_search.get_intent`
+   *  reads `jobIntent`). Optional: absent in tests that don't exercise it. */
+  settings?: Settings
   notify: (message: string) => void
   /** Present only when executing an already-approved action (M2). */
   approval?: { requestId: string }
@@ -650,6 +667,186 @@ export function createToolRegistry(): ToolRegistry {
       }
       const items = await ctx.bossProvider.searchJobs(a)
       return { status: 'ok', data: items }
+    }
+  })
+
+  // ── Job-search intent (Milestone C) — read structured jobIntent from settings
+  // Exposes the user's configured criteria (keyword/cities/salary/experience/
+  // degree) as a typed value for the `job_recommendation` routine's step graph
+  // to template `boss.search` args + feed `score_job_matches`. R0 read of a
+  // non-secret settings field. Returns `{ status: 'ok', data: null }` with an
+  // Activity note when jobIntent is absent so the routine short-circuits
+  // gracefully (no crash, no-op run) — mirrors how unavailable providers log
+  // `provider_unavailable` and continue.
+  registry.register({
+    name: 'job_search.get_intent',
+    description:
+      'Read the user’s structured job-search intent (keyword/cities/salary/experience/degree) from settings. R0 read.',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({}).strict(),
+    async execute(_args, ctx) {
+      if (!ctx.settings) {
+        return { status: 'ok', data: null }
+      }
+      const { jobIntent } = await ctx.settings.readJobSearch()
+      return { status: 'ok', data: jobIntent ?? null }
+    }
+  })
+
+  // ── 投递漏斗 (Milestone A) — application CRUD + resume/prep/面经 ──────────────
+  // All local DB writes (R1) — no external effect, no approval needed (Spec §11).
+  // JD stored on the application row is UNTRUSTED (§17); it only ever reaches a
+  // model via frameJd in a USER message, never the system prompt.
+  registry.register({
+    name: 'application.search',
+    description:
+      'Search the active application funnel by company/position/city substring, or fetch one by id. R0 read.',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({
+      id: z.string().optional(),
+      company: z.string().optional(),
+      position: z.string().optional(),
+      city: z.string().optional()
+    }),
+    async execute(args, ctx) {
+      const a = args as { id?: string; company?: string; position?: string; city?: string }
+      const views = ctx.applicationService.searchApplications(a)
+      return { status: 'ok', data: views }
+    }
+  })
+
+  registry.register({
+    name: 'application.create',
+    description: 'Create a manual application (官网/内推) with rich fields. R1 local write.',
+    risk: 'R1',
+    requiresApproval: false,
+    parameters: applicationCreateInputSchema,
+    async execute(args, ctx) {
+      const view = ctx.applicationService.create(args as Parameters<ApplicationService['create']>[0])
+      return { status: 'ok', data: view }
+    }
+  })
+
+  registry.register({
+    name: 'application.update_field',
+    description: 'Update editable rich fields on an application (single-field refresh). R1 local write.',
+    risk: 'R1',
+    requiresApproval: false,
+    parameters: applicationUpdateFieldsSchema.extend({ id: z.string() }),
+    async execute(args, ctx) {
+      const a = args as { id: string } & Record<string, unknown>
+      const { id, ...patch } = a
+      const view = ctx.applicationService.updateFields(id, patch)
+      if (!view) return { status: 'error', error: `未找到投递记录：${id}` }
+      return { status: 'ok', data: view }
+    }
+  })
+
+  registry.register({
+    name: 'application.add_event',
+    description: 'Append a manual progress event to an application (locked by default). R1 local write.',
+    risk: 'R1',
+    requiresApproval: false,
+    parameters: z.object({
+      applicationId: z.string(),
+      type: applicationEventTypeSchema,
+      round: z.number().optional(),
+      role: z.enum(['hr', 'tech', 'business', 'cross']).optional(),
+      subState: z.enum(['scheduled', 'done']).optional(),
+      evidence: z.string().optional(),
+      eventAt: z.string().optional(),
+      locked: z.boolean().optional()
+    }),
+    async execute(args, ctx) {
+      const view = ctx.applicationService.addEvent(args as Parameters<ApplicationService['addEvent']>[0])
+      return { status: 'ok', data: view }
+    }
+  })
+
+  registry.register({
+    name: 'application.get_latest_resume',
+    description: 'Get the latest AI resume version (HTML) for an application. R0 read (transcript routine step).',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({ applicationId: z.string() }),
+    async execute(args, ctx) {
+      const a = args as { applicationId: string }
+      const resume = ctx.applicationService.getLatestResume(a.applicationId)
+      return { status: 'ok', data: resume ?? null }
+    }
+  })
+
+  registry.register({
+    name: 'application.save_resume',
+    description: 'Save a new AI resume version for an application (version = prev+1). R1 local write.',
+    risk: 'R1',
+    requiresApproval: false,
+    parameters: z.object({
+      applicationId: z.string(),
+      html: z.string(),
+      modelId: z.string().optional(),
+      promptHash: z.string().optional()
+    }),
+    async execute(args, ctx) {
+      const a = args as { applicationId: string; html: string; modelId?: string; promptHash?: string }
+      const v = ctx.applicationService.saveResume(a.applicationId, a.html, a.modelId, a.promptHash)
+      return { status: 'ok', data: v }
+    }
+  })
+
+  registry.register({
+    name: 'application.save_prep_material',
+    description: 'Save a new interview-prep transcript version for an application. R1 local write.',
+    risk: 'R1',
+    requiresApproval: false,
+    parameters: z.object({
+      applicationId: z.string(),
+      html: z.string(),
+      modelId: z.string().optional(),
+      promptHash: z.string().optional()
+    }),
+    async execute(args, ctx) {
+      const a = args as { applicationId: string; html: string; modelId?: string; promptHash?: string }
+      const m = ctx.applicationService.savePrepMaterial(a.applicationId, a.html, a.modelId, a.promptHash)
+      return { status: 'ok', data: m }
+    }
+  })
+
+  registry.register({
+    name: 'interview_notes.search',
+    description: 'Search the 面经库 (interview-experience notes) by free-text query. R0 read (transcript routine step).',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({ query: z.string().optional() }),
+    async execute(args, ctx) {
+      const q = (args as { query?: string }).query
+      const notes = ctx.applicationService.listInterviewNotes(q)
+      return { status: 'ok', data: notes }
+    }
+  })
+
+  registry.register({
+    name: 'interview_notes.create',
+    description: 'Create a 面经 (interview-experience note). source is manual (trusted). R1 local write.',
+    risk: 'R1',
+    requiresApproval: false,
+    parameters: interviewNoteInputSchema.extend({ applicationId: z.string().optional() }),
+    async execute(args, ctx) {
+      const a = (args as { tags: string[]; content: string; company?: string; position?: string; applicationId?: string }) as Parameters<
+        ApplicationService['createInterviewNote']
+      >[0] & { tags: string[] }
+      // interviewNoteInputSchema already validates tags via interviewNoteTagSchema;
+      // cast through the input type the service expects.
+      const note = ctx.applicationService.createInterviewNote({
+        company: a.company,
+        position: a.position,
+        applicationId: a.applicationId,
+        tags: a.tags as Parameters<ApplicationService['createInterviewNote']>[0]['tags'],
+        content: a.content
+      })
+      return { status: 'ok', data: note }
     }
   })
 

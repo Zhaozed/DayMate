@@ -10,22 +10,31 @@ import type {
   Mail163TestResult,
   FeishuStatus,
   FeishuTestResult,
-  IntegrationStatus
+  IntegrationStatus,
+  JobSearchSettings,
+  JobIntent,
+  NotificationPrefs,
+  NotificationCategory,
+  RoutineDefinition,
+  BirthData
 } from '@shared/types'
+import { NOTIFICATION_CATEGORIES } from '@shared/types'
 import { LLM_PROVIDERS, DEFAULT_LLM_MODEL_IDS } from '@shared/constants'
-import { INTEGRATION_STATUS_LABEL, statusLabel } from '../labels'
+import { INTEGRATION_STATUS_LABEL, NOTIFICATION_CATEGORY_LABEL, statusLabel } from '../labels'
 
-// Integrations (Spec §18). The Gmail card drives the real OAuth flow
-// (client_id/secret → SecretStore; Connect opens the browser loopback flow;
-// Test lists one real message). The 163 card drives real IMAP/SMTP via the
-// mailbox 授权码. The Feishu card drives real calendar read via user OAuth.
+// Integrations & settings (Spec §18 + Milestone D). The Gmail card drives the
+// real OAuth flow (client_id/secret → SecretStore; Connect opens the browser
+// loopback flow; Test lists one real message). The 163 card drives real
+// IMAP/SMTP via the mailbox 授权码. The Feishu card drives real calendar read
+// via user OAuth. The Milestone D cards add: job-search config, notification
+// preferences, and 投递 data export.
 const MOCK_ACCOUNTS: { provider: string; displayName: string; email: string; status: string }[] = []
 
 export function IntegrationsPage(): ReactElement {
   return (
     <div>
-      <h1 className="text-xl font-semibold text-white">集成</h1>
-      <p className="mt-1 text-sm text-white/45">已连接的账户与提供方。</p>
+      <h1 className="text-xl font-semibold text-white">集成与设置</h1>
+      <p className="mt-1 text-sm text-white/45">已连接的账户、提供方与应用设置。</p>
 
       <div className="mt-6 space-y-2">
         {MOCK_ACCOUNTS.map((a) => (
@@ -48,11 +57,15 @@ export function IntegrationsPage(): ReactElement {
       <Mail163Card />
       <FeishuCard />
       <LlmCard />
+      <JobSearchCard />
+      <BirthDataCard />
+      <NotificationPrefsCard />
+      <DataExportCard />
 
       <div className="mt-6 rounded-lg border border-amber-500/20 p-4" style={{ background: 'rgba(120,80,0,0.08)' }}>
         <h2 className="text-sm font-semibold text-amber-200/90">说明</h2>
         <p className="mt-1 text-xs text-white/55">
-          Daymate 绝不硬编码令牌，绝不向渲染进程暴露令牌；并且（对于 LLM 密钥）保存后不再回读。日历创建/更新（R2 写入）已推迟——这些集成为只读。
+          Daymate 绝不硬编码令牌，绝不向渲染进程暴露令牌；并且（对于 LLM 密钥）保存后不再回读。日历创建/更新（R2 写入）已推迟——这些集成为只读。通知偏好与求职意向为非密设置，持久于本地 settings.json。
         </p>
       </div>
     </div>
@@ -743,6 +756,601 @@ function LlmCard(): ReactElement {
           {test.ok ? '✓' : '✗'} {test.message}
         </div>
       ) : null}
+    </div>
+  )
+}
+
+// ── Milestone D §D1 — job-search config (non-secret paths + jobIntent) ──
+// Reuses the same getJobSearchConfig/setJobSearchConfig IPC the 投递 page's
+// inline jobIntent editor uses — both surfaces read/write the same settings,
+// so editing here is reflected there and vice versa.
+function JobSearchCard(): ReactElement {
+  const [cfg, setCfg] = useState<JobSearchSettings | null>(null)
+  const [baseResumePath, setBaseResumePath] = useState('')
+  const [transcriptTemplatePath, setTranscriptTemplatePath] = useState('')
+  const [intent, setIntent] = useState<JobIntent>({ keyword: '' })
+  const [busy, setBusy] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [saved, setSaved] = useState<string | null>(null)
+
+  const refresh = async (): Promise<void> => {
+    try {
+      const c = await window.daymate.getJobSearchConfig()
+      setCfg(c)
+      setBaseResumePath(c.baseResumePath ?? '')
+      setTranscriptTemplatePath(c.transcriptTemplatePath ?? '')
+      setIntent(c.jobIntent ?? { keyword: '' })
+      setLoadError(null)
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const save = async (): Promise<void> => {
+    setBusy(true)
+    setSaved(null)
+    try {
+      const next: JobSearchSettings = {
+        ...(baseResumePath ? { baseResumePath } : {}),
+        ...(transcriptTemplatePath ? { transcriptTemplatePath } : {}),
+        jobIntent: intent.keyword.trim() ? intent : undefined
+      }
+      const c = await window.daymate.setJobSearchConfig(next)
+      setCfg(c)
+      setSaved('已保存')
+    } catch (e) {
+      setSaved(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
+      <h2 className="text-sm font-semibold text-white/90">求职设置</h2>
+      <p className="mt-1 text-xs text-white/45">
+        基础简历路径（生成定制简历时作为底稿，可信 §17）与求职意向（岗位推荐评分依据）。非密设置，本地持久。
+      </p>
+
+      {loadError && (
+        <div className="mt-3 rounded border border-rose-500/20 p-2 text-xs text-rose-200" style={{ background: 'rgba(120,0,40,0.08)' }}>
+          无法加载：{loadError}
+        </div>
+      )}
+
+      <div className="mt-3 grid grid-cols-1 gap-3">
+        <label className="block">
+          <span className="text-xs text-white/50">基础简历路径（绝对路径，可选）</span>
+          <input
+            value={baseResumePath}
+            onChange={(e) => setBaseResumePath(e.target.value)}
+            placeholder={cfg?.baseResumePath ?? '/Users/you/简历/base.html'}
+            className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs text-white/50">逐字稿模板路径（可选）</span>
+          <input
+            value={transcriptTemplatePath}
+            onChange={(e) => setTranscriptTemplatePath(e.target.value)}
+            placeholder={cfg?.transcriptTemplatePath ?? '/Users/you/面经/template.html'}
+            className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+          />
+        </label>
+      </div>
+
+      <div className="mt-4 rounded border border-white/5 p-3" style={{ background: 'rgba(0,0,0,0.2)' }}>
+        <div className="text-xs font-medium text-white/70">求职意向（岗位推荐评分依据）</div>
+        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <label className="block sm:col-span-2">
+            <span className="text-xs text-white/50">关键词</span>
+            <input
+              value={intent.keyword}
+              onChange={(e) => setIntent({ ...intent, keyword: e.target.value })}
+              placeholder="Go 后端"
+              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+            />
+          </label>
+          <label className="block sm:col-span-2">
+            <span className="text-xs text-white/50">期望城市（逗号分隔）</span>
+            <input
+              value={(intent.cities ?? []).join(',')}
+              onChange={(e) =>
+                setIntent({
+                  ...intent,
+                  cities: e.target.value.split(',').map((s) => s.trim()).filter(Boolean)
+                })
+              }
+              placeholder="北京, 上海"
+              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-white/50">最低月薪（K）</span>
+            <input
+              type="number"
+              value={intent.salaryMin ?? ''}
+              onChange={(e) =>
+                setIntent({ ...intent, salaryMin: e.target.value ? Number(e.target.value) : undefined })
+              }
+              placeholder="25"
+              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-white/50">最高月薪（K）</span>
+            <input
+              type="number"
+              value={intent.salaryMax ?? ''}
+              onChange={(e) =>
+                setIntent({ ...intent, salaryMax: e.target.value ? Number(e.target.value) : undefined })
+              }
+              placeholder="40"
+              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-white/50">经验（可选）</span>
+            <input
+              value={intent.experience ?? ''}
+              onChange={(e) => setIntent({ ...intent, experience: e.target.value || undefined })}
+              placeholder="3-5年"
+              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-white/50">学历（可选）</span>
+            <input
+              value={intent.degree ?? ''}
+              onChange={(e) => setIntent({ ...intent, degree: e.target.value || undefined })}
+              placeholder="本科"
+              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center gap-3">
+        <button
+          onClick={save}
+          disabled={busy}
+          className="rounded px-3 py-1 text-xs text-white/80 disabled:opacity-50"
+          style={{ background: 'var(--dm-accent)' }}
+        >
+          {busy ? '保存中…' : '保存设置'}
+        </button>
+        {saved && <span className="text-xs text-white/55">{saved}</span>}
+      </div>
+    </div>
+  )
+}
+
+// ── Milestone D §D2 — notification preferences ──
+// ── Milestone E — birth data for the daily 运势 (non-secret settings.json) ──
+function BirthDataCard(): ReactElement {
+  const [birth, setBirth] = useState<BirthData | null | undefined>(undefined) // undefined = loading
+  const [form, setForm] = useState<BirthData>({ year: 2000, month: 1, day: 1 })
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+
+  const refresh = async (): Promise<void> => {
+    try {
+      const b = await window.daymate.getBirthData()
+      setBirth(b ?? null)
+      if (b) setForm(b)
+      setMsg(null)
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const save = async (): Promise<void> => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      await window.daymate.setBirthData(form)
+      setBirth(form)
+      setMsg('已保存。每日 08:17 将推送一条运势气泡。')
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clear = async (): Promise<void> => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      await window.daymate.clearBirthData()
+      setBirth(null)
+      setMsg('已清除。运势将退回到按日期生成的通用版本。')
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const inputCls = 'rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90'
+
+  return (
+    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
+      <h2 className="text-sm font-semibold text-white/90">生辰信息（每日运势）</h2>
+      <p className="mt-1 text-xs text-white/45">
+        用于个性化每日运势气泡。数据为非密设置，仅存于本地 settings.json，不上传任何外部服务。
+      </p>
+
+      {msg && (
+        <div className="mt-3 rounded border border-white/10 p-2 text-xs text-white/70" style={{ background: 'rgba(0,0,0,0.2)' }}>
+          {msg}
+        </div>
+      )}
+
+      <div className="mt-3 grid grid-cols-4 gap-2">
+        <label className="flex flex-col">
+          <span className="text-xs text-white/45">出生年</span>
+          <input
+            type="number"
+            min={1900}
+            max={2100}
+            className={inputCls}
+            value={form.year}
+            onChange={(e) => setForm((f) => ({ ...f, year: Number(e.target.value) }))}
+            disabled={busy}
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-xs text-white/45">月</span>
+          <input
+            type="number"
+            min={1}
+            max={12}
+            className={inputCls}
+            value={form.month}
+            onChange={(e) => setForm((f) => ({ ...f, month: Number(e.target.value) }))}
+            disabled={busy}
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-xs text-white/45">日</span>
+          <input
+            type="number"
+            min={1}
+            max={31}
+            className={inputCls}
+            value={form.day}
+            onChange={(e) => setForm((f) => ({ ...f, day: Number(e.target.value) }))}
+            disabled={busy}
+          />
+        </label>
+        <label className="flex flex-col">
+          <span className="text-xs text-white/45">时辰（可选）</span>
+          <input
+            type="number"
+            min={0}
+            max={23}
+            placeholder="—"
+            className={inputCls}
+            value={form.hour ?? ''}
+            onChange={(e) => {
+              const v = e.target.value === '' ? undefined : Number(e.target.value)
+              setForm((f) => {
+                const next = { ...f }
+                if (v === undefined) delete next.hour
+                else next.hour = v
+                return next
+              })
+            }}
+            disabled={busy}
+          />
+        </label>
+      </div>
+      <div className="mt-2 flex items-center gap-3">
+        <label className="text-xs text-white/45">性别（可选）</label>
+        <select
+          className={inputCls}
+          value={form.gender ?? ''}
+          onChange={(e) => {
+            const v = e.target.value as '' | 'male' | 'female'
+            setForm((f) => {
+              const next = { ...f }
+              if (v === '') delete next.gender
+              else next.gender = v
+              return next
+            })
+          }}
+          disabled={busy}
+        >
+          <option value="" className="bg-zinc-800">不指定</option>
+          <option value="male" className="bg-zinc-800">男</option>
+          <option value="female" className="bg-zinc-800">女</option>
+        </select>
+        {birth && (
+          <span className="text-xs text-emerald-300/60">已配置（属{zodiacOf(birth.year)}）</span>
+        )}
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          onClick={save}
+          disabled={busy}
+          className="rounded bg-white/10 px-3 py-1.5 text-sm text-white/90 hover:bg-white/20 disabled:opacity-50"
+        >
+          {busy ? '保存中…' : '保存'}
+        </button>
+        {birth && (
+          <button
+            onClick={clear}
+            disabled={busy}
+            className="rounded bg-white/5 px-3 py-1.5 text-sm text-rose-300/70 hover:bg-white/10 disabled:opacity-50"
+          >
+            清除
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** 生肖 derived from birth year (mirrors the agent-runtime stub). */
+const ZODIAC = ['鼠', '牛', '虎', '兔', '龙', '蛇', '马', '羊', '猴', '鸡', '狗', '猪']
+function zodiacOf(year: number): string {
+  return ZODIAC[((year - 1900) % 12 + 12) % 12]
+}
+
+function NotificationPrefsCard(): ReactElement {
+  const [prefs, setPrefs] = useState<NotificationPrefs | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [saved, setSaved] = useState<string | null>(null)
+
+  const refresh = async (): Promise<void> => {
+    try {
+      setPrefs(await window.daymate.getNotificationPrefs())
+      setLoadError(null)
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const persist = async (next: NotificationPrefs): Promise<void> => {
+    setBusy(true)
+    setSaved(null)
+    try {
+      const savedPrefs = await window.daymate.setNotificationPrefs(next)
+      setPrefs(savedPrefs)
+      setSaved('已保存')
+    } catch (e) {
+      setSaved(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // local form state mirrored from prefs (independent inputs)
+  const nativeEnabled = prefs?.nativeEnabled ?? true
+  const qh = prefs?.quietHours
+  const cats = prefs?.categories ?? {}
+
+  const toggleNative = (): void => {
+    void persist({ ...(prefs ?? {}), nativeEnabled: !nativeEnabled })
+  }
+  const toggleCategory = (c: NotificationCategory): void => {
+    const nowOn = cats[c] ?? true
+    void persist({
+      ...(prefs ?? {}),
+      categories: { ...cats, [c]: !nowOn }
+    })
+  }
+  const setQuiet = (enabled: boolean): void => {
+    void persist({
+      ...(prefs ?? {}),
+      quietHours: { enabled, start: qh?.start ?? '22:00', end: qh?.end ?? '07:00' }
+    })
+  }
+  const setQuietTime = (field: 'start' | 'end', value: string): void => {
+    if (!qh) return
+    void persist({ ...(prefs ?? {}), quietHours: { ...qh, [field]: value } })
+  }
+
+  return (
+    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
+      <h2 className="text-sm font-semibold text-white/90">通知设置</h2>
+      <p className="mt-1 text-xs text-white/45">
+        控制机器人气泡与 macOS 通知中心弹窗。免打扰时段仅抑制系统弹窗（应用内气泡保留）。
+      </p>
+
+      {loadError && (
+        <div className="mt-3 rounded border border-rose-500/20 p-2 text-xs text-rose-200" style={{ background: 'rgba(120,0,40,0.08)' }}>
+          无法加载：{loadError}
+        </div>
+      )}
+
+      <div className="mt-3 space-y-2">
+        <label className="flex items-center gap-2 text-sm text-white/85">
+          <input type="checkbox" checked={nativeEnabled} onChange={toggleNative} disabled={busy} />
+          系统通知中心弹窗（关闭后仅保留应用内机器人气泡）
+        </label>
+      </div>
+
+      <div className="mt-3 rounded border border-white/5 p-3" style={{ background: 'rgba(0,0,0,0.2)' }}>
+        <label className="flex items-center gap-2 text-sm text-white/85">
+          <input
+            type="checkbox"
+            checked={qh?.enabled === true}
+            onChange={(e) => setQuiet(e.target.checked)}
+            disabled={busy}
+          />
+          免打扰时段（仅抑制系统弹窗）
+        </label>
+        {qh?.enabled && (
+          <div className="mt-2 flex items-center gap-3 text-xs text-white/70">
+            <span>从</span>
+            <input
+              type="time"
+              value={qh.start}
+              onChange={(e) => setQuietTime('start', e.target.value)}
+              disabled={busy}
+              className="rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+            />
+            <span>到</span>
+            <input
+              type="time"
+              value={qh.end}
+              onChange={(e) => setQuietTime('end', e.target.value)}
+              disabled={busy}
+              className="rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+            />
+            <span className="text-white/40">（结束早于开始 = 跨夜）</span>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3">
+        <div className="text-xs text-white/50">按类别开关（关闭后完全静音该类别）</div>
+        <div className="mt-2 space-y-2">
+          {NOTIFICATION_CATEGORIES.map((c) => {
+            const on = cats[c] ?? true
+            return (
+              <label key={c} className="flex items-center gap-2 text-sm text-white/85">
+                <input type="checkbox" checked={on} onChange={() => toggleCategory(c)} disabled={busy} />
+                {NOTIFICATION_CATEGORY_LABEL[c] ?? c}
+              </label>
+            )
+          })}
+        </div>
+      </div>
+
+      <RoutineNotifyToggles prefs={prefs ?? {}} busy={busy} persist={persist} />
+
+      <div className="mt-3 flex items-center gap-3">
+        {busy && <span className="text-xs text-white/45">保存中…</span>}
+        {saved && <span className="text-xs text-white/55">{saved}</span>}
+      </div>
+    </div>
+  )
+}
+
+// ── Milestone E polish — per-routine notification toggles ──
+// The backend already supported `routineOverrides: Record<routineId, boolean>`
+// (NotificationService.categoryEnabled checks routineOverrides first). This
+// section surfaces it: list every routine + a toggle that writes the override.
+// `true`/absent = notify (default); `false` = fully mute that routine.
+function RoutineNotifyToggles({
+  prefs,
+  busy,
+  persist
+}: {
+  prefs: NotificationPrefs
+  busy: boolean
+  persist: (next: NotificationPrefs) => void
+}): ReactElement {
+  const [routines, setRoutines] = useState<RoutineDefinition[]>([])
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setRoutines(await window.daymate.listRoutines())
+        setLoadError(null)
+      } catch (e) {
+        setLoadError(e instanceof Error ? e.message : String(e))
+      }
+    })()
+  }, [])
+
+  const overrides = prefs.routineOverrides ?? {}
+
+  const toggle = (id: string): void => {
+    const nowOn = overrides[id] ?? true
+    persist({
+      ...prefs,
+      routineOverrides: { ...overrides, [id]: !nowOn }
+    })
+  }
+
+  if (loadError) {
+    return (
+      <div className="mt-3 text-xs text-rose-300/80">无法加载例程列表：{loadError}</div>
+    )
+  }
+  if (routines.length === 0) {
+    return (
+      <div className="mt-3 text-xs text-white/40">暂无例程。</div>
+    )
+  }
+
+  return (
+    <div className="mt-3 rounded border border-white/5 p-3" style={{ background: 'rgba(0,0,0,0.2)' }}>
+      <div className="text-xs text-white/50">按例程开关（覆盖类别设置；关闭后完全静音该例程）</div>
+      <div className="mt-2 space-y-1.5">
+        {routines.map((r) => {
+          const on = overrides[r.id] ?? true
+          return (
+            <label key={r.id} className="flex items-center gap-2 text-sm text-white/85">
+              <input type="checkbox" checked={on} onChange={() => toggle(r.id)} disabled={busy} />
+              <span>{r.name}</span>
+              {!r.enabled && <span className="text-xs text-white/35">（例程未启用）</span>}
+            </label>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ── Milestone D §D3 — 投递 data export (ZIP) ──
+function DataExportCard(): ReactElement {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const exportZip = async (): Promise<void> => {
+    setBusy(true)
+    setResult(null)
+    setError(null)
+    try {
+      const path = await window.daymate.exportApplicationsZip()
+      if (path) setResult(`已导出到：${path}`)
+      else setResult('已取消')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
+      <h2 className="text-sm font-semibold text-white/90">数据导出</h2>
+      <p className="mt-1 text-xs text-white/45">
+        导出投递模块（投递记录 + 事件时间线 + 面经库 + 简历版本 + 面试逐字稿）为一个 ZIP 文件（无压缩）。仅本地写入，无需审批。
+      </p>
+      <div className="mt-3 flex items-center gap-3">
+        <button
+          onClick={exportZip}
+          disabled={busy}
+          className="rounded px-3 py-1 text-xs text-white/80 disabled:opacity-50"
+          style={{ background: 'var(--dm-accent)' }}
+        >
+          {busy ? '导出中…' : '导出投递数据'}
+        </button>
+        {result && <span className="text-xs text-white/55">{result}</span>}
+        {error && <span className="text-xs text-rose-200">{error}</span>}
+      </div>
     </div>
   )
 }

@@ -49,5 +49,19 @@ function applyGuardedAlters(sqlite: Database.Database) {
   addColumnIfMissing(sqlite, 'approval_requests', 'content_hash', 'TEXT NOT NULL DEFAULT \'\'')
   // M5: traceability column on memory_items (older dev DBs created in M1 lack it).
   addColumnIfMissing(sqlite, 'memory_items', 'routine_run_id', 'TEXT')
+  // Milestone A: rich fields on applications for pre-existing dev DBs.
+  addColumnIfMissing(sqlite, 'applications', 'city', 'TEXT')
+  addColumnIfMissing(sqlite, 'applications', 'salary_range', 'TEXT')
+  addColumnIfMissing(sqlite, 'applications', 'jd_text', 'TEXT')
+  addColumnIfMissing(sqlite, 'applications', 'stage', 'TEXT')
+  addColumnIfMissing(sqlite, 'applications', 'stage_deadline', 'TEXT')
+  addColumnIfMissing(sqlite, 'applications', 'interview_link', 'TEXT')
+  addColumnIfMissing(sqlite, 'applications', 'priority', "TEXT NOT NULL DEFAULT 'normal'")
+  addColumnIfMissing(sqlite, 'applications', 'email_ref_id', 'TEXT')
+  addColumnIfMissing(sqlite, 'applications', 'deleted_at', 'TEXT')
+  addColumnIfMissing(sqlite, 'applications', 'archived_at', 'TEXT')
+  // Indexes that reference guarded columns must be created AFTER the ALTERs
+  // add those columns to pre-Milestone-A dev DBs (else "no such column").
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_applications_deleted ON applications(deleted_at);')
 }
 

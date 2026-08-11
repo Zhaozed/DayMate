@@ -38,3 +38,6 @@ drizzle/meta/_journal.json.bak
 
 # Vendored third-party tools (e.g. boss-cli cloned for editable install)
 vendor/
+# boss-cli source clone (independent git repo, editable-install only — never
+# part of the Daymate repo; per decision 0017 it stays a local sibling checkout)
+boss-cli/

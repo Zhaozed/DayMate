@@ -6,7 +6,7 @@
 // criterion). better-sqlite3 must be rebuilt for Electron's ABI — see
 // `rebuild:native` script and ADR 0002.
 
-import { app, BrowserWindow, safeStorage, shell, net } from 'electron'
+import { app, BrowserWindow, safeStorage, shell, net, Notification } from 'electron'
 import { join } from 'node:path'
 import { createDb } from '../db/client'
 import { SqliteStore } from '../db/sqlite-store'
@@ -33,12 +33,14 @@ import { SwappableCalendarProvider } from '../providers/calendar/swappable-calen
 import { MockBossProvider } from '../providers/boss/mock-boss-provider'
 import { BossCliProvider } from '../providers/boss/boss-cli-provider'
 import { SwappableBossProvider } from '../providers/boss/boss-provider'
+import cron from 'node-cron'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type { ModelGateway } from '../agent/model-gateway'
 import type { AgentRuntime } from '../agent/agent-runtime'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
 import type { BossProvider } from '../providers/boss/boss-provider'
 import { ApplicationService } from '../services/application-service'
+import { NotificationService } from '../services/notification-service'
 import { RobotStateController } from '../services/robot-state-service'
 import { setRobotState, pushRobotNotify } from '../ipc/handlers'
 import { IPC } from '@shared/constants'
@@ -52,6 +54,8 @@ export interface Container {
   memoryService: MemoryService
   toolRegistry: ReturnType<typeof createToolRegistry>
   modelGateway: ModelGateway
+  /** Plain (non-secret) app settings (LLM config + jobSearch paths). */
+  settings: Settings
   agentRuntime: AgentRuntime
   engine: RoutineEngine
   scheduler: RoutineScheduler
@@ -68,6 +72,9 @@ export interface Container {
   mail163Provider: Mail163Provider
   /** Cross-channel job-application funnel (boss-cli integration). */
   applicationService: ApplicationService
+  /** Centralized notify path (Milestone D §D2): prefs + quiet hours +
+   *  aggregation + native macOS Notification Center. */
+  notificationService: NotificationService
   /** BOSS 直聘 provider — mock by default, real boss-cli when installed + authed. */
   bossProvider: BossProvider
   /** Swappable delegate: mock by default, real BossCliProvider when authed. */
@@ -82,6 +89,8 @@ export interface Container {
   broadcastMemory: () => void
   /** Push the latest applications to the workbench Applications page. */
   broadcastApplications: () => void
+  /** Push the pending email→application matches to the workbench queue. */
+  broadcastEmailMatches: () => void
   /**
    * Reconcile emailProviders with Gmail + 163 connection state: when a real
    * provider is connected, ensure it is in the array (Gmail at index 0 so
@@ -177,6 +186,25 @@ export function initContainer(): Container {
 
   const toolRegistry = createToolRegistry()
 
+  // NotificationService (Milestone D §D2) centralizes the user-facing notify
+  // path: per-category / per-routine toggles, quiet hours (native-only
+  // suppression), aggregation, and the native macOS Notification Center popup.
+  // The robot bubble + native notifier are injected so the service stays
+  // framework-agnostic; prefs are cached and refreshed at boot + on every
+  // `setNotificationPrefs` write.
+  const notificationService = new NotificationService({
+    readPrefs: () => settings.readNotifications(),
+    pushBubble: (n) => pushRobotNotify(n),
+    notifier: (title, body) => {
+      try {
+        new Notification({ title, body }).show()
+      } catch {
+        // Unsupported / denied — the robot bubble already surfaced.
+      }
+    }
+  })
+  void notificationService.refreshPrefs()
+
   // Robot state is owned by the RobotStateController, which derives it from
   // Activity events (Spec §18: the robot reflects real runtime state). The
   // notify callback below only emits a proactive bubble — it no longer sets a
@@ -187,9 +215,11 @@ export function initContainer(): Container {
   activityService.subscribe((e) => {
     robotState.onEvent(e)
     if (e.type === 'approval_requested') {
-      // Proactive approval bubble — deep-links to Approvals when tapped.
-      pushRobotNotify({
+      // Proactive approval bubble — routed through NotificationService so the
+      // `approval` category toggle + quiet hours apply uniformly.
+      notificationService.notify({
         message: e.summary,
+        category: 'approval',
         navigateTo: 'Approvals'
       })
     }
@@ -228,6 +258,14 @@ export function initContainer(): Container {
       win.webContents.send(IPC.APPLICATION_CHANGED, views)
     }
   }
+
+  const broadcastEmailMatches = (): void => {
+    const matches = applicationService.listPendingEmailMatches()
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC.EMAIL_MATCHES_CHANGED, matches)
+    }
+  }
+  applicationService.setEmailMatchesListener(broadcastEmailMatches)
 
   // Reconcile the emailProviders array with the real Gmail + 163 connection
   // state. Real providers are kept in the array when connected (Gmail at index 0)
@@ -292,19 +330,60 @@ export function initContainer(): Container {
     calendarProvider: calendarDelegate,
     bossProvider: bossDelegate,
     agentRuntime,
+    applicationService,
+    settings,
     notify: (m) => {
       notify(m)
+      broadcastActivity()
+      broadcastApprovals()
+      broadcastMemory()
+    },
+    notifyRich: (input) => {
+      // Route through NotificationService so prefs (per-routine toggle, quiet
+      // hours, aggregation, native popup) apply, then sync renderer state.
+      notificationService.notify(input)
       broadcastActivity()
       broadcastApprovals()
       broadcastMemory()
     }
   })
 
-  const scheduler = new RoutineScheduler(engine, store, calendarDelegate)
+  const scheduler = new RoutineScheduler(engine, store, calendarDelegate, applicationService)
 
   // Seed preset routines, then start the scheduler.
   seedPresets(store)
   scheduler.start()
+
+  // Daily 运势 (fortune) bubble (Milestone E). NOT a routine preset and NOT a
+  // NTK item — the user chose the lightest surface (a robot bubble). A hidden
+  // daily cron reads the user's birth data (non-secret settings.json), runs the
+  // `generate_daily_fortune` agent step (deterministic stub when no LLM key),
+  // and pushes one robot bubble via NotificationService (category 'fortune' →
+  // respects per-category toggle + quiet hours + aggregation). 08:17 local,
+  // off the :00 fleet-collision mark. The birth-data read is best-effort: no
+  // birth data → the stub still produces a generic date-based fortune.
+  const fortuneJob = cron.schedule('17 8 * * *', () => {
+    void (async () => {
+      try {
+        const birth = await settings.readBirthData()
+        const date = new Date().toISOString().slice(0, 10)
+        const out = (await agentRuntime.runAgentStep('generate_daily_fortune', {
+          birth,
+          date
+        })) as { title: string; summary: string; tip: string; mood: number }
+        notificationService.notify({
+          message: `${out.title}｜${out.summary}`,
+          category: 'fortune'
+        })
+      } catch (err) {
+        console.error(
+          '[container] daily fortune failed:',
+          err instanceof Error ? err.message : err
+        )
+      }
+    })()
+  })
+  void fortuneJob
 
   container = {
     store,
@@ -315,6 +394,7 @@ export function initContainer(): Container {
     memoryService,
     toolRegistry,
     modelGateway,
+    settings,
     agentRuntime,
     engine,
     scheduler,
@@ -328,10 +408,12 @@ export function initContainer(): Container {
     bossProvider: bossDelegate,
     bossDelegate,
     bossCliProvider,
+    notificationService,
     broadcastActivity,
     broadcastApprovals,
     broadcastMemory,
     broadcastApplications,
+    broadcastEmailMatches,
     refreshEmailProviders,
     refreshCalendarProvider,
     refreshBossProvider

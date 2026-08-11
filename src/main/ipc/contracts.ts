@@ -31,5 +31,20 @@ export type {
   ApplicationView,
   ApplicationCreateInput,
   ApplicationEventInput,
-  BossStatus
+  ApplicationUpdateFields,
+  InterviewNoteInput,
+  InterviewNote,
+  ResumeVersion,
+  PrepMaterial,
+  EmailMatchProposal,
+  JobSearchSettings,
+  BossStatus,
+  ApplicationFunnelStats,
+  FunnelReviewOutput,
+  JobMatchOutput,
+  JobRecommendations,
+  FetchJobRecommendationsOpts,
+  BossJob,
+  NotificationPrefs,
+  BirthData
 } from '@shared/types'

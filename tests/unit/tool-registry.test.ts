@@ -5,20 +5,25 @@ import { ActivityService } from '../../src/main/services/activity-service'
 import { TaskService } from '../../src/main/services/task-service'
 import { NeedToKnowService } from '../../src/main/services/need-to-know-service'
 import { MemoryService } from '../../src/main/services/memory-service'
+import { ApplicationService } from '../../src/main/services/application-service'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
+import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 
 function buildContext(overrides: Partial<ToolContext> = {}): ToolContext {
   const store = new InMemoryStore()
+  const activityService = new ActivityService(store)
   return {
     runId: 'run-test',
     routineRunId: 'run-test',
     emailProviders: [new MockEmailProvider()],
     calendarProvider: new MockCalendarProvider(),
+    bossProvider: new MockBossProvider(),
     taskService: new TaskService(store),
     needToKnowService: new NeedToKnowService(store),
-    activityService: new ActivityService(store),
+    activityService,
     memoryService: new MemoryService(store),
+    applicationService: new ApplicationService(store, new MockBossProvider(), activityService),
     notify: () => {},
     ...overrides
   }
@@ -102,5 +107,107 @@ describe('tool registry', () => {
     expect(a.status).toBe('ok')
     expect(b.status).toBe('ok')
     expect((a as { data: { id: string } }).data.id).toBe((b as { data: { id: string } }).data.id)
+  })
+
+  // ── Milestone A: application + 面经 tools ───────────────────────────────────
+  it('application.create + application.search + application.get_latest_resume round-trip', async () => {
+    const ctx = buildContext()
+    const created = await registry.execute(
+      'application.create',
+      { company: '腾讯', position: '后端', city: '深圳', jdText: 'Go 微服务' },
+      ctx
+    )
+    expect(created.status).toBe('ok')
+    const id = (created as { data: { application: { id: string } } }).data.application.id
+
+    // search by company
+    const found = await registry.execute('application.search', { company: '腾讯' }, ctx)
+    expect(found.status).toBe('ok')
+    const views = (found as { data: { application: { id: string } }[] }).data
+    expect(views.some((v) => v.application.id === id)).toBe(true)
+
+    // search by id
+    const byId = await registry.execute('application.search', { id }, ctx)
+    expect((byId as { data: unknown[] }).data).toHaveLength(1)
+
+    // no resume yet
+    const none = await registry.execute('application.get_latest_resume', { applicationId: id }, ctx)
+    expect((none as { data: unknown }).data).toBeNull()
+  })
+
+  it('application.save_resume versions, application.save_prep_material versions independently', async () => {
+    const ctx = buildContext()
+    const c = await registry.execute('application.create', { company: 'A', position: 'p' }, ctx)
+    const id = (c as { data: { application: { id: string } } }).data.application.id
+
+    const r1 = await registry.execute('application.save_resume', { applicationId: id, html: '<b>1</b>' }, ctx)
+    expect((r1 as { data: { version: number } }).data.version).toBe(1)
+    const r2 = await registry.execute('application.save_resume', { applicationId: id, html: '<b>2</b>' }, ctx)
+    expect((r2 as { data: { version: number } }).data.version).toBe(2)
+
+    const latest = await registry.execute('application.get_latest_resume', { applicationId: id }, ctx)
+    expect((latest as { data: { html: string } }).data.html).toBe('<b>2</b>')
+
+    const p1 = await registry.execute('application.save_prep_material', { applicationId: id, html: '<i>t</i>' }, ctx)
+    expect((p1 as { data: { version: number } }).data.version).toBe(1)
+  })
+
+  it('application.update_field patches rich fields', async () => {
+    const ctx = buildContext()
+    const c = await registry.execute('application.create', { company: 'A', position: 'p' }, ctx)
+    const id = (c as { data: { application: { id: string } } }).data.application.id
+    const upd = await registry.execute('application.update_field', { id, city: '上海', priority: 'back' }, ctx)
+    expect(upd.status).toBe('ok')
+    expect((upd as { data: { application: { city: string; priority: string } } }).data.application.city).toBe('上海')
+    expect((upd as { data: { application: { priority: string } } }).data.application.priority).toBe('back')
+  })
+
+  it('application.add_event appends a locked manual event', async () => {
+    const ctx = buildContext()
+    const c = await registry.execute('application.create', { company: 'A', position: 'p' }, ctx)
+    const id = (c as { data: { application: { id: string } } }).data.application.id
+    const ev = await registry.execute(
+      'application.add_event',
+      { applicationId: id, type: 'interview', round: 1, evidence: '一面' },
+      ctx
+    )
+    expect(ev.status).toBe('ok')
+    const view = (ev as { data: { currentStatus: string; events: { type: string; locked: boolean }[] } }).data
+    expect(view.currentStatus).toBe('interview')
+    expect(view.events.some((e) => e.type === 'interview' && e.locked)).toBe(true)
+  })
+
+  it('interview_notes.create + interview_notes.search', async () => {
+    const ctx = buildContext()
+    const created = await registry.execute(
+      'interview_notes.create',
+      { company: '腾讯', position: '后端', tags: ['algorithm', 'project'], content: '一道dp题' },
+      ctx
+    )
+    expect(created.status).toBe('ok')
+    const note = (created as { data: { id: string; source: string } }).data
+    expect(note.source).toBe('manual')
+
+    const found = await registry.execute('interview_notes.search', { query: 'dp' }, ctx)
+    expect((found as { data: { content: string }[] }).data.some((n) => n.content.includes('dp'))).toBe(true)
+  })
+
+  it('job_search.get_intent: reads jobIntent from settings (R0)', async () => {
+    const fakeSettings = {
+      readJobSearch: async () => ({ jobIntent: { keyword: 'Go 后端', cities: ['北京'], salaryMin: 25, salaryMax: 35 } })
+    }
+    const ctx = buildContext({ settings: fakeSettings as never })
+    const res = await registry.execute('job_search.get_intent', {}, ctx)
+    expect(res.status).toBe('ok')
+    const data = (res as { status: 'ok'; data: { keyword: string } | null }).data
+    expect(data?.keyword).toBe('Go 后端')
+  })
+
+  it('job_search.get_intent: returns null when no settings / no intent', async () => {
+    // No settings wired (the default test context).
+    const ctx = buildContext()
+    const res = await registry.execute('job_search.get_intent', {}, ctx)
+    expect(res.status).toBe('ok')
+    expect((res as { status: 'ok'; data: null }).data).toBeNull()
   })
 })

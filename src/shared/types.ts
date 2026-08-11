@@ -20,7 +20,10 @@ import type {
   LlmProvider,
   MemoryKey,
   ApplicationSource,
-  ApplicationEventType
+  ApplicationEventType,
+  ApplicationPriority,
+  InterviewNoteTag,
+  InterviewNoteSource
 } from './constants'
 
 // Re-export so `@shared/types` is the single import surface for shared types.
@@ -45,7 +48,10 @@ export type {
   LlmProvider,
   MemoryKey,
   ApplicationSource,
-  ApplicationEventType
+  ApplicationEventType,
+  ApplicationPriority,
+  InterviewNoteTag,
+  InterviewNoteSource
 } from './constants'
 
 // ── Robot ───────────────────────────────────────────────────────────────────
@@ -271,6 +277,7 @@ export type RoutineTrigger =
   | { type: 'schedule'; cron: string; timezone: string }
   | { type: 'email_poll'; intervalMinutes: number }
   | { type: 'calendar_before'; minutesBefore: number }
+  | { type: 'application_status'; targetStatus: 'interview' }
 
 export interface BaseStep {
   id: string
@@ -573,6 +580,16 @@ export interface BossJob {
   hrName?: string
   brandName?: string
   jobLabels?: string[]
+  // Detail-only fields (populated by `boss detail`, NOT by `boss search`).
+  // postDescription/jobDesc is the JD body — untrusted boss data; the renderer
+  // MUST render it as text (React escapes) never as HTML (§17.12/§17.13).
+  jobDescription?: string
+  industry?: string
+  scale?: string
+  stage?: string
+  hrTitle?: string
+  areaDistrict?: string
+  businessDistrict?: string
 }
 
 /** An applied job from `boss applied`. */
@@ -638,6 +655,26 @@ export interface Application {
   /** Internal channel ref — recruiter name, 官网 link, 内推人, etc. */
   channelRef?: string
   notes?: string
+  // ── Rich fields (Milestone A) ────────────────────────────────────────────
+  city?: string
+  /** Free-text salary, e.g. "25-40K·15薪". */
+  salaryRange?: string
+  /** Full JD body. Untrusted external text (§17) — never executed. */
+  jdText?: string
+  /** Process sub-state, e.g. "简历筛选"/"一面"/"HR面". User-maintained. */
+  stage?: string
+  /** ISO date — next-stage deadline (assessment due, interview time). */
+  stageDeadline?: string
+  /** Meeting link for an interview/assessment (may be filled from email). */
+  interviewLink?: string
+  /** Funnel priority; `back` = deprioritised or auto-stale-demoted. */
+  priority?: ApplicationPriority
+  /** messageId of the originating email (email→app link for refresh). */
+  emailRefId?: string
+  /** Soft-delete timestamp; null = active. Recycle-bin + 30-day auto-purge. */
+  deletedAt?: string
+  /** Archive timestamp; archived apps hide from the default funnel. */
+  archivedAt?: string
   createdAt: string
   updatedAt: string
 }
@@ -650,6 +687,27 @@ export interface ApplicationCreateInput {
   appliedAt?: string
   channelRef?: string
   notes?: string
+  city?: string
+  salaryRange?: string
+  jdText?: string
+  stage?: string
+  stageDeadline?: string
+  interviewLink?: string
+}
+
+/** Partial rich-field update (renderer → main, single-field refresh / edit). */
+export interface ApplicationUpdateFields {
+  company?: string
+  position?: string
+  city?: string
+  salaryRange?: string
+  jdText?: string
+  stage?: string
+  stageDeadline?: string
+  interviewLink?: string
+  notes?: string
+  channelRef?: string
+  priority?: ApplicationPriority
 }
 
 export interface ApplicationEvent {
@@ -708,6 +766,334 @@ export interface BossStatus {
   message: string
 }
 
+// ── Resume versions (Milestone A §4.2) ───────────────────────────────────────
+// Per-application versioned AI-tailored HTML resumes. The latest `version` is
+// active. `promptHash` = SHA-256 of (baseResume + jdText) to short-circuit a
+// re-request whose inputs are unchanged (skip the LLM call).
+export interface ResumeVersion {
+  id: string
+  applicationId: string
+  /** 1-based, monotonically increasing per application. */
+  version: number
+  /** Tailored HTML resume (untrusted-ish output; rendered sandboxed, never run). */
+  html: string
+  /** Which LLM produced it (traceability); undefined for the deterministic stub. */
+  modelId?: string
+  promptHash?: string
+  createdAt: string
+}
+
+// ── Interview prep materials (Milestone A §4.3) ──────────────────────────────
+// Per-application versioned interview-prep transcript (structured HTML). Same
+// versioning shape as ResumeVersion.
+export interface PrepMaterial {
+  id: string
+  applicationId: string
+  version: number
+  html: string
+  modelId?: string
+  promptHash?: string
+  createdAt: string
+}
+
+// ── 面经库 (Milestone A §6) ───────────────────────────────────────────────────
+// A post-interview experience note. Standalone (NOT tied to one application) so
+// a 面经 for company X is reusable. `source` is 'manual' (user-authored) or
+// 'agent' (AI-summarised post-interview) — both are the user's own knowledge,
+// trusted under §17.
+export interface InterviewNote {
+  id: string
+  company?: string
+  position?: string
+  /** Link back to the originating application (optional). */
+  applicationId?: string
+  tags: InterviewNoteTag[]
+  content: string
+  source: InterviewNoteSource
+  createdAt: string
+  updatedAt: string
+}
+
+/** Manual create input for a 面经 entry (renderer → main). */
+export interface InterviewNoteInput {
+  company?: string
+  position?: string
+  applicationId?: string
+  tags: InterviewNoteTag[]
+  content: string
+}
+
+// ── Email→application inference (Milestone A §3.3) ────────────────────────────
+// A proposed match between a classified email and an existing application.
+// `confidence: 'low'` (or unmatched) → lands in the manual-confirm queue.
+export interface EmailMatchProposal {
+  id: string
+  messageId: string
+  /** Email subject / key snippet shown in the queue. */
+  subject: string
+  from?: string
+  /** Classified event type to append if confirmed. */
+  eventType: ApplicationEventType
+  company?: string
+  position?: string
+  confidence: 'high' | 'medium' | 'low'
+  /** The matched application id, or undefined when unmatched. */
+  applicationId?: string
+  /** Existing application snapshot for the queue card (company/position). */
+  applicationCompany?: string
+  applicationPosition?: string
+  evidence?: string
+}
+
+// ── Job-search config (Milestone A §G) ──────────────────────────────────────
+// NON-SECRET absolute file paths only. The base resume is the user's OWN
+// Notification categories the user can mute independently (Milestone D §D2).
+// `routine` covers every routine `notify` step (per-routine overrides add
+// finer control); `approval` covers the proactive approval-requested bubble;
+// `info` is the fallback for ad-hoc notifies; `fortune` is the daily 运势
+// bubble (Milestone E) so the user can mute just the horoscope. Wire
+// identifiers — only the *display labels* translate (labels.ts).
+export const NOTIFICATION_CATEGORIES = ['routine', 'approval', 'info', 'fortune'] as const
+export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number]
+
+/**
+ * Non-secret notification preferences (Milestone D §D2), persisted in
+ * settings.json. All fields optional — absent means the sensible default
+ * (everything on, no quiet hours). Two layers:
+ *  - quiet hours suppress the **native macOS notification** only (the in-app
+ *    robot bubble stays — it is non-intrusive). `end` may be earlier than
+ *    `start` for an overnight window (e.g. 22:00→07:00).
+ *  - per-category toggles + per-routine overrides fully suppress a category
+ *    (both native and robot bubble). A per-routine override, when present,
+ *    wins over the category default.
+ */
+export interface NotificationPrefs {
+  /** Master switch for macOS Notification Center popups (default true). */
+  nativeEnabled?: boolean
+  quietHours?: {
+    enabled: boolean
+    /** 24-hour "HH:MM" local time. */
+    start: string
+    /** 24-hour "HH:MM" local time; may precede `start` (overnight). */
+    end: string
+  }
+  /** Category → enabled. Absent = default true. `false` mutes the category. */
+  categories?: Partial<Record<NotificationCategory, boolean>>
+  /** routineId → enabled. Present entry wins over the `routine` category. */
+  routineOverrides?: Record<string, boolean>
+}
+
+// document (trusted §17); a transcript template is optional. Content is read
+// at generation time via fs.readFile, never stored as a DB blob. Persisted in
+// settings.json alongside the (non-secret) LLM config.
+export interface JobSearchSettings {
+  /** Absolute path to the user's base resume (HTML/txt). Trusted §17. */
+  baseResumePath?: string
+  /** Optional absolute path to a transcript template (HTML). */
+  transcriptTemplatePath?: string
+  /** Structured job-search intent (Milestone C) — the target criteria
+   *  `score_job_matches` scores `boss.search` results against. Optional:
+   *  absent → the job-recommendation routine is a no-op (skips with an
+   *  Activity note), the manual 抓取 button shows an empty-state hint. */
+  jobIntent?: JobIntent
+}
+
+/** The user's structured job-search intent (Milestone C). Matched
+ *  deterministically + by the agent against `BossJob` metadata. salaryMin/Max
+ *  are monthly figures in 千 (k), e.g. 25 / 35 = 25-35k. */
+export interface JobIntent {
+  /** Target role keyword(s) for `boss search`, e.g. "Go 后端". */
+  keyword: string
+  /** Preferred cities (matches against BossJob.city substring). */
+  cities?: string[]
+  /** Minimum monthly salary in k (e.g. 25). */
+  salaryMin?: number
+  /** Maximum monthly salary in k (e.g. 35). */
+  salaryMax?: number
+  /** Expected experience requirement string, e.g. "3-5年" (matched loosely
+   *  against BossJob.experience). */
+  experience?: string
+  /** Expected degree, e.g. "本科" (matched against BossJob.degree). */
+  degree?: string
+}
+
+// ── Smart funnel grouping (Milestone A §5) ──────────────────────────────────
+// The active funnel is grouped into ordered buckets for the 投递 page. Stale
+// apps (no event for ≥14d, non-terminal) are auto-demoted to `priority:'back'`
+// and land in the "停滞" bucket. Archived apps are a separate folded group.
+export type SmartFunnelGroup =
+  | 'urgent' // has a near stage_deadline (≤3d) or an interview scheduled soon
+  | 'active' // in progress, not urgent, not stale
+  | 'stale' // no progress ≥14d (auto-demoted to priority 'back')
+  | 'offered' // currentStatus === 'offer'
+  | 'ended' // terminal rejected/withdrawn (not archived)
+  | 'archived' // archived (folded)
+
+export interface SmartFunnelBucket {
+  group: SmartFunnelGroup
+  views: ApplicationView[]
+}
+
+// ── Funnel review statistics (Milestone B) ─────────────────────────────────
+// Aggregate derived from `ApplicationView[]` (active, non-soft-deleted/non-
+// archived). Computed in-memory by `ApplicationService.stats()` — the store
+// stays pure CRUD (data volume is tens-to-hundreds; no SQL aggregates needed,
+// ADR 0002). `reachedStage` counts apps that have EVER reached a stage (an event
+// of that type exists in the timeline) — the funnel chart's cumulative shape.
+// `conversion.X` = round(reachedStage.X / reachedStage.applied * 100). Stats are
+// DESCRIPTIVE only (§2/§13.4 forbid productivity/slacking framing).
+export interface FunnelStageCounts {
+  applied: number
+  communicated: number
+  assessment: number
+  written_test: number
+  interview: number
+  offer: number
+}
+
+export interface ApplicationFunnelStats {
+  /** Active (non-soft-deleted/non-archived) application count. */
+  total: number
+  /** Non-terminal applications still in progress. */
+  active: number
+  terminal: { offer: number; rejected: number; withdrawn: number }
+  byStatus: Record<ApplicationEventType, number>
+  bySource: Record<ApplicationSource, number>
+  byFunnelGroup: Record<SmartFunnelGroup, number>
+  /** Cumulative "ever reached this stage" counts for the funnel chart. */
+  reachedStage: FunnelStageCounts
+  /** Conversion % vs applied for the progressive stages. */
+  conversion: { assessment: number; written_test: number; interview: number; offer: number }
+  /** Non-terminal apps with no progress for ≥ STALE_DAYS (14). */
+  stale: number
+  /** Apps with a stage_deadline within 3 days (urgent bucket). */
+  urgent: number
+  /** Mean days since last event across non-terminal apps; null if none. */
+  avgDaysSinceLastEvent: number | null
+  /** Mean days since appliedAt across non-terminal apps; null if none. */
+  avgDaysInProcess: number | null
+}
+
+/** A risk-flagged application surfaced by the funnel review. */
+export interface FunnelReviewRiskApp {
+  company: string
+  position?: string
+  issue: string
+}
+
+/** Input for `generate_funnel_review` (service-built; renderer never sends). */
+export interface FunnelReviewInput {
+  stats: ApplicationFunnelStats
+  /** Compact per-app projection — company/position are short boss/email field
+   *  values (§17: untrusted-adjacent), framed as DATA in the user message, never
+   *  in the system prompt. No jd_text, no email bodies, no evidence prose. */
+  apps: Array<{
+    company: string
+    position?: string
+    currentStatus: ApplicationEventType
+    daysSinceLastEvent?: number
+    priority?: ApplicationPriority
+    source: ApplicationSource
+  }>
+}
+
+/** Output of `generate_funnel_review` — extends the PublishableBrief shape so a
+ *  future daily routine can publish it to NTK via `need_to_know fromKey`. */
+export interface FunnelReviewOutput {
+  title: string
+  summary: string
+  reason: string
+  priority: 'medium' | 'high' | 'urgent'
+  sourceRefs: SourceRef[]
+  suggestedActions: SuggestedAction[]
+  highlights: string[]
+  riskApps: FunnelReviewRiskApp[]
+  memoryProposals?: MemoryProposal[]
+}
+
+// ── Milestone C: job recommendation (每日岗位抓取 + 推荐评分) ───────────────
+// Scores `boss.search` results against the user's structured `JobIntent`.
+// `BossJob` carries no JD text (boss-cli mapping limitation), so scoring is
+// metadata-based: salary / city / experience / degree / jobLabels vs intent.
+
+/** A single scored job. `tier` buckets the 0-100 `score` for display. */
+export interface JobMatchResult {
+  securityId: string
+  jobName: string
+  companyName: string
+  /** 0-100 match score (higher = better). */
+  score: number
+  tier: 'high' | 'medium' | 'low' | 'skip'
+  /** Human-readable match/miss reasons, e.g. "薪资 28-40k 命中你期望 25-35k". */
+  reasons: string[]
+  /** True = worth applying (tier high/medium). */
+  recommend: boolean
+  /** Echoed for the renderer (avoids a re-lookup by securityId). */
+  salary?: string
+  city?: string
+}
+
+/** Input for `score_job_matches` (service-built; renderer never sends). */
+export interface JobMatchInput {
+  intent: JobIntent
+  jobs: BossJob[]
+}
+
+/** Output of `score_job_matches` — extends the PublishableBrief shape so a
+ *  daily routine can publish it to NTK via `need_to_know fromKey`. The
+ *  `results` array is the per-job detail the renderer lists. */
+export interface JobMatchOutput {
+  title: string
+  summary: string
+  reason: string
+  priority: 'medium' | 'high' | 'urgent'
+  sourceRefs: SourceRef[]
+  suggestedActions: SuggestedAction[]
+  results: JobMatchResult[]
+  memoryProposals?: MemoryProposal[]
+}
+
+// ── Job recommendations, split into two buckets for the 校招生 dual-track
+// (实习 + 秋招正职) ───────────────────────────────────────────────────────
+// `bucket` is a DETERMINISTIC business rule (which boss filter to apply), not
+// an agent decision (§12: keep Agent decisions separate from deterministic
+// business rules). So `score_job_matches` stays bucket-unaware — the service
+// runs one scoring call over both buckets' jobs and splits the results back by
+// securityId. This type is the service→renderer IPC shape; the agent output
+// (`JobMatchOutput`) is unchanged.
+export type JobBucket = 'intern' | 'campus'
+
+export interface JobRecommendations {
+  title: string
+  summary: string
+  reason: string
+  priority: 'medium' | 'high' | 'urgent'
+  /** 实习桶 (`boss search --job-type 实习`). */
+  intern: JobMatchResult[]
+  /** 秋招正职桶 (`boss search --job-type 全职 --exp 在校/应届`). */
+  campus: JobMatchResult[]
+  /** Set when a boss search hit rate-limit / session-expiry mid-fetch; the
+   *  already-fetched partial results are still returned. Empty string = ok. */
+  error?: string
+  /** Per-bucket "another page exists" flags, for the renderer's load-more. */
+  internHasMore: boolean
+  campusHasMore: boolean
+  /** Per-bucket "has been fetched at least once" flags. The renderer fetches
+   *  ONE bucket per click (anti-bot: N search calls not 2N), so a bucket the
+   *  user hasn't opened yet shows "click 抓取 to fetch" rather than "empty". */
+  internFetched: boolean
+  campusFetched: boolean
+}
+
+/** `fetchJobRecommendations` options.
+ *  `{bucket: B}` = refresh ONE bucket page 1 (reset that bucket only — anti-bot:
+ *  N search calls, not 2N). `{bucket: B, append: true}` = next page for that
+ *  bucket, appended. No args = refresh BOTH buckets (page 1, reset all). */
+export interface FetchJobRecommendationsOpts {
+  bucket?: JobBucket
+  append?: boolean
+}
+
 /** A proactive bubble pushed to the robot surface (M4 §18). */
 export interface RobotNotify {
   message: string
@@ -716,6 +1102,53 @@ export interface RobotNotify {
   /** Which workbench page to open when the user taps the bubble, if any. */
   navigateTo?: WorkbenchPage
 }
+
+// ── Milestone E: daily 运势 / 八字 每日贴士 ──────────────────────────────────
+// A decorative daily fortune + practical tip, surfaced as a transient robot
+// bubble (NOT a Need-to-Know, NOT a routine preset — the user opted for the
+// lightest surface). Birth data is the user's OWN trusted config (like the
+// base resume path §17), persisted as NON-SECRET settings.json. The agent
+// step is key-gated (deterministic stub without an LLM key). Full rigorous
+// 八字 pillar computation is out of scope (the stub derives the zodiac 生肖
+// from the birth year — honest, not over-engineered); the real LLM produces
+// a personalized-sounding narrative from the raw birth fields.
+
+/** The user's birth data for the daily fortune (NON-SECRET settings). */
+export interface BirthData {
+  /** Birth year (Gregorian, e.g. 1999). */
+  year: number
+  /** Birth month 1-12 (Gregorian). */
+  month: number
+  /** Birth day of month 1-31. */
+  day: number
+  /** Birth hour 0-23 (two-hour 生肖时辰 boundary handled by the model). Optional —
+   *  a missing hour degrades to a date-only fortune. */
+  hour?: number
+  /** Biological sex (some 八字 schools read differently by gender). Optional. */
+  gender?: 'male' | 'female'
+}
+
+export interface DailyFortuneInput {
+  /** The user's birth data (trusted §17 — own config). Absent → generic fortune. */
+  birth?: BirthData
+  /** ISO date the fortune is for (determinism anchor for the stub). */
+  date: string
+}
+
+/** Daily fortune output — a short narrative + one practical tip. Deliberately
+ *  NOT a PublishableBrief: it never publishes to Need-to-Know (no sourceRefs /
+ *  suggestedActions fit a horoscope). */
+export interface DailyFortuneOutput {
+  /** One-line title, e.g. "今日运势 · 属龙". */
+  title: string
+  /** 1-2 sentence fortune narrative (encouraging, never a productivity score). */
+  summary: string
+  /** One concrete, actionable tip for the day. */
+  tip: string
+  /** 0-100 mood index (purely decorative; never a productivity/slacking score §13.4). */
+  mood: number
+}
+
 
 /**
  * Which layout the ambient robot window renders (M4 §18). The window resizes
@@ -734,6 +1167,7 @@ export const WORKBENCH_PAGES = [
   'Need to Know',
   'Tasks',
   'Applications',
+  'InterviewNotes',
   'Routines',
   'Approvals',
   'Activity',
@@ -850,9 +1284,54 @@ export interface DaymateApi {
   listApplications(): Promise<ApplicationView[]>
   createApplication(input: ApplicationCreateInput): Promise<ApplicationView>
   addApplicationEvent(input: ApplicationEventInput): Promise<ApplicationView>
+  /** Update editable rich fields on an application (city, salary, JD, stage,
+   *  deadline, interview link, notes, channel, priority). Local DB write (R1,
+   *  no approval needed — §15 only gates external writes). */
+  updateApplicationFields(id: string, patch: ApplicationUpdateFields): Promise<ApplicationView | undefined>
   syncBossApplications(): Promise<{ synced: number; message: string }>
   getBossStatus(): Promise<BossStatus>
   onApplicationChanged(cb: (views: ApplicationView[]) => void): () => void
+  // ── Milestone A: email inference, AI generation, recycle bin, config ──
+  syncEmailApplications(): Promise<{ synced: number; pending: number; message: string }>
+  generateResume(applicationId: string): Promise<ResumeVersion>
+  generatePrepMaterial(applicationId: string): Promise<PrepMaterial>
+  listResumeVersions(applicationId: string): Promise<ResumeVersion[]>
+  listPrepMaterials(applicationId: string): Promise<PrepMaterial[]>
+  listInterviewNotes(query?: string): Promise<InterviewNote[]>
+  createInterviewNote(input: InterviewNoteInput): Promise<InterviewNote>
+  softDeleteApplication(id: string): Promise<void>
+  restoreApplication(id: string): Promise<ApplicationView | undefined>
+  purgeApplication(id: string): Promise<void>
+  listDeletedApplications(): Promise<ApplicationView[]>
+  archiveApplication(id: string): Promise<ApplicationView | undefined>
+  unarchiveApplication(id: string): Promise<ApplicationView | undefined>
+  listPendingEmailMatches(): Promise<EmailMatchProposal[]>
+  confirmEmailMatch(messageId: string, applicationId?: string): Promise<void>
+  ignoreEmailMatch(messageId: string): Promise<void>
+  onEmailMatchesChanged(cb: (matches: EmailMatchProposal[]) => void): () => void
+  getJobSearchConfig(): Promise<JobSearchSettings>
+  setJobSearchConfig(config: JobSearchSettings): Promise<JobSearchSettings>
+  // ── Milestone B: funnel review (stats + AI 复盘) ──
+  getApplicationStats(): Promise<ApplicationFunnelStats>
+  generateFunnelReview(): Promise<FunnelReviewOutput>
+  // ── Milestone C: job recommendation (抓取 + 评分 + 转投递) ──
+  fetchJobRecommendations(opts?: FetchJobRecommendationsOpts): Promise<JobRecommendations>
+  convertJobToApplication(securityId: string): Promise<ApplicationView>
+  /** Fetch the full detail (JD body, company industry/scale/stage, HR title)
+   *  for a recommended job by securityId. JD body is untrusted boss data — the
+   *  renderer renders it as text, never HTML (§17.12/§17.13). */
+  getJobDetail(securityId: string): Promise<BossJob>
+  // ── Milestone D: notification prefs + 投递数据导出 ──
+  getNotificationPrefs(): Promise<NotificationPrefs>
+  setNotificationPrefs(prefs: NotificationPrefs): Promise<NotificationPrefs>
+  /** Export the 投递 module (applications + events + 面经 + 简历 + 逐字稿) as a
+   *  ZIP to a user-chosen path. Resolves to the saved file path, or `null` if
+   *  the user cancelled the save dialog. */
+  exportApplicationsZip(): Promise<string | null>
+  // ── Milestone E: birth data for the daily 运势 (non-secret settings.json) ──
+  getBirthData(): Promise<BirthData | undefined>
+  setBirthData(birth: BirthData): Promise<BirthData>
+  clearBirthData(): Promise<void>
 }
 
 // Contract on the `window.daymate` global injected by preload.

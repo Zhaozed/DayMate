@@ -5,7 +5,7 @@
 // See ADR 0002 for why the engine depends on the RoutineStore interface, not
 // this class.
 
-import { eq, desc, and, isNull } from 'drizzle-orm'
+import { eq, desc, and, isNull, isNotNull } from 'drizzle-orm'
 import type { RoutineStore } from './store'
 import type { AppDb } from './client'
 import {
@@ -18,7 +18,10 @@ import {
   approvalRequests as approvalsTbl,
   memoryItems as memoryTbl,
   applications as applicationsTbl,
-  applicationEvents as applicationEventsTbl
+  applicationEvents as applicationEventsTbl,
+  resumeVersions as resumeVersionsTbl,
+  prepMaterials as prepMaterialsTbl,
+  interviewNotes as interviewNotesTbl
 } from './schema'
 import type {
   RoutineDefinition,
@@ -30,7 +33,10 @@ import type {
   ApprovalRequest,
   MemoryItem,
   Application,
-  ApplicationEvent
+  ApplicationEvent,
+  ResumeVersion,
+  PrepMaterial,
+  InterviewNote
 } from '@shared/types'
 
 type TaskRow = typeof tasksTbl.$inferSelect
@@ -43,6 +49,9 @@ type ApprovalRow = typeof approvalsTbl.$inferSelect
 type MemoryRow = typeof memoryTbl.$inferSelect
 type ApplicationRow = typeof applicationsTbl.$inferSelect
 type ApplicationEventRow = typeof applicationEventsTbl.$inferSelect
+type ResumeVersionRow = typeof resumeVersionsTbl.$inferSelect
+type PrepMaterialRow = typeof prepMaterialsTbl.$inferSelect
+type InterviewNoteRow = typeof interviewNotesTbl.$inferSelect
 
 const parseJson = <T>(raw: string | null, fallback: T): T => {
   if (raw == null) return fallback
@@ -181,6 +190,16 @@ function rowToApplication(r: ApplicationRow): Application {
     appliedAt: r.appliedAt,
     channelRef: r.channelRef ?? undefined,
     notes: r.notes ?? undefined,
+    city: r.city ?? undefined,
+    salaryRange: r.salaryRange ?? undefined,
+    jdText: r.jdText ?? undefined,
+    stage: r.stage ?? undefined,
+    stageDeadline: r.stageDeadline ?? undefined,
+    interviewLink: r.interviewLink ?? undefined,
+    priority: (r.priority as Application['priority']) ?? 'normal',
+    emailRefId: r.emailRefId ?? undefined,
+    deletedAt: r.deletedAt ?? undefined,
+    archivedAt: r.archivedAt ?? undefined,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt
   }
@@ -200,6 +219,44 @@ function rowToApplicationEvent(r: ApplicationEventRow): ApplicationEvent {
     locked: r.locked === '1',
     eventAt: r.eventAt,
     createdAt: r.createdAt
+  }
+}
+
+function rowToResumeVersion(r: ResumeVersionRow): ResumeVersion {
+  return {
+    id: r.id,
+    applicationId: r.applicationId,
+    version: Number(r.version),
+    html: r.html,
+    modelId: r.modelId ?? undefined,
+    promptHash: r.promptHash ?? undefined,
+    createdAt: r.createdAt
+  }
+}
+
+function rowToPrepMaterial(r: PrepMaterialRow): PrepMaterial {
+  return {
+    id: r.id,
+    applicationId: r.applicationId,
+    version: Number(r.version),
+    html: r.html,
+    modelId: r.modelId ?? undefined,
+    promptHash: r.promptHash ?? undefined,
+    createdAt: r.createdAt
+  }
+}
+
+function rowToInterviewNote(r: InterviewNoteRow): InterviewNote {
+  return {
+    id: r.id,
+    company: r.company ?? undefined,
+    position: r.position ?? undefined,
+    applicationId: r.applicationId ?? undefined,
+    tags: parseJson(r.tags, [] as string[]) as InterviewNote['tags'],
+    content: r.content,
+    source: r.source as InterviewNote['source'],
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt
   }
 }
 
@@ -548,6 +605,16 @@ export class SqliteStore implements RoutineStore {
         appliedAt: app.appliedAt,
         channelRef: app.channelRef ?? null,
         notes: app.notes ?? null,
+        city: app.city ?? null,
+        salaryRange: app.salaryRange ?? null,
+        jdText: app.jdText ?? null,
+        stage: app.stage ?? null,
+        stageDeadline: app.stageDeadline ?? null,
+        interviewLink: app.interviewLink ?? null,
+        priority: app.priority ?? 'normal',
+        emailRefId: app.emailRefId ?? null,
+        deletedAt: app.deletedAt ?? null,
+        archivedAt: app.archivedAt ?? null,
         createdAt: app.createdAt,
         updatedAt: app.updatedAt
       })
@@ -579,10 +646,33 @@ export class SqliteStore implements RoutineStore {
     return r ? rowToApplication(r) : undefined
   }
   listApplications(): Application[] {
+    // Active funnel only: exclude soft-deleted (deletedAt) AND archived apps.
+    // archivedAt has no value on pre-Milestone-A rows, so the filter is a no-op
+    // for existing dev data. (Spec §A: listApplications default = both NULL.)
     return this.db
       .select()
       .from(applicationsTbl)
+      .where(and(isNull(applicationsTbl.deletedAt), isNull(applicationsTbl.archivedAt)))
       .orderBy(desc(applicationsTbl.appliedAt))
+      .all()
+      .map(rowToApplication)
+  }
+  listDeletedApplications(): Application[] {
+    return this.db
+      .select()
+      .from(applicationsTbl)
+      .where(isNotNull(applicationsTbl.deletedAt))
+      .orderBy(desc(applicationsTbl.deletedAt))
+      .all()
+      .map(rowToApplication)
+  }
+  listArchivedApplications(): Application[] {
+    // archived but not soft-deleted (deleted_at takes precedence).
+    return this.db
+      .select()
+      .from(applicationsTbl)
+      .where(and(isNotNull(applicationsTbl.archivedAt), isNull(applicationsTbl.deletedAt)))
+      .orderBy(desc(applicationsTbl.archivedAt))
       .all()
       .map(rowToApplication)
   }
@@ -595,9 +685,44 @@ export class SqliteStore implements RoutineStore {
     if (patch.appliedAt !== undefined) set.appliedAt = patch.appliedAt
     if (patch.channelRef !== undefined) set.channelRef = patch.channelRef ?? null
     if (patch.notes !== undefined) set.notes = patch.notes ?? null
+    if (patch.city !== undefined) set.city = patch.city ?? null
+    if (patch.salaryRange !== undefined) set.salaryRange = patch.salaryRange ?? null
+    if (patch.jdText !== undefined) set.jdText = patch.jdText ?? null
+    if (patch.stage !== undefined) set.stage = patch.stage ?? null
+    if (patch.stageDeadline !== undefined) set.stageDeadline = patch.stageDeadline ?? null
+    if (patch.interviewLink !== undefined) set.interviewLink = patch.interviewLink ?? null
+    if (patch.priority !== undefined) set.priority = patch.priority
+    if (patch.emailRefId !== undefined) set.emailRefId = patch.emailRefId ?? null
     set.updatedAt = new Date().toISOString()
     this.db.update(applicationsTbl).set(set).where(eq(applicationsTbl.id, id)).run()
     return this.getApplication(id)
+  }
+  softDeleteApplication(id: string, deletedAt: string): void {
+    this.db
+      .update(applicationsTbl)
+      .set({ deletedAt, updatedAt: new Date().toISOString() })
+      .where(eq(applicationsTbl.id, id))
+      .run()
+  }
+  restoreApplication(id: string): void {
+    this.db
+      .update(applicationsTbl)
+      .set({ deletedAt: null, updatedAt: new Date().toISOString() })
+      .where(eq(applicationsTbl.id, id))
+      .run()
+  }
+  purgeApplication(id: string): void {
+    this.db.delete(applicationsTbl).where(eq(applicationsTbl.id, id)).run()
+    this.db.delete(applicationEventsTbl).where(eq(applicationEventsTbl.applicationId, id)).run()
+    this.db.delete(resumeVersionsTbl).where(eq(resumeVersionsTbl.applicationId, id)).run()
+    this.db.delete(prepMaterialsTbl).where(eq(prepMaterialsTbl.applicationId, id)).run()
+  }
+  archiveApplication(id: string, archivedAt: string): void {
+    this.db
+      .update(applicationsTbl)
+      .set({ archivedAt, updatedAt: new Date().toISOString() })
+      .where(eq(applicationsTbl.id, id))
+      .run()
   }
 
   createApplicationEvent(event: ApplicationEvent): void {
@@ -640,5 +765,124 @@ export class SqliteStore implements RoutineStore {
       .orderBy(applicationEventsTbl.eventAt)
       .all()
       .map(rowToApplicationEvent)
+  }
+
+  // ── Resume versions (Milestone A) ──────────────────────────────────────────
+  createResumeVersion(v: ResumeVersion): void {
+    this.db
+      .insert(resumeVersionsTbl)
+      .values({
+        id: v.id,
+        applicationId: v.applicationId,
+        version: String(v.version),
+        html: v.html,
+        modelId: v.modelId ?? null,
+        promptHash: v.promptHash ?? null,
+        createdAt: v.createdAt
+      })
+      .run()
+  }
+  listResumeVersions(applicationId: string): ResumeVersion[] {
+    return this.db
+      .select()
+      .from(resumeVersionsTbl)
+      .where(eq(resumeVersionsTbl.applicationId, applicationId))
+      .orderBy(desc(resumeVersionsTbl.version))
+      .all()
+      .map(rowToResumeVersion)
+  }
+  getLatestResumeVersion(applicationId: string): ResumeVersion | undefined {
+    const r = this.db
+      .select()
+      .from(resumeVersionsTbl)
+      .where(eq(resumeVersionsTbl.applicationId, applicationId))
+      .orderBy(desc(resumeVersionsTbl.version))
+      .limit(1)
+      .get()
+    return r ? rowToResumeVersion(r) : undefined
+  }
+
+  // ── Prep materials (Milestone A) ───────────────────────────────────────────
+  createPrepMaterial(m: PrepMaterial): void {
+    this.db
+      .insert(prepMaterialsTbl)
+      .values({
+        id: m.id,
+        applicationId: m.applicationId,
+        version: String(m.version),
+        html: m.html,
+        modelId: m.modelId ?? null,
+        promptHash: m.promptHash ?? null,
+        createdAt: m.createdAt
+      })
+      .run()
+  }
+  listPrepMaterials(applicationId: string): PrepMaterial[] {
+    return this.db
+      .select()
+      .from(prepMaterialsTbl)
+      .where(eq(prepMaterialsTbl.applicationId, applicationId))
+      .orderBy(desc(prepMaterialsTbl.version))
+      .all()
+      .map(rowToPrepMaterial)
+  }
+  getLatestPrepMaterial(applicationId: string): PrepMaterial | undefined {
+    const r = this.db
+      .select()
+      .from(prepMaterialsTbl)
+      .where(eq(prepMaterialsTbl.applicationId, applicationId))
+      .orderBy(desc(prepMaterialsTbl.version))
+      .limit(1)
+      .get()
+    return r ? rowToPrepMaterial(r) : undefined
+  }
+
+  // ── 面经库 (Milestone A) ───────────────────────────────────────────────────
+  createInterviewNote(n: InterviewNote): void {
+    this.db
+      .insert(interviewNotesTbl)
+      .values({
+        id: n.id,
+        company: n.company ?? null,
+        position: n.position ?? null,
+        applicationId: n.applicationId ?? null,
+        tags: JSON.stringify(n.tags),
+        content: n.content,
+        source: n.source,
+        createdAt: n.createdAt,
+        updatedAt: n.updatedAt
+      })
+      .run()
+  }
+  getInterviewNote(id: string): InterviewNote | undefined {
+    const r = this.db
+      .select()
+      .from(interviewNotesTbl)
+      .where(eq(interviewNotesTbl.id, id))
+      .get()
+    return r ? rowToInterviewNote(r) : undefined
+  }
+  listInterviewNotes(): InterviewNote[] {
+    return this.db
+      .select()
+      .from(interviewNotesTbl)
+      .orderBy(desc(interviewNotesTbl.updatedAt))
+      .all()
+      .map(rowToInterviewNote)
+  }
+  updateInterviewNote(id: string, patch: Partial<InterviewNote>): InterviewNote | undefined {
+    const set: Record<string, unknown> = {}
+    if (patch.company !== undefined) set.company = patch.company ?? null
+    if (patch.position !== undefined) set.position = patch.position ?? null
+    if (patch.applicationId !== undefined) set.applicationId = patch.applicationId ?? null
+    if (patch.tags !== undefined) set.tags = JSON.stringify(patch.tags)
+    if (patch.content !== undefined) set.content = patch.content
+    if (patch.source !== undefined) set.source = patch.source
+    set.updatedAt = new Date().toISOString()
+    this.db.update(interviewNotesTbl).set(set).where(eq(interviewNotesTbl.id, id)).run()
+    return this.getInterviewNote(id)
+  }
+  deleteInterviewNote(id: string): void {
+    this.db.delete(interviewNotesTbl).where(eq(interviewNotesTbl.id, id)).run()
   }
 }

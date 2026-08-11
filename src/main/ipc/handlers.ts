@@ -2,7 +2,7 @@
 // Everything here runs in main: no credential or token ever crosses to the
 // renderer — only validated, plain-data responses do.
 
-import { app, ipcMain } from 'electron'
+import { app, ipcMain, dialog } from 'electron'
 import { IPC } from './contracts'
 import type {
   AppInfo,
@@ -19,7 +19,15 @@ import type {
   MemoryUpdate,
   RoutineDefinition,
   ApplicationCreateInput,
-  ApplicationEventInput
+  ApplicationEventInput,
+  ApplicationUpdateFields,
+  InterviewNoteInput,
+  JobSearchSettings,
+  JobRecommendations,
+  FetchJobRecommendationsOpts,
+  BossJob,
+  NotificationPrefs,
+  BirthData
 } from './contracts'
 import { APP_NAME, WINDOWS } from '@shared/constants'
 import { openWorkbench, openRobot } from '../windows'
@@ -27,6 +35,7 @@ import { getRobotWindow, setRobotView } from '../windows/robot-window'
 import { getWorkbenchWindow } from '../windows/workbench-window'
 import { getContainer, initContainer } from '../app/container'
 import { nowIso } from '../util/ids'
+import { writeFile } from 'node:fs/promises'
 
 // M0 in-memory robot state. From M4 onward the RobotStateController drives this
 // from Activity events (container.ts); it is still surfaced to the renderer
@@ -361,6 +370,14 @@ export function registerIpcHandlers(): void {
     container.broadcastApplications()
     return view
   })
+  ipcMain.handle(
+    IPC.APPLICATION_UPDATE_FIELDS,
+    (_e, id: string, patch: ApplicationUpdateFields) => {
+      const view = container.applicationService.updateFields(id, patch)
+      container.broadcastApplications()
+      return view
+    }
+  )
   ipcMain.handle(IPC.APPLICATION_SYNC_BOSS, async () => {
     const result = await container.applicationService.syncFromBoss()
     container.broadcastApplications()
@@ -384,6 +401,183 @@ export function registerIpcHandlers(): void {
         message: e instanceof Error ? e.message : String(e)
       }
     }
+  })
+
+  // ── Milestone A: rich-field CRUD, email inference, AI generation, config ──
+  ipcMain.handle(
+    IPC.APPLICATION_SYNC_EMAIL,
+    async () => {
+      const result = await container.applicationService.syncFromEmails(
+        container.emailProviders,
+        container.agentRuntime
+      )
+      container.broadcastApplications()
+      container.broadcastEmailMatches()
+      return result
+    }
+  )
+  ipcMain.handle(IPC.APPLICATION_GENERATE_RESUME, async (_e, applicationId: string) => {
+    // The base resume is the user's OWN document (trusted §17) — read from the
+    // configured path at generation time, never stored in the DB.
+    const baseResume = await container.settings.readBaseResumeContent()
+    const version = await container.applicationService.generateResume(
+      applicationId,
+      container.agentRuntime,
+      baseResume
+    )
+    container.broadcastApplications()
+    return version
+  })
+  ipcMain.handle(IPC.APPLICATION_GENERATE_PREP, async (_e, applicationId: string) => {
+    const material = await container.applicationService.generatePrepMaterial(
+      applicationId,
+      container.agentRuntime
+    )
+    container.broadcastApplications()
+    return material
+  })
+  ipcMain.handle(IPC.APPLICATION_LIST_RESUMES, (_e, applicationId: string) =>
+    container.applicationService.listResumeVersions(applicationId)
+  )
+  ipcMain.handle(IPC.APPLICATION_LIST_PREP, (_e, applicationId: string) =>
+    container.applicationService.listPrepMaterials(applicationId)
+  )
+  ipcMain.handle(IPC.APPLICATION_LIST_INTERVIEW_NOTES, (_e, query?: string) =>
+    container.applicationService.listInterviewNotes(query)
+  )
+  ipcMain.handle(IPC.APPLICATION_CREATE_INTERVIEW_NOTE, (_e, input: InterviewNoteInput) => {
+    const note = container.applicationService.createInterviewNote(input)
+    return note
+  })
+  ipcMain.handle(IPC.APPLICATION_SOFT_DELETE, (_e, id: string) => {
+    container.applicationService.softDelete(id)
+    container.broadcastApplications()
+  })
+  ipcMain.handle(IPC.APPLICATION_RESTORE, (_e, id: string) => {
+    const view = container.applicationService.restore(id)
+    container.broadcastApplications()
+    return view
+  })
+  ipcMain.handle(IPC.APPLICATION_PURGE, (_e, id: string) => {
+    container.applicationService.purgeApplication(id)
+    container.broadcastApplications()
+  })
+  ipcMain.handle(IPC.APPLICATION_LIST_DELETED, () =>
+    container.applicationService.listDeleted()
+  )
+  ipcMain.handle(IPC.APPLICATION_ARCHIVE, (_e, id: string) => {
+    const view = container.applicationService.archive(id)
+    container.broadcastApplications()
+    return view
+  })
+  ipcMain.handle(IPC.APPLICATION_UNARCHIVE, (_e, id: string) => {
+    const view = container.applicationService.unarchive(id)
+    container.broadcastApplications()
+    return view
+  })
+  // ── Milestone B: funnel review (stats + AI 复盘) ──
+  ipcMain.handle(IPC.APPLICATION_STATS, () => container.applicationService.stats())
+  ipcMain.handle(IPC.APPLICATION_GENERATE_FUNNEL_REVIEW, async () => {
+    // Manual AI generation — does NOT go through the Routine Engine (mirrors
+    // generateResume/generatePrepMaterial). The recap is an on-demand snapshot;
+    // it is not persisted (regenerate on demand). §13.4: descriptive only.
+    const review = await container.applicationService.generateFunnelReview(
+      container.agentRuntime
+    )
+    return review
+  })
+  ipcMain.handle(
+    IPC.JOB_RECOMMENDATIONS_FETCH,
+    async (_e, opts?: FetchJobRecommendationsOpts): Promise<JobRecommendations> => {
+      // Manual 抓取 — reads jobIntent from settings (server-side, never from the
+      // renderer), searches BOSS in two buckets (实习 + 秋招正职), scores via
+      // the `score_job_matches` agent step, splits results by securityId. No args
+      // = refresh both buckets (page 1); {bucket, append:true} = next page for
+      // one bucket. Mirrors generateFunnelReview (manual AI, not via Routine Engine).
+      const { jobIntent } = await container.settings.readJobSearch()
+      if (!jobIntent) {
+        return {
+          title: '岗位推荐',
+          summary: '尚未配置求职意向，请在「岗位推荐」区设置关键词/城市/薪资。',
+          reason: 'jobIntent 未配置',
+          priority: 'medium',
+          intern: [],
+          campus: [],
+          internHasMore: false,
+          campusHasMore: false,
+          internFetched: false,
+          campusFetched: false
+        } satisfies JobRecommendations
+      }
+      return container.applicationService.fetchJobRecommendations(
+        container.agentRuntime,
+        jobIntent,
+        opts ?? {}
+      )
+    }
+  )
+  ipcMain.handle(IPC.JOB_CONVERT_TO_APPLICATION, (_e, securityId: string) => {
+    const view = container.applicationService.convertJobToApplication(securityId)
+    container.broadcastApplications()
+    return view
+  })
+  // Full job detail (JD body, company industry/scale/stage, HR title) for the
+  // clickable job-card detail view. JD body is untrusted boss data — rendered
+  // as text by the renderer, never HTML (§17.12/§17.13).
+  ipcMain.handle(IPC.JOB_DETAIL_GET, async (_e, securityId: string): Promise<BossJob> => {
+    return container.bossProvider.getJobDetail(securityId)
+  })
+  // Pending email→application match queue (§3.3 待确认队列).
+  ipcMain.handle(IPC.EMAIL_MATCHES_LIST, () =>
+    container.applicationService.listPendingEmailMatches()
+  )
+  ipcMain.handle(IPC.EMAIL_MATCH_CONFIRM, (_e, messageId: string, applicationId?: string) => {
+    container.applicationService.confirmEmailMatch(messageId, applicationId)
+    container.broadcastApplications()
+    container.broadcastEmailMatches()
+  })
+  ipcMain.handle(IPC.EMAIL_MATCH_IGNORE, (_e, messageId: string) => {
+    container.applicationService.ignoreEmailMatch(messageId)
+    container.broadcastEmailMatches()
+  })
+  // Job-search config (non-secret file paths, §G).
+  ipcMain.handle(IPC.JOB_SEARCH_GET_CONFIG, () => container.settings.readJobSearch())
+  ipcMain.handle(IPC.JOB_SEARCH_SET_CONFIG, (_e, jobSearch: JobSearchSettings) =>
+    container.settings.writeJobSearch(jobSearch)
+  )
+  // Milestone D — notification prefs (non-secret) + 投递 data export.
+  ipcMain.handle(IPC.NOTIFICATION_GET_PREFS, () => container.settings.readNotifications())
+  ipcMain.handle(IPC.NOTIFICATION_SET_PREFS, async (_e, prefs: NotificationPrefs) => {
+    const next = await container.settings.writeNotifications(prefs)
+    // Refresh the cached prefs in the live NotificationService so the change
+    // applies immediately (no restart needed).
+    await container.notificationService.refreshPrefs()
+    return next
+  })
+  ipcMain.handle(IPC.APPLICATION_EXPORT_ZIP, async () => {
+    const bytes = container.applicationService.exportApplicationsZip()
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    const result = await dialog.showSaveDialog({
+      title: '导出投递数据',
+      defaultPath: `daymate-投递-${stamp}.zip`,
+      filters: [{ name: 'ZIP', extensions: ['zip'] }]
+    })
+    if (result.canceled || !result.filePath) return null
+    await writeFile(result.filePath, bytes)
+    container.activityService.record({
+      type: 'tool_completed',
+      summary: `已导出投递数据：${result.filePath}`,
+      metadata: { exportedTo: result.filePath, bytes: bytes.length }
+    })
+    return result.filePath
+  })
+  // Milestone E — birth data for the daily 运势 (non-secret settings.json).
+  ipcMain.handle(IPC.BIRTH_DATA_GET, () => container.settings.readBirthData())
+  ipcMain.handle(IPC.BIRTH_DATA_SET, async (_e, birth: BirthData) =>
+    container.settings.writeBirthData(birth)
+  )
+  ipcMain.handle(IPC.BIRTH_DATA_CLEAR, async () => {
+    await container.settings.clearBirthData()
   })
 }
 

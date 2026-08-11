@@ -1,9 +1,14 @@
-# macOS packaging (Spec §21 M4). Produces a local, UNSIGNED Daymate.app + .dmg.
-# No code signing / notarization — that needs a paid Apple Developer ID and is
-# deferred (the unsigned app opens on the build machine; Gatekeeper may warn).
+# macOS packaging (Spec §21 M4 + Milestone F). Produces a local, UNSIGNED
+# Daymate.app + .dmg. No code signing / notarization — that needs a paid Apple
+# Developer ID and is deferred (the unsigned app opens on the build machine;
+# Gatekeeper may warn).
 #
-# Host-architecture only (no cross-arch electron download) — the deliverable is
-# a local .app that runs on THIS machine. arm64+x64 universal is a later step.
+# Universal (arm64+x64): a single .app/dmg that runs on both Apple Silicon and
+# Intel Macs. electron-builder builds both arches and lipo-merges them; the
+# native better-sqlite3 addon (N-API) is rebuilt for each arch by
+# @electron/rebuild (the prebuild/rebuild:native scripts) and lipo'd alongside.
+# Building the x64 slice on an arm64 host cross-compiles via N-API headers
+# (no Rosetta needed for the build itself).
 appId: com.daymate.app
 productName: Daymate
 directories:
@@ -20,9 +25,14 @@ asarUnpack:
 mac:
   category: public.app-category.productivity
   target:
-    - dir
-    - dmg
+    - target: dir
+      arch:
+        - universal
+    - target: dmg
+      arch:
+        - universal
   identity: null
   hardenedRuntime: false
   gatekeeperAssess: false
   darkModeSupport: true
+

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { RoutineDefinition, RoutineRun, RoutineTrigger } from '@shared/types'
 import { PRESET_ROUTINE_IDS } from '@shared/constants'
+import { nextFireHint } from '@shared/cron'
 import { useAsync } from '../hooks/useAsync'
 import { Loading, EmptyState, ErrorState } from '../components/states'
 import { RoutineBuilder } from '../components/RoutineBuilder'
@@ -231,15 +232,19 @@ function describeTrigger(t: RoutineTrigger): string {
       return `每 ${t.intervalMinutes} 分钟`
     case 'calendar_before':
       return `会议前 ${t.minutesBefore} 分钟`
+    case 'application_status':
+      return '投递进入面试时'
   }
 }
 
-// Rough next-run hint. For poll we can compute from the last run + interval;
-// cron next-fire needs a parser (out of scope for MVP), so we just surface the
-// schedule. Never claim precision we don't have.
+// Next-run hint. For poll we compute from the last run + interval; for cron
+// schedules we hand-roll a 5-field next-fire (`src/shared/cron.ts`, Milestone
+// F) — local time, 366-day look-ahead, falls back to the raw cron if the
+// expression is malformed or has no fire within a year. Never claim precision
+// we don't have.
 function nextRun(t: RoutineTrigger, last: RoutineRun | undefined): string {
   if (t.type === 'manual') return '按需运行'
-  if (t.type === 'schedule') return '见计划'
+  if (t.type === 'schedule') return nextFireHint(t.cron) ?? `cron：${t.cron}`
   if (t.type === 'calendar_before') return '下次会议前'
   if (t.type === 'email_poll') {
     const intervalMs = t.intervalMinutes * 60_000
@@ -320,6 +325,9 @@ function TriggerEditor({
         return { type: 'email_poll', intervalMinutes }
       case 'calendar_before':
         return { type: 'calendar_before', minutesBefore }
+      // application_status is a preset-only trigger (not builder-selectable).
+      default:
+        return { type: 'manual' }
     }
   }
 

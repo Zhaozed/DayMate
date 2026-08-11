@@ -193,6 +193,10 @@ export function RoutineBuilder({
         return { type: 'email_poll', intervalMinutes }
       case 'calendar_before':
         return { type: 'calendar_before', minutesBefore }
+      // application_status is a preset-only trigger (not builder-selectable);
+      // unreachable here, but the switch must be exhaustive over the type union.
+      default:
+        return { type: 'manual' }
     }
   }
 

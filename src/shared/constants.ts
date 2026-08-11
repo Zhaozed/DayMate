@@ -41,6 +41,9 @@ export type EmailTopic = (typeof EMAIL_TOPICS)[number]
 export type MemoryKey = (typeof MEMORY_KEYS)[number]
 export type ApplicationSource = (typeof APPLICATION_SOURCES)[number]
 export type ApplicationEventType = (typeof APPLICATION_EVENT_TYPES)[number]
+export type ApplicationPriority = (typeof APPLICATION_PRIORITIES)[number]
+export type InterviewNoteTag = (typeof INTERVIEW_NOTE_TAGS)[number]
+export type InterviewNoteSource = (typeof INTERVIEW_NOTE_SOURCES)[number]
 
 // ── Domain enums (Spec §8) ────────────────────────────────────────────────
 export const TASK_STATUSES = [
@@ -178,6 +181,7 @@ export const APPLICATION_SOURCES = [
   'manual',
   'web',
   'referral',
+  'email',
   'other'
 ] as const
 
@@ -196,6 +200,30 @@ export const APPLICATION_EVENT_TYPES = [
   'rejected',
   'withdrawn'
 ] as const
+
+// Priority of an application in the funnel (Spec §4.4). `back` = deprioritised
+// (the user pushed it back, or the auto-stale rule demoted it after 14 days of
+// no progress). Wire identifier; the UI maps it to a Chinese label.
+export const APPLICATION_PRIORITIES = ['normal', 'back'] as const
+
+// ── Resume versions / interview prep (Milestone A) ──────────────────────────
+// Per-application versioned AI artefacts. The latest `version` is active; no
+// separate active flag. `promptHash` = SHA-256 of the generation inputs, used to
+// short-circuit a re-request whose inputs are unchanged (skip the LLM call).
+
+// 面经库 tags (Spec §6). Wire identifiers stay English; the UI maps them to
+// 算法 / 八股 / 项目 / 行为 / 系统设计.
+export const INTERVIEW_NOTE_TAGS = [
+  'algorithm',
+  'fundamentals',
+  'project',
+  'behavior',
+  'system_design'
+] as const
+
+// Where a 面经 entry came from. `agent` = AI-summarised post-interview (still
+// the user's own knowledge, trusted under §17); `manual` = user-authored.
+export const INTERVIEW_NOTE_SOURCES = ['manual', 'agent'] as const
 
 // ── IPC channel namespace ───────────────────────────────────────────────────
 // All renderer <-> main traffic goes through channels prefixed here. The preload
@@ -292,7 +320,40 @@ export const IPC = {
   APPLICATION_ADD_EVENT: 'daymate:application:add-event',
   APPLICATION_SYNC_BOSS: 'daymate:application:sync-boss',
   APPLICATION_CHANGED: 'daymate:application:changed',
-  BOSS_GET_STATUS: 'daymate:boss:get-status'
+  APPLICATION_SYNC_EMAIL: 'daymate:application:sync-email',
+  APPLICATION_GENERATE_RESUME: 'daymate:application:generate-resume',
+  APPLICATION_GENERATE_PREP: 'daymate:application:generate-prep',
+  APPLICATION_LIST_RESUMES: 'daymate:application:list-resumes',
+  APPLICATION_LIST_PREP: 'daymate:application:list-prep',
+  APPLICATION_LIST_INTERVIEW_NOTES: 'daymate:application:list-interview-notes',
+  APPLICATION_CREATE_INTERVIEW_NOTE: 'daymate:application:create-interview-note',
+  APPLICATION_SOFT_DELETE: 'daymate:application:soft-delete',
+  APPLICATION_RESTORE: 'daymate:application:restore',
+  APPLICATION_PURGE: 'daymate:application:purge',
+  APPLICATION_LIST_DELETED: 'daymate:application:list-deleted',
+  APPLICATION_ARCHIVE: 'daymate:application:archive',
+  APPLICATION_UNARCHIVE: 'daymate:application:unarchive',
+  APPLICATION_STATS: 'daymate:application:stats',
+  APPLICATION_GENERATE_FUNNEL_REVIEW: 'daymate:application:generate-funnel-review',
+  APPLICATION_UPDATE_FIELDS: 'daymate:application:update-fields',
+  JOB_RECOMMENDATIONS_FETCH: 'daymate:job-recommendations:fetch',
+  JOB_CONVERT_TO_APPLICATION: 'daymate:job-recommendations:convert',
+  JOB_DETAIL_GET: 'daymate:job-recommendations:detail',
+  EMAIL_MATCHES_LIST: 'daymate:email-match:list',
+  EMAIL_MATCH_CONFIRM: 'daymate:email-match:confirm',
+  EMAIL_MATCH_IGNORE: 'daymate:email-match:ignore',
+  EMAIL_MATCHES_CHANGED: 'daymate:email-match:changed',
+  JOB_SEARCH_GET_CONFIG: 'daymate:job-search:get-config',
+  JOB_SEARCH_SET_CONFIG: 'daymate:job-search:set-config',
+  BOSS_GET_STATUS: 'daymate:boss:get-status',
+  // Milestone D — notification prefs + 投递 data export.
+  NOTIFICATION_GET_PREFS: 'daymate:notifications:get-prefs',
+  NOTIFICATION_SET_PREFS: 'daymate:notifications:set-prefs',
+  APPLICATION_EXPORT_ZIP: 'daymate:application:export-zip',
+  // Milestone E — birth data for the daily 运势 (non-secret settings.json).
+  BIRTH_DATA_GET: 'daymate:birth-data:get',
+  BIRTH_DATA_SET: 'daymate:birth-data:set',
+  BIRTH_DATA_CLEAR: 'daymate:birth-data:clear'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
@@ -308,7 +369,9 @@ export const PRESET_ROUTINE_IDS = [
   'auto_inbox',
   'draft_review',
   'meeting_prep',
-  'daily_work_summary'
+  'daily_work_summary',
+  'interview_prep',
+  'job_recommendation'
 ] as const
 export type PresetRoutineId = (typeof PRESET_ROUTINE_IDS)[number]
 

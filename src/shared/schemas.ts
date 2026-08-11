@@ -24,7 +24,10 @@ import {
   DEFAULT_LLM_MODEL_IDS,
   MEMORY_KEYS,
   APPLICATION_SOURCES,
-  APPLICATION_EVENT_TYPES
+  APPLICATION_EVENT_TYPES,
+  APPLICATION_PRIORITIES,
+  INTERVIEW_NOTE_TAGS,
+  INTERVIEW_NOTE_SOURCES
 } from './constants'
 
 // ── Robot / app ──────────────────────────────────────────────────────────────
@@ -115,7 +118,15 @@ export const routineTriggerSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('manual') }),
   z.object({ type: z.literal('schedule'), cron: z.string(), timezone: z.string() }),
   z.object({ type: z.literal('email_poll'), intervalMinutes: z.number().int().positive() }),
-  z.object({ type: z.literal('calendar_before'), minutesBefore: z.number().int().positive() })
+  z.object({ type: z.literal('calendar_before'), minutesBefore: z.number().int().positive() }),
+  // Fires when an application reaches `targetStatus` (e.g. interview) and has
+  // no prep material yet. Poll-based (60s shared loop, mirror calendar_before)
+  // — NOT a service emit, to avoid a service→engine→service cycle. The
+  // scheduler passes `targetApplicationId` into the run inputs.
+  z.object({
+    type: z.literal('application_status'),
+    targetStatus: z.literal('interview')
+  })
 ])
 
 export const routineStepSchema = z.discriminatedUnion('type', [
@@ -386,11 +397,142 @@ export const draftReplyOutputSchema = z.object({
   memoryProposals: z.array(memoryProposalSchema).optional()
 })
 
+// ── Resume customisation agent-step output (Milestone A §4.2) ──────────────────
+// The model tailors the user's base resume to a JD. `html` is stored as DATA
+// and rendered in a sandbox="" iframe (never executed, §17.12/§17.13). The JD
+// is untrusted external text; it reaches the model only via frameJd in a USER
+// message, never the system prompt. memoryProposals referencing JD text are
+// stripped by enforceTrust (§17 — never persist untrusted-derived memory).
+export const resumeOutputSchema = z.object({
+  html: z.string(),
+  summary: z.string(),
+  memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+// ── Interview transcript agent-step output (Milestone A §4.3) ─────────────────
+// Structured interview-prep: self-intro, STAR projects, common Q&A, reverse
+// questions. `html` is the same sandbox-rendered DATA shape. Built from the
+// trusted base resume + the user's own 面经 (<your_notes>, trusted) + the JD
+// (untrusted, frameJd). memoryProposals referencing JD text are stripped.
+export const interviewTranscriptOutputSchema = z.object({
+  html: z.string(),
+  selfIntro: z.string(),
+  starProjects: z.array(
+    z.object({
+      title: z.string(),
+      situation: z.string(),
+      task: z.string(),
+      action: z.string(),
+      result: z.string()
+    })
+  ),
+  commonQA: z.array(
+    z.object({
+      question: z.string(),
+      answer: z.string()
+    })
+  ),
+  reverseQuestions: z.array(z.string()),
+  memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+// ── Application-email classification (Milestone A §3.3) ───────────────────────
+// Distinct from `classify_inbox` (generic reply/follow_up/information/ignore +
+// topicCounts): this classifies an email as an application-progress EVENT
+// (interview / offer / rejected / communicated / assessment / written_test /
+// applied / withdrawn) and extracts company/position + confidence for the
+// deterministic service matcher. Untrusted mail → untrusted:true + low
+// confidence; the service never produces an event for it (§17).
+// (Schema declared after `applicationEventTypeSchema` below — see §Job applications.)
+
 // ── Job applications (boss-cli integration) ──────────────────────────────────
 // `source` and event `type` are closed enums so a malformed payload (from a
 // routine step arg or a manual IPC call) is rejected (Spec §5 Zod validation).
 export const applicationSourceSchema = z.enum(APPLICATION_SOURCES)
 export const applicationEventTypeSchema = z.enum(APPLICATION_EVENT_TYPES)
+export const applicationPrioritySchema = z.enum(APPLICATION_PRIORITIES)
+export const interviewNoteTagSchema = z.enum(INTERVIEW_NOTE_TAGS)
+export const interviewNoteSourceSchema = z.enum(INTERVIEW_NOTE_SOURCES)
+
+// Application-email classification agent-step output (Milestone A §3.3).
+// Declared here (after applicationEventTypeSchema) so the enum is in scope.
+export const classifyApplicationEmailOutputSchema = z.object({
+  results: z.array(
+    z.object({
+      messageId: z.string(),
+      eventType: applicationEventTypeSchema,
+      company: z.string().optional(),
+      position: z.string().optional(),
+      confidence: z.enum(['high', 'medium', 'low']),
+      evidence: z.string(),
+      untrusted: z.boolean()
+    })
+  ),
+  matched: z.number().int(),
+  pending: z.number().int(),
+  ignored: z.number().int()
+})
+
+// ── Funnel review agent-step output (Milestone B) ────────────────────────────
+// A DESCRIPTIVE recap of the job-application funnel (highlights / risk apps /
+// suggested actions). Built from Daymate's own derived records — no JD text or
+// email bodies are ingested (§17: only short structured field values, framed
+// as DATA in the user message). Must NOT infer productivity or slacking (§2/
+// §13.4). Carries the PublishableBrief shape so a future daily routine can
+// publish it to NTK via `need_to_know fromKey`.
+export const funnelReviewOutputSchema = z.object({
+  title: z.string(),
+  summary: z.string(),
+  reason: z.string(),
+  priority: z.enum(['medium', 'high', 'urgent']),
+  sourceRefs: z.array(sourceRefSchema),
+  suggestedActions: z.array(suggestedActionSchema),
+  highlights: z.array(z.string()),
+  riskApps: z.array(
+    z.object({
+      company: z.string(),
+      position: z.string().optional(),
+      issue: z.string()
+    })
+  ),
+  memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+// ── Milestone C: job recommendation (score_job_matches) ───────────────────
+// Scores boss.search results against the user's structured JobIntent. Metadata
+// only (BossJob has no JD text — boss-cli mapping limitation). PublishableBrief
+// shape + `results` so a daily routine can publish the brief to NTK and the
+// renderer can list per-job detail.
+export const jobMatchResultSchema = z.object({
+  securityId: z.string(),
+  jobName: z.string(),
+  companyName: z.string(),
+  score: z.number(),
+  tier: z.enum(['high', 'medium', 'low', 'skip']),
+  reasons: z.array(z.string()),
+  recommend: z.boolean(),
+  salary: z.string().optional(),
+  city: z.string().optional()
+})
+
+export const jobMatchOutputSchema = z.object({
+  title: z.string(),
+  summary: z.string(),
+  reason: z.string(),
+  priority: z.enum(['medium', 'high', 'urgent']),
+  sourceRefs: z.array(sourceRefSchema),
+  suggestedActions: z.array(suggestedActionSchema),
+  results: z.array(jobMatchResultSchema),
+  memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+// Milestone E — daily 运势 output (NOT a PublishableBrief; never publishes to NTK).
+export const dailyFortuneOutputSchema = z.object({
+  title: z.string(),
+  summary: z.string(),
+  tip: z.string(),
+  mood: z.number().int().min(0).max(100)
+})
 
 export const applicationSchema = z.object({
   id: z.string(),
@@ -401,6 +543,16 @@ export const applicationSchema = z.object({
   appliedAt: z.string(),
   channelRef: z.string().optional(),
   notes: z.string().optional(),
+  city: z.string().optional(),
+  salaryRange: z.string().optional(),
+  jdText: z.string().optional(),
+  stage: z.string().optional(),
+  stageDeadline: z.string().optional(),
+  interviewLink: z.string().optional(),
+  priority: applicationPrioritySchema.optional(),
+  emailRefId: z.string().optional(),
+  deletedAt: z.string().optional(),
+  archivedAt: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string()
 })
@@ -438,7 +590,13 @@ export const applicationCreateInputSchema = z.object({
   source: applicationSourceSchema.optional(),
   appliedAt: z.string().optional(),
   channelRef: z.string().optional(),
-  notes: z.string().optional()
+  notes: z.string().optional(),
+  city: z.string().optional(),
+  salaryRange: z.string().optional(),
+  jdText: z.string().optional(),
+  stage: z.string().optional(),
+  stageDeadline: z.string().optional(),
+  interviewLink: z.string().optional()
 })
 
 export const applicationEventInputSchema = z.object({
@@ -450,6 +608,79 @@ export const applicationEventInputSchema = z.object({
   eventAt: z.string().optional(),
   evidence: z.string().optional(),
   locked: z.boolean().optional()
+})
+
+// Partial rich-field update (single-field refresh / inline edit). All optional.
+export const applicationUpdateFieldsSchema = z.object({
+  company: z.string().optional(),
+  position: z.string().optional(),
+  city: z.string().optional(),
+  salaryRange: z.string().optional(),
+  jdText: z.string().optional(),
+  stage: z.string().optional(),
+  stageDeadline: z.string().optional(),
+  interviewLink: z.string().optional(),
+  notes: z.string().optional(),
+  channelRef: z.string().optional(),
+  priority: applicationPrioritySchema.optional()
+})
+
+// ── Resume versions / prep materials (Milestone A) ──────────────────────────
+export const resumeVersionSchema = z.object({
+  id: z.string(),
+  applicationId: z.string(),
+  version: z.number().int().positive(),
+  html: z.string().min(1),
+  modelId: z.string().optional(),
+  promptHash: z.string().optional(),
+  createdAt: z.string()
+})
+
+export const prepMaterialSchema = z.object({
+  id: z.string(),
+  applicationId: z.string(),
+  version: z.number().int().positive(),
+  html: z.string().min(1),
+  modelId: z.string().optional(),
+  promptHash: z.string().optional(),
+  createdAt: z.string()
+})
+
+// ── 面经库 (Milestone A §6) ───────────────────────────────────────────────────
+export const interviewNoteSchema = z.object({
+  id: z.string(),
+  company: z.string().optional(),
+  position: z.string().optional(),
+  applicationId: z.string().optional(),
+  tags: z.array(interviewNoteTagSchema),
+  content: z.string().min(1),
+  source: interviewNoteSourceSchema,
+  createdAt: z.string(),
+  updatedAt: z.string()
+})
+
+export const interviewNoteInputSchema = z.object({
+  company: z.string().optional(),
+  position: z.string().optional(),
+  applicationId: z.string().optional(),
+  tags: z.array(interviewNoteTagSchema),
+  content: z.string().min(1)
+})
+
+// ── Email→application inference proposal (Milestone A §3.3) ──────────────────
+export const emailMatchProposalSchema = z.object({
+  id: z.string(),
+  messageId: z.string(),
+  subject: z.string(),
+  from: z.string().optional(),
+  eventType: applicationEventTypeSchema,
+  company: z.string().optional(),
+  position: z.string().optional(),
+  confidence: z.enum(['high', 'medium', 'low']),
+  applicationId: z.string().optional(),
+  applicationCompany: z.string().optional(),
+  applicationPosition: z.string().optional(),
+  evidence: z.string().optional()
 })
 
 // boss-cli DTOs surfaced by the boss.* tools. Fields are optional/defensive

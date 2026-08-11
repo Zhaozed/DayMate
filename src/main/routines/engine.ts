@@ -24,6 +24,8 @@ import type { MemoryService } from '../services/memory-service'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
 import type { BossProvider } from '../providers/boss/boss-provider'
+import type { ApplicationService } from '../services/application-service'
+import type { Settings } from '../util/settings'
 import type {
   RoutineDefinition,
   RoutineRun,
@@ -42,7 +44,13 @@ const KNOWN_AGENT_ACTIONS = new Set([
   'generate_morning_brief',
   'classify_inbox',
   'generate_meeting_prep',
-  'generate_work_summary'
+  'generate_work_summary',
+  'generate_resume',
+  'generate_interview_transcript',
+  'classify_application_email',
+  'generate_funnel_review',
+  'score_job_matches',
+  'generate_daily_fortune'
 ])
 
 export interface RunOptions {
@@ -76,8 +84,24 @@ export interface EngineDeps {
   agentRuntime: AgentRuntime
   /** Explicit, inspectable, deletable memory (Spec §16). */
   memoryService: MemoryService
+  /** 投递漏斗 service (Milestone A) — wired into ToolContext for app tools. */
+  applicationService: ApplicationService
+  /** Plain (non-secret) app settings — wired into ToolContext for tools that
+   *  read user-configured criteria (Milestone C: `job_search.get_intent`).
+   *  Optional so tests constructing a minimal EngineDeps compile unchanged. */
+  settings?: Settings
   /** Push a notification to the robot surface. */
   notify: (message: string) => void
+  /** Rich notify path (Milestone D §D2): carries the firing routineId +
+   *  category so NotificationService can apply per-routine / per-category
+   *  toggles + quiet hours + aggregation. When present, `execNotifyStep`
+   *  prefers it over the plain `notify`. Optional — tests use the plain path. */
+  notifyRich?: (input: {
+    message: string
+    category?: 'routine' | 'approval' | 'info'
+    routineId?: string
+    navigateTo?: import('@shared/types').WorkbenchPage
+  }) => void
 }
 
 interface StepOutcome {
@@ -381,6 +405,8 @@ export class RoutineEngine {
       needToKnowService: this.deps.needToKnowService,
       activityService: this.deps.activityService,
       memoryService: this.deps.memoryService,
+      applicationService: this.deps.applicationService,
+      settings: this.deps.settings,
       notify: this.deps.notify,
       approval
     }
@@ -605,7 +631,13 @@ export class RoutineEngine {
   private execNotifyStep(step: Extract<RoutineStep, { type: 'notify' }>, run: RoutineRun, ctx: ToolContext): unknown {
     const message = step.message ? String(resolveTemplate(step.message, this.ctx(run))) : 'Daymate update'
     if (step.channel === 'desktop_robot') {
-      ctx.notify(message)
+      // Prefer the rich path so prefs (per-routine toggle / quiet hours /
+      // aggregation) apply; fall back to the plain legacy notify for tests.
+      if (this.deps.notifyRich) {
+        this.deps.notifyRich({ message, category: 'routine', routineId: run.routineId })
+      } else {
+        ctx.notify(message)
+      }
     }
     this.deps.activityService.record({
       runId: run.id,

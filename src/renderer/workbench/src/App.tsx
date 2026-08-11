@@ -10,6 +10,7 @@ import { NeedToKnowPage } from './pages/NeedToKnow'
 import { IntegrationsPage } from './pages/Integrations'
 import { MemoryPage } from './pages/Memory'
 import { ApplicationsPage } from './pages/Applications'
+import { InterviewNotesPage } from './pages/InterviewNotes'
 
 // Workbench shell. Spec §4 IA. M2 wires Approvals, Need to Know and
 // Integrations. Assistant and Memory remain placeholders (M4/M5). The robot
@@ -24,6 +25,7 @@ const NAV = [
   'Need to Know',
   'Tasks',
   'Applications',
+  'InterviewNotes',
   'Routines',
   'Approvals',
   'Activity',
@@ -39,11 +41,12 @@ const PAGE_LABELS: Record<NavName, string> = {
   'Need to Know': '必读',
   Tasks: '任务',
   Applications: '投递',
+  InterviewNotes: '面经库',
   Routines: '例程',
   Approvals: '审批',
   Activity: '动态',
   Memory: '记忆',
-  Integrations: '集成'
+  Integrations: '集成与设置'
 }
 
 export function Workbench(): ReactElement {
@@ -81,6 +84,7 @@ export function Workbench(): ReactElement {
         {active === 'Need to Know' && <NeedToKnowPage />}
         {active === 'Tasks' && <TasksPage />}
         {active === 'Applications' && <ApplicationsPage />}
+        {active === 'InterviewNotes' && <InterviewNotesPage />}
         {active === 'Routines' && <RoutinesPage />}
         {active === 'Approvals' && <ApprovalsPage />}
         {active === 'Activity' && <ActivityPage />}

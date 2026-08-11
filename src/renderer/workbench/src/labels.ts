@@ -16,7 +16,11 @@ import type {
   RoutineRunStatus,
   IntegrationStatus,
   ApplicationSource,
-  ApplicationEventType
+  ApplicationEventType,
+  ApplicationPriority,
+  InterviewNoteTag,
+  SmartFunnelGroup,
+  JobMatchResult
 } from '@shared/types'
 
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
@@ -66,6 +70,7 @@ export const APPLICATION_SOURCE_LABEL: Record<ApplicationSource, string> = {
   manual: '手动',
   web: '官网',
   referral: '内推',
+  email: '邮件',
   other: '其他'
 }
 
@@ -78,6 +83,63 @@ export const APPLICATION_EVENT_LABEL: Record<ApplicationEventType, string> = {
   offer: '录用',
   rejected: '已拒',
   withdrawn: '已放弃'
+}
+
+// Milestone A — funnel priority + 面经 tags + smart-funnel buckets.
+export const APPLICATION_PRIORITY_LABEL: Record<ApplicationPriority, string> = {
+  normal: '正常',
+  back: '靠后'
+}
+
+export const INTERVIEW_NOTE_TAG_LABEL: Record<InterviewNoteTag, string> = {
+  algorithm: '算法',
+  fundamentals: '八股',
+  project: '项目',
+  behavior: '行为',
+  system_design: '系统设计'
+}
+
+export const SMART_FUNNEL_GROUP_LABEL: Record<SmartFunnelGroup, string> = {
+  urgent: '紧急',
+  active: '进行中',
+  stale: '停滞',
+  offered: '已录用',
+  ended: '已结束',
+  archived: '已归档'
+}
+
+// Job-recommendation match tiers (Milestone C). `tier` is a wire value from the
+// `score_job_matches` agent step; only the display label translates.
+export const JOB_TIER_LABEL: Record<JobMatchResult['tier'], string> = {
+  high: '高匹配',
+  medium: '中匹配',
+  low: '低匹配',
+  skip: '不推荐'
+}
+
+export const JOB_TIER_COLOR: Record<JobMatchResult['tier'], string> = {
+  high: '#86efac',
+  medium: '#fcd34d',
+  low: '#fca5a5',
+  skip: '#6b7280'
+}
+
+// Job recommendation bucket labels (校招生 dual-apply). The bucket VALUES
+// (`intern`/`campus`) are wire identifiers used by the service to split
+// results; only the display label translates.
+export const JOB_BUCKET_LABEL: Record<string, string> = {
+  intern: '实习',
+  campus: '秋招正职'
+}
+
+// Notification category labels (Milestone D §D2). The category VALUES are wire
+// identifiers (NotificationPrefs.categories keys); only the display label
+// translates.
+export const NOTIFICATION_CATEGORY_LABEL: Record<string, string> = {
+  routine: '例程通知',
+  approval: '审批请求',
+  info: '其他通知',
+  fortune: '每日运势'
 }
 
 /** Status badges surface raw enum values; never blank for a new member. */

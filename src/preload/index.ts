@@ -125,13 +125,55 @@ const api: DaymateApi = {
   listApplications: () => ipcRenderer.invoke(IPC.APPLICATION_LIST),
   createApplication: (input) => ipcRenderer.invoke(IPC.APPLICATION_CREATE, input),
   addApplicationEvent: (input) => ipcRenderer.invoke(IPC.APPLICATION_ADD_EVENT, input),
+  updateApplicationFields: (id, patch) =>
+    ipcRenderer.invoke(IPC.APPLICATION_UPDATE_FIELDS, id, patch),
   syncBossApplications: () => ipcRenderer.invoke(IPC.APPLICATION_SYNC_BOSS),
   getBossStatus: () => ipcRenderer.invoke(IPC.BOSS_GET_STATUS),
   onApplicationChanged: (cb) => {
     const listener = (_e: unknown, views: Parameters<typeof cb>[0]): void => cb(views)
     ipcRenderer.on(IPC.APPLICATION_CHANGED, listener)
     return () => ipcRenderer.removeListener(IPC.APPLICATION_CHANGED, listener)
-  }
+  },
+
+  // ── Milestone A: email inference, AI generation, recycle bin, config ──
+  syncEmailApplications: () => ipcRenderer.invoke(IPC.APPLICATION_SYNC_EMAIL),
+  generateResume: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_GENERATE_RESUME, applicationId),
+  generatePrepMaterial: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_GENERATE_PREP, applicationId),
+  listResumeVersions: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_LIST_RESUMES, applicationId),
+  listPrepMaterials: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_LIST_PREP, applicationId),
+  listInterviewNotes: (query) => ipcRenderer.invoke(IPC.APPLICATION_LIST_INTERVIEW_NOTES, query),
+  createInterviewNote: (input) => ipcRenderer.invoke(IPC.APPLICATION_CREATE_INTERVIEW_NOTE, input),
+  softDeleteApplication: (id) => ipcRenderer.invoke(IPC.APPLICATION_SOFT_DELETE, id),
+  restoreApplication: (id) => ipcRenderer.invoke(IPC.APPLICATION_RESTORE, id),
+  purgeApplication: (id) => ipcRenderer.invoke(IPC.APPLICATION_PURGE, id),
+  listDeletedApplications: () => ipcRenderer.invoke(IPC.APPLICATION_LIST_DELETED),
+  archiveApplication: (id) => ipcRenderer.invoke(IPC.APPLICATION_ARCHIVE, id),
+  unarchiveApplication: (id) => ipcRenderer.invoke(IPC.APPLICATION_UNARCHIVE, id),
+  listPendingEmailMatches: () => ipcRenderer.invoke(IPC.EMAIL_MATCHES_LIST),
+  confirmEmailMatch: (messageId, applicationId) =>
+    ipcRenderer.invoke(IPC.EMAIL_MATCH_CONFIRM, messageId, applicationId),
+  ignoreEmailMatch: (messageId) => ipcRenderer.invoke(IPC.EMAIL_MATCH_IGNORE, messageId),
+  onEmailMatchesChanged: (cb) => {
+    const listener = (_e: unknown, matches: Parameters<typeof cb>[0]): void => cb(matches)
+    ipcRenderer.on(IPC.EMAIL_MATCHES_CHANGED, listener)
+    return () => ipcRenderer.removeListener(IPC.EMAIL_MATCHES_CHANGED, listener)
+  },
+  getJobSearchConfig: () => ipcRenderer.invoke(IPC.JOB_SEARCH_GET_CONFIG),
+  setJobSearchConfig: (config) => ipcRenderer.invoke(IPC.JOB_SEARCH_SET_CONFIG, config),
+  getApplicationStats: () => ipcRenderer.invoke(IPC.APPLICATION_STATS),
+  generateFunnelReview: () => ipcRenderer.invoke(IPC.APPLICATION_GENERATE_FUNNEL_REVIEW),
+  fetchJobRecommendations: (opts?: { bucket?: 'intern' | 'campus'; append?: boolean }) =>
+    ipcRenderer.invoke(IPC.JOB_RECOMMENDATIONS_FETCH, opts),
+  convertJobToApplication: (securityId) => ipcRenderer.invoke(IPC.JOB_CONVERT_TO_APPLICATION, securityId),
+  getJobDetail: (securityId: string) => ipcRenderer.invoke(IPC.JOB_DETAIL_GET, securityId),
+  // Milestone D — notification prefs + 投递 data export.
+  getNotificationPrefs: () => ipcRenderer.invoke(IPC.NOTIFICATION_GET_PREFS),
+  setNotificationPrefs: (prefs) => ipcRenderer.invoke(IPC.NOTIFICATION_SET_PREFS, prefs),
+  exportApplicationsZip: () => ipcRenderer.invoke(IPC.APPLICATION_EXPORT_ZIP),
+  // Milestone E — birth data for the daily 运势 (non-secret settings.json).
+  getBirthData: () => ipcRenderer.invoke(IPC.BIRTH_DATA_GET),
+  setBirthData: (birth) => ipcRenderer.invoke(IPC.BIRTH_DATA_SET, birth),
+  clearBirthData: () => ipcRenderer.invoke(IPC.BIRTH_DATA_CLEAR)
 }
 
 // contextIsolation is on; this is the safe way to give the renderer a typed API.
