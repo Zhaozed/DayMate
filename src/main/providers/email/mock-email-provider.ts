@@ -150,6 +150,16 @@ export class MockEmailProvider implements EmailProvider {
       const cutoff = Date.now() - query.sinceHours * 3600_000
       items = items.filter((m) => new Date(m.receivedAt).getTime() >= cutoff)
     }
+    if (query.sinceUid) {
+      // Numeric messageId (UID) high-water-mark — mirrors the 163 IMAP path.
+      items = items.filter((m) => {
+        const n = Number(m.messageId)
+        return Number.isFinite(n) && n > query.sinceUid!
+      })
+    }
+    if (query.sinceInternalDate) {
+      items = items.filter((m) => new Date(m.receivedAt).getTime() > query.sinceInternalDate!)
+    }
     if (query.limit) items = items.slice(0, query.limit)
     return items
   }

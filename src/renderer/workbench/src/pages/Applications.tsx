@@ -5,7 +5,6 @@ import type {
   ApplicationCreateInput,
   ApplicationSource,
   ApplicationEventType,
-  BossStatus,
   EmailMatchProposal,
   SmartFunnelGroup,
   ApplicationFunnelStats,
@@ -21,6 +20,7 @@ import { Loading, EmptyState, ErrorState } from '../components/states'
 import {
   APPLICATION_SOURCE_LABEL,
   APPLICATION_EVENT_LABEL,
+  APPLICATION_PRIORITY_LABEL,
   SMART_FUNNEL_GROUP_LABEL,
   JOB_TIER_LABEL,
   JOB_TIER_COLOR,
@@ -68,13 +68,10 @@ export function ApplicationsPage(): ReactElement {
   const { data: apps, loading, error, setData, refetch } = useAsync(
     () => window.daymate.listApplications()
   )
-  const [bossStatus, setBossStatus] = useState<BossStatus | null>(null)
-  const [bossSyncing, setBossSyncing] = useState(false)
   const [emailSyncing, setEmailSyncing] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
   const [showEmailQueue, setShowEmailQueue] = useState(true)
   const [showReview, setShowReview] = useState(false)
-  const [showJobRec, setShowJobRec] = useState(false)
   const [showRecycle, setShowRecycle] = useState(false)
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
 
@@ -89,25 +86,6 @@ export function ApplicationsPage(): ReactElement {
       }
     })
   }, [setData, selectedId])
-
-  // Boss health banner.
-  useEffect(() => {
-    void window.daymate.getBossStatus().then(setBossStatus)
-  }, [])
-
-  const syncBoss = async (): Promise<void> => {
-    setBossSyncing(true)
-    try {
-      await window.daymate.syncBossApplications()
-      const s = await window.daymate.getBossStatus()
-      setBossStatus(s)
-      refetch()
-    } catch (e) {
-      console.error(e)
-    } finally {
-      setBossSyncing(false)
-    }
-  }
 
   if (loading) return <Loading label="正在加载投递…" />
   if (error) return <ErrorState message={error.message} onRetry={refetch} />
@@ -127,35 +105,12 @@ export function ApplicationsPage(): ReactElement {
 
   return (
     <div>
-      <Header
-        onSyncBoss={syncBoss}
-        bossSyncing={bossSyncing}
-        onAdd={() => setShowAdd((v) => !v)}
-      />
-
-      {bossStatus && (
-        <div
-          className="mt-4 rounded-lg border p-3 text-xs"
-          style={{
-            background: 'var(--dm-panel)',
-            borderColor: bossStatus.authenticated ? 'rgba(34,197,94,0.25)' : 'rgba(251,191,36,0.25)',
-            color: bossStatus.authenticated ? '#86efac' : '#fcd34d'
-          }}
-        >
-          BOSS 直聘：{bossStatus.message}
-        </div>
-      )}
+      <Header onAdd={() => setShowAdd((v) => !v)} />
 
       <ReviewSection
         open={showReview}
         onToggle={() => setShowReview((v) => !v)}
         onChanged={refetch}
-      />
-
-      <JobRecommendationSection
-        open={showJobRec}
-        onToggle={() => setShowJobRec((v) => !v)}
-        onConverted={refetch}
       />
 
       <EmailQueueSection
@@ -490,10 +445,9 @@ function SourceDonut({ stats }: { stats: ApplicationFunnelStats }): ReactElement
   )
 }
 
-// ── Job recommendation (校招生 dual-apply: 实习 + 秋招正职) ───────────────
-// Bucket is a deterministic business rule (§12): 实习桶 = `--job-type 实习`;
-// 秋招正职桶 = `--job-type 全职 --exp 在校/应届`. The service splits scored
-// results back into buckets by securityId; the agent stays bucket-unaware.
+// ── Job recommendation (DORMANT — BOSS search retired for anti-bot; UI
+// unmounted in favor of email-driven funnel. Real component kept below for
+// one-line re-mount if BOSS search is ever revived.) ──────────────────────
 
 // Top-12 hot cities (boss-cli CITY_CODES) for the checkbox grid; the rest sit
 // behind a 「更多」 expand so the grid stays compact. Wire values are Chinese
@@ -514,7 +468,9 @@ const MORE_CITIES = [
 // need 大专/本科/硕士/博士; 「不限」 lets the user opt out of the filter.
 const DEGREE_OPTIONS = ['不限', '大专', '本科', '硕士', '博士']
 
-function JobRecommendationSection({
+// DORMANT — BOSS search retired for anti-bot. Kept exported (not deleted) so
+// re-mounting is a one-line change if BOSS search is ever revived.
+export function JobRecommendationSection({
   open,
   onToggle,
   onConverted
@@ -536,6 +492,7 @@ function JobRecommendationSection({
     campus: false
   })
   const [fetchError, setFetchError] = useState<string | null>(null)
+  const [relogging, setRelogging] = useState(false)
   const [convertingId, setConvertingId] = useState<string | null>(null)
   const [tab, setTab] = useState<JobBucket>('intern')
 
@@ -584,6 +541,28 @@ function JobRecommendationSection({
       setFetchError(e instanceof Error ? e.message : String(e))
     } finally {
       setFetchingMore((s) => ({ ...s, [bucket]: false }))
+    }
+  }
+
+  // stoken 过期时就地重新登录（不用切去集成页）：调用 loginBoss() 在系统
+  // 预览弹二维码，扫完自动重抓当前桶。camoufox 自动刷新对 search 无效（BOSS
+  // 反爬拒认 camoufox token），所以 search 报 stoken 过期时必须扫码补真实 token。
+  const reloginAndFetch = async (): Promise<void> => {
+    setRelogging(true)
+    setFetchError(null)
+    try {
+      const r = await window.daymate.loginBoss()
+      if (r.status === 'connected') {
+        // re-fetch the current bucket after a fresh login
+        const out = await window.daymate.fetchJobRecommendations({ bucket: tab })
+        setResults(out)
+      } else {
+        setFetchError(r.message || '登录未完成，请重试')
+      }
+    } catch (e) {
+      setFetchError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRelogging(false)
     }
   }
 
@@ -822,11 +801,29 @@ function JobRecommendationSection({
                 )}
               </div>
 
-              {fetchError && <ErrorState message={fetchError} onRetry={fetchJobs} />}
+              {fetchError && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <ErrorState message={fetchError} onRetry={fetchJobs} />
+                  <button
+                    onClick={reloginAndFetch}
+                    disabled={relogging}
+                    className="rounded bg-amber-600/80 px-3 py-1 text-xs text-white disabled:opacity-50"
+                  >
+                    {relogging ? '登录中… 请扫码' : '重新登录 BOSS（扫码）'}
+                  </button>
+                </div>
+              )}
 
               {results?.error && (
-                <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300/90">
-                  {results.error}
+                <div className="flex flex-wrap items-center gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300/90">
+                  <span>{results.error}</span>
+                  <button
+                    onClick={reloginAndFetch}
+                    disabled={relogging}
+                    className="rounded bg-amber-600/80 px-2 py-0.5 text-xs text-white disabled:opacity-50"
+                  >
+                    {relogging ? '登录中… 请扫码' : '重新登录 BOSS'}
+                  </button>
                 </div>
               )}
 
@@ -1542,16 +1539,36 @@ function ApplicationCard({
           className="flex-1 text-left"
         >
           <div className="flex items-center gap-2">
-            <span className="text-sm text-white/90">{view.application.company}</span>
+            {/* Position first — the user may apply to several positions at one
+             * company; position is the primary identity. */}
+            <span className="text-sm font-medium text-white/90">{view.application.position}</span>
             <span className="text-xs text-white/40">·</span>
-            <span className="text-sm text-white/70">{view.application.position}</span>
+            <span className="text-xs text-white/55">{view.application.company}</span>
             {view.application.city && (
               <>
                 <span className="text-xs text-white/40">·</span>
                 <span className="text-xs text-white/55">{view.application.city}</span>
               </>
             )}
+            {view.application.salaryRange && (
+              <>
+                <span className="text-xs text-white/40">·</span>
+                <span className="text-xs text-white/55">薪资 {view.application.salaryRange}</span>
+              </>
+            )}
+            {view.application.priority === 'back' && (
+              <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-white/40">
+                {statusLabel(APPLICATION_PRIORITY_LABEL, view.application.priority ?? 'normal')}
+              </span>
+            )}
           </div>
+          {/* JD snippet — truncated; click the card to see the full JD in the
+           * detail view (where 搜索 JD can enrich it). */}
+          {view.application.jdText && (
+            <div className="mt-0.5 line-clamp-1 text-xs text-white/40">
+              {view.application.jdText}
+            </div>
+          )}
           <div className="mt-0.5 flex items-center gap-2 text-xs text-white/35">
             <span>{statusLabel(APPLICATION_SOURCE_LABEL, view.application.source)}</span>
             <span>·</span>
@@ -1646,29 +1663,14 @@ function ApplicationCard({
   )
 }
 
-function Header({
-  onSyncBoss,
-  bossSyncing,
-  onAdd
-}: {
-  onSyncBoss: () => void
-  bossSyncing: boolean
-  onAdd: () => void
-}): ReactElement {
+function Header({ onAdd }: { onAdd: () => void }): ReactElement {
   return (
     <div className="flex items-center justify-between">
       <div>
         <h1 className="text-xl font-semibold text-white">投递</h1>
-        <p className="mt-1 text-sm text-white/45">跨渠道投递漏斗——BOSS 直聘 + 官网/内推。</p>
+        <p className="mt-1 text-sm text-white/45">邮件自动汇总 + 手动录入（官网/内推/线下）。</p>
       </div>
       <div className="flex gap-2">
-        <button
-          onClick={onSyncBoss}
-          disabled={bossSyncing}
-          className="rounded bg-white/5 px-3 py-1.5 text-sm text-white/70 hover:bg-white/10 disabled:opacity-50"
-        >
-          {bossSyncing ? '同步中…' : '同步 BOSS'}
-        </button>
         <button
           onClick={onAdd}
           className="rounded bg-white/10 px-3 py-1.5 text-sm text-white/90 hover:bg-white/20"

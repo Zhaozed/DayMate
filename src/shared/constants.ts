@@ -336,6 +336,7 @@ export const IPC = {
   APPLICATION_STATS: 'daymate:application:stats',
   APPLICATION_GENERATE_FUNNEL_REVIEW: 'daymate:application:generate-funnel-review',
   APPLICATION_UPDATE_FIELDS: 'daymate:application:update-fields',
+  APPLICATION_FETCH_JD: 'daymate:application:fetch-jd',
   JOB_RECOMMENDATIONS_FETCH: 'daymate:job-recommendations:fetch',
   JOB_CONVERT_TO_APPLICATION: 'daymate:job-recommendations:convert',
   JOB_DETAIL_GET: 'daymate:job-recommendations:detail',
@@ -346,6 +347,8 @@ export const IPC = {
   JOB_SEARCH_GET_CONFIG: 'daymate:job-search:get-config',
   JOB_SEARCH_SET_CONFIG: 'daymate:job-search:set-config',
   BOSS_GET_STATUS: 'daymate:boss:get-status',
+  BOSS_LOGIN: 'daymate:boss:login',
+  BOSS_LOGOUT: 'daymate:boss:logout',
   // Milestone D — notification prefs + 投递 data export.
   NOTIFICATION_GET_PREFS: 'daymate:notifications:get-prefs',
   NOTIFICATION_SET_PREFS: 'daymate:notifications:set-prefs',

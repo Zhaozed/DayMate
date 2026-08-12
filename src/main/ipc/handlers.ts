@@ -378,6 +378,44 @@ export function registerIpcHandlers(): void {
       return view
     }
   )
+  // On-demand JD enrichment (post-MVP). NOT a routine engine run — mirrors the
+  // generateResume/generatePrepMaterial on-demand path. Reads the application's
+  // company/position, invokes the deterministic `web.fetch_jd` R0 tool (DDG
+  // HTML + extractSnippets), and patches `jdText`. §17: the fetched JD text is
+  // UNTRUSTED public web content — never enters model context (the model never
+  // calls this tool; it's a deterministic step), stored as data, rendered in a
+  // `sandbox=""` iframe. R1 local write (§15 only gates external writes).
+  ipcMain.handle(IPC.APPLICATION_FETCH_JD, async (_e, applicationId: string) => {
+    const app = container.applicationService.list().find((v) => v.application.id === applicationId)
+    if (!app) return { jdText: null, error: '未找到投递记录' }
+    const result = await container.toolRegistry.execute(
+      'web.fetch_jd',
+      { company: app.application.company, position: app.application.position },
+      {
+        emailProviders: container.emailProviders,
+        calendarProvider: container.calendarProvider,
+        bossProvider: container.bossProvider,
+        taskService: container.taskService,
+        needToKnowService: container.needToKnowService,
+        activityService: container.activityService,
+        memoryService: container.memoryService,
+        applicationService: container.applicationService,
+        settings: container.settings,
+        webFetch: container.webFetch,
+        notify: (m: string) => container.notificationService.notify({ message: m, category: 'info' })
+      }
+    )
+    if (result.status !== 'ok') {
+      return { jdText: null, error: 'error' in result ? result.error : 'web 抓取失败' }
+    }
+    const data = result.data as { text?: string; note?: string }
+    const text = data.text ?? ''
+    if (text) {
+      container.applicationService.updateFields(applicationId, { jdText: text })
+      container.broadcastApplications()
+    }
+    return { jdText: text || null, error: data.note ?? null }
+  })
   ipcMain.handle(IPC.APPLICATION_SYNC_BOSS, async () => {
     const result = await container.applicationService.syncFromBoss()
     container.broadcastApplications()
@@ -400,6 +438,35 @@ export function registerIpcHandlers(): void {
         authenticated: false,
         message: e instanceof Error ? e.message : String(e)
       }
+    }
+  })
+
+  // boss-cli interactive QR login / logout from the workbench Integrations
+  // page. `login` spawns `boss login --qrcode` — the QR opens in the system
+  // image viewer (boss-cli's own behavior); camoufox regenerates __zp_stoken__
+  // after the phone scan. After success/failure, reconcile the swappable
+  // delegate so the real provider takes over (or mock falls back). Never a
+  // cookie crosses to the renderer.
+  ipcMain.handle(IPC.BOSS_LOGIN, async () => {
+    const res = await container.bossCliProvider.login()
+    if (res.success) {
+      await container.refreshBossProvider()
+    }
+    const status = await container.bossCliProvider.getStatus()
+    return {
+      status,
+      authenticated: status === 'connected',
+      message: res.message
+    }
+  })
+  ipcMain.handle(IPC.BOSS_LOGOUT, async () => {
+    const res = await container.bossCliProvider.logout()
+    await container.refreshBossProvider()
+    const status = await container.bossCliProvider.getStatus()
+    return {
+      status,
+      authenticated: status === 'connected',
+      message: res.message
     }
   })
 

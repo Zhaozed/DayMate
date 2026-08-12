@@ -159,6 +159,29 @@ function RichFields({
   const [saving, setSaving] = useState(false)
   const [saveErr, setSaveErr] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const [fetchingJd, setFetchingJd] = useState(false)
+  const [jdErr, setJdErr] = useState<string | null>(null)
+
+  // On-demand JD enrichment (post-MVP): fetch a best-effort JD snippet from the
+  // public web via the `web.fetch_jd` tool and fill the textarea. The user
+  // reviews before saving — web quality is inconsistent. §17: the fetched text
+  // is untrusted; stored as data, rendered sandboxed elsewhere.
+  const fetchJd = async (): Promise<void> => {
+    setFetchingJd(true)
+    setJdErr(null)
+    try {
+      const res = await window.daymate.fetchJobJd(a.id)
+      if (res.jdText) {
+        setForm((f) => ({ ...f, jdText: res.jdText! }))
+        setSaved(false)
+      }
+      if (res.error) setJdErr(res.error)
+    } catch (e) {
+      setJdErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setFetchingJd(false)
+    }
+  }
 
   // The seed changes when the underlying view is refreshed (e.g. an email-
   // inference event landed a new field). Re-seed the form only when not mid-edit.
@@ -277,11 +300,23 @@ function RichFields({
         </label>
       </div>
       <div className="mt-3">
-        <div className={labelCls}>JD 原文</div>
+        <div className="flex items-center justify-between">
+          <div className={labelCls}>JD 原文</div>
+          <button
+            type="button"
+            onClick={fetchJd}
+            disabled={fetchingJd}
+            className="rounded bg-white/5 px-2 py-0.5 text-xs text-white/70 hover:bg-white/10 disabled:opacity-50"
+          >
+            {fetchingJd ? '搜索中…' : '搜索 JD'}
+          </button>
+        </div>
+        {jdErr && <div className="mt-1 text-xs text-amber-300/80">{jdErr}</div>}
         <textarea
           className={`${inputCls} mt-1 h-40 w-full resize-y`}
           value={form.jdText}
           onChange={(e) => set('jdText', e.target.value)}
+          placeholder="可手动粘贴，或点「搜索 JD」从公网抓取片段"
         />
       </div>
     </div>

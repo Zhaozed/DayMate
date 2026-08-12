@@ -127,8 +127,11 @@ const api: DaymateApi = {
   addApplicationEvent: (input) => ipcRenderer.invoke(IPC.APPLICATION_ADD_EVENT, input),
   updateApplicationFields: (id, patch) =>
     ipcRenderer.invoke(IPC.APPLICATION_UPDATE_FIELDS, id, patch),
+  fetchJobJd: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_FETCH_JD, applicationId),
   syncBossApplications: () => ipcRenderer.invoke(IPC.APPLICATION_SYNC_BOSS),
   getBossStatus: () => ipcRenderer.invoke(IPC.BOSS_GET_STATUS),
+  loginBoss: () => ipcRenderer.invoke(IPC.BOSS_LOGIN),
+  logoutBoss: () => ipcRenderer.invoke(IPC.BOSS_LOGOUT),
   onApplicationChanged: (cb) => {
     const listener = (_e: unknown, views: Parameters<typeof cb>[0]): void => cb(views)
     ipcRenderer.on(IPC.APPLICATION_CHANGED, listener)

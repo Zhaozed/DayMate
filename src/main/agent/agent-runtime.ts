@@ -207,6 +207,12 @@ export interface ApplicationEmailResult {
   eventType: ApplicationEventType
   company?: string
   position?: string
+  /** Best-effort JD excerpt / city / salary drawn from the body (mail-driven
+   * funnel rebuild). The service patches an empty application's jdText with
+   * jdExcerpt; city/salary fill empty fields. Stripped for untrusted mail (§17). */
+  jdExcerpt?: string
+  city?: string
+  salary?: string
   confidence: 'high' | 'medium' | 'low'
   evidence: string
   untrusted: boolean
@@ -911,6 +917,13 @@ function classifyApplicationEmail(input: ClassifyApplicationEmailInput): Classif
     // Extract company/position heuristically (sender name / subject).
     const company = extractCompany(email) || undefined
     const position = extractPosition(subject) || undefined
+    // Best-effort JD excerpt / city / salary from the body (mail-driven funnel
+    // rebuild). These are bonus structured fields; jdExcerpt is the primary,
+    // city/salary are opportunistic. The service patches empty app fields with
+    // these; the real-LLM path extracts the same shape.
+    const jdExcerpt = extractJdExcerpt(subject, body) || undefined
+    const city = extractCity(subject, body) || undefined
+    const salary = extractSalary(subject, body) || undefined
 
     if (confidence === 'low') pending++
     else matched++
@@ -920,6 +933,9 @@ function classifyApplicationEmail(input: ClassifyApplicationEmailInput): Classif
       eventType,
       company,
       position,
+      jdExcerpt,
+      city,
+      salary,
       confidence,
       evidence: email.subject,
       untrusted: false
@@ -945,6 +961,59 @@ function extractPosition(subject: string): string | undefined {
   // "面试邀请：后端工程师" → "后端工程师"
   const m = subject.match(/(?:面试|岗位|职位|position)[:：]?\s*([^\s,，]+)/i)
   return m && m[1] ? m[1] : undefined
+}
+
+// Best-effort JD / city / salary extraction from the email body. These feed
+// the mail-driven funnel rebuild (post-MVP): the service patches an empty
+// application's jdText/city/salaryRange with whatever the email surfaces. They
+// are SECONDARY to the dedicated `web.fetch_jd` tool (which grabs the public
+// JD listing); email extraction is opportunistic. All three are stripped from
+// untrusted mail in enforceTrust (§17).
+function extractJdExcerpt(subject: string, body: string): string | undefined {
+  // Look for a JD-shaped section header then capture the following prose.
+  const text = subject + '\n' + body
+  const m = text.match(
+    /(?:岗位职责|岗位描述|职位描述|职位要求|任职要求|工作内容|job description|responsibilities|requirements)\s*[:：]?\s*([^\n]{6,300})/i
+  )
+  if (m && m[1]) {
+    const excerpt = m[1].trim()
+    // Cap at ~200 chars so the excerpt stays a snippet, not the whole body.
+    return excerpt.length > 200 ? excerpt.slice(0, 200) + '…' : excerpt
+  }
+  return undefined
+}
+
+function extractCity(subject: string, body: string): string | undefined {
+  const text = subject + ' ' + body
+  // Common tier-1/2 city names. Keep this list small and obvious to avoid
+  // false positives on generic words. New cities → append here.
+  const CITIES = [
+    '北京', '上海', '深圳', '广州', '杭州', '成都', '南京', '苏州',
+    '武汉', '西安', '长沙', '厦门', '天津', '重庆', '合肥', '青岛',
+    '大连', '宁波', '无锡', '福州', '济南', '郑州', '昆明'
+  ]
+  for (const c of CITIES) {
+    if (text.includes(c)) return c
+  }
+  return undefined
+}
+
+function extractSalary(subject: string, body: string): string | undefined {
+  const text = subject + ' ' + body
+  // "20-40K", "20K-40K", "薪资：20-40k·14薪", "20k-40k", "20k~40k"
+  const m = text.match(/(\d{1,3})\s*[kK]\s*[-~～]\s*(\d{1,3})\s*[kK]([\s\S]*?薪)?/)
+  if (m && m[1] && m[2]) {
+    const lo = Number(m[1])
+    const hi = Number(m[2])
+    if (lo > 0 && hi >= lo) return `${lo}-${hi}K`
+  }
+  // "20K" single
+  const m2 = text.match(/(\d{1,3})\s*[kK]([\s\S]*?薪)?/)
+  if (m2 && m2[1]) {
+    const v = Number(m2[1])
+    if (v > 0) return `${v}K`
+  }
+  return undefined
 }
 
 // ── Funnel review (Milestone B) — deterministic stub ────────────────────────
@@ -1601,14 +1670,24 @@ function enforceTrust(output: unknown, action: string, input: AgentInputs): unkn
     return { ...result, memoryProposals: proposals }
   }
   if (action === 'classify_application_email') {
-    // §17: untrusted email → untrusted:true + confidence:low. The service
+    // §17: untrusted email → untrusted:true + confidence:low, AND strip the
+    // jdExcerpt/city/salary fields so no untrusted prose (or untrusted-derived
+    // structured guess) is carried into an application record. The service
     // matcher never produces an event for an untrusted result. Recompute the
     // matched/pending/ignored counts so they reflect the overlay.
     const untrustedIds = new Set(all.filter(isUntrusted).map((e) => e.messageId))
     const result = output as ClassifyApplicationEmailOutput
     const results = result.results.map((r) => {
       if (untrustedIds.has(r.messageId)) {
-        return { ...r, untrusted: true, confidence: 'low' as const }
+        const stripped = { ...r }
+        delete stripped.jdExcerpt
+        delete stripped.city
+        delete stripped.salary
+        return {
+          ...stripped,
+          untrusted: true,
+          confidence: 'low' as const
+        }
       }
       return r
     })

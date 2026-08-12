@@ -10,9 +10,9 @@ import type {
   Mail163TestResult,
   FeishuStatus,
   FeishuTestResult,
+  BossStatus,
   IntegrationStatus,
   JobSearchSettings,
-  JobIntent,
   NotificationPrefs,
   NotificationCategory,
   RoutineDefinition,
@@ -582,6 +582,128 @@ function FeishuCard(): ReactElement {
   )
 }
 
+// DORMANT — BOSS retired for anti-bot. Kept exported (not deleted) so
+// re-mounting <BossCard /> is a one-line change if BOSS is ever revived.
+export function BossCard(): ReactElement {
+  const [status, setStatus] = useState<BossStatus | null>(null)
+  const [busy, setBusy] = useState<'login' | 'logout' | 'sync' | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [actionMsg, setActionMsg] = useState<string | null>(null)
+
+  const refresh = async (): Promise<void> => {
+    try {
+      setStatus(await window.daymate.getBossStatus())
+      setLoadError(null)
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const login = async (): Promise<void> => {
+    setBusy('login')
+    setActionMsg(null)
+    try {
+      const r = await window.daymate.loginBoss()
+      setStatus(r)
+      setActionMsg(r.message)
+    } catch (e) {
+      setActionMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const logout = async (): Promise<void> => {
+    setBusy('logout')
+    setActionMsg(null)
+    try {
+      const r = await window.daymate.logoutBoss()
+      setStatus(r)
+      setActionMsg(r.message)
+    } catch (e) {
+      setActionMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const sync = async (): Promise<void> => {
+    setBusy('sync')
+    setActionMsg(null)
+    try {
+      const r = await window.daymate.syncBossApplications()
+      setActionMsg(`${r.message}（同步 ${r.synced} 条）`)
+      // login may have flipped the delegate; refresh status too.
+      void refresh()
+    } catch (e) {
+      setActionMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const connected = status?.status === 'connected'
+
+  return (
+    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-white/90">BOSS 直聘</h2>
+        <span
+          className={`rounded px-1.5 py-0.5 text-xs ${connected ? 'bg-emerald-900/60 text-emerald-200' : 'bg-white/5 text-white/45'}`}
+        >
+          {statusBadge(status?.status)}
+        </span>
+      </div>
+      <p className="mt-1 text-xs text-white/45">
+        通过本地 boss-cli 子进程连接 BOSS 直聘（读取投递 / 面试 / 沟通 + 岗位搜索）。点击「登录」会先尝试从真实浏览器提取 cookie：
+        若你已在浏览器登录 zhipin.com 且<b>完全退出该浏览器</b>，即可静默拿到被岗位搜索认可的 stoken（推荐，岗位搜索可用）；
+        否则降级为二维码（系统图片查看器弹出，用 BOSS APP 扫码），该方式可正常同步投递/面试/沟通，但<b>岗位搜索可能被 BOSS 反爬拦截</b>。
+        凭证由 boss-cli 自行保管，Daymate 不接触 cookie。stoken 过期时可在本页直接重新登录。
+      </p>
+
+      {loadError && (
+        <div className="mt-3 rounded border border-rose-500/20 p-2 text-xs text-rose-200" style={{ background: 'rgba(120,0,40,0.08)' }}>
+          无法加载 BOSS 状态：{loadError}
+        </div>
+      )}
+      {actionMsg && (
+        <div className="mt-3 rounded border border-white/10 p-2 text-xs text-white/70" style={{ background: 'rgba(0,0,0,0.2)' }}>
+          {actionMsg}
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          onClick={login}
+          disabled={busy !== null}
+          className="rounded px-3 py-1 text-xs text-white/80 disabled:opacity-50"
+          style={{ background: 'var(--dm-accent)' }}
+        >
+          {busy === 'login' ? '登录中…（静默提取浏览器 cookie，失败则弹二维码）' : connected ? '重新登录' : '登录'}
+        </button>
+        <button
+          onClick={logout}
+          disabled={busy !== null || !connected}
+          className="rounded bg-white/5 px-3 py-1 text-xs text-white/60 disabled:opacity-50"
+        >
+          {busy === 'logout' ? '退出中…' : '断开'}
+        </button>
+        <button
+          onClick={sync}
+          disabled={busy !== null || !connected}
+          className="rounded bg-white/5 px-3 py-1 text-xs text-white/60 disabled:opacity-50"
+        >
+          {busy === 'sync' ? '同步中…' : '同步投递'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function LlmCard(): ReactElement {
   const [config, setConfig] = useState<LlmConfig | null>(null)
   const [provider, setProvider] = useState<LlmProvider>('anthropic')
@@ -760,15 +882,14 @@ function LlmCard(): ReactElement {
   )
 }
 
-// ── Milestone D §D1 — job-search config (non-secret paths + jobIntent) ──
-// Reuses the same getJobSearchConfig/setJobSearchConfig IPC the 投递 page's
-// inline jobIntent editor uses — both surfaces read/write the same settings,
-// so editing here is reflected there and vice versa.
+// ── Milestone D §D1 — job-search config (non-secret paths) ──
+// baseResumePath + transcriptTemplatePath only. The jobIntent sub-form was
+// removed when BOSS search retired (anti-bot); the email-driven funnel no
+// longer needs a scoring intent. AI 简历 / 面经 still use these paths.
 function JobSearchCard(): ReactElement {
   const [cfg, setCfg] = useState<JobSearchSettings | null>(null)
   const [baseResumePath, setBaseResumePath] = useState('')
   const [transcriptTemplatePath, setTranscriptTemplatePath] = useState('')
-  const [intent, setIntent] = useState<JobIntent>({ keyword: '' })
   const [busy, setBusy] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [saved, setSaved] = useState<string | null>(null)
@@ -779,7 +900,6 @@ function JobSearchCard(): ReactElement {
       setCfg(c)
       setBaseResumePath(c.baseResumePath ?? '')
       setTranscriptTemplatePath(c.transcriptTemplatePath ?? '')
-      setIntent(c.jobIntent ?? { keyword: '' })
       setLoadError(null)
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e))
@@ -796,8 +916,7 @@ function JobSearchCard(): ReactElement {
     try {
       const next: JobSearchSettings = {
         ...(baseResumePath ? { baseResumePath } : {}),
-        ...(transcriptTemplatePath ? { transcriptTemplatePath } : {}),
-        jobIntent: intent.keyword.trim() ? intent : undefined
+        ...(transcriptTemplatePath ? { transcriptTemplatePath } : {})
       }
       const c = await window.daymate.setJobSearchConfig(next)
       setCfg(c)
@@ -813,7 +932,7 @@ function JobSearchCard(): ReactElement {
     <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
       <h2 className="text-sm font-semibold text-white/90">求职设置</h2>
       <p className="mt-1 text-xs text-white/45">
-        基础简历路径（生成定制简历时作为底稿，可信 §17）与求职意向（岗位推荐评分依据）。非密设置，本地持久。
+        基础简历路径（生成定制简历时作为底稿，可信 §17）与逐字稿模板路径。非密设置，本地持久。求职意向已随 BOSS 搜索退场移除。
       </p>
 
       {loadError && (
@@ -841,77 +960,6 @@ function JobSearchCard(): ReactElement {
             className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
           />
         </label>
-      </div>
-
-      <div className="mt-4 rounded border border-white/5 p-3" style={{ background: 'rgba(0,0,0,0.2)' }}>
-        <div className="text-xs font-medium text-white/70">求职意向（岗位推荐评分依据）</div>
-        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label className="block sm:col-span-2">
-            <span className="text-xs text-white/50">关键词</span>
-            <input
-              value={intent.keyword}
-              onChange={(e) => setIntent({ ...intent, keyword: e.target.value })}
-              placeholder="Go 后端"
-              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
-            />
-          </label>
-          <label className="block sm:col-span-2">
-            <span className="text-xs text-white/50">期望城市（逗号分隔）</span>
-            <input
-              value={(intent.cities ?? []).join(',')}
-              onChange={(e) =>
-                setIntent({
-                  ...intent,
-                  cities: e.target.value.split(',').map((s) => s.trim()).filter(Boolean)
-                })
-              }
-              placeholder="北京, 上海"
-              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs text-white/50">最低月薪（K）</span>
-            <input
-              type="number"
-              value={intent.salaryMin ?? ''}
-              onChange={(e) =>
-                setIntent({ ...intent, salaryMin: e.target.value ? Number(e.target.value) : undefined })
-              }
-              placeholder="25"
-              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs text-white/50">最高月薪（K）</span>
-            <input
-              type="number"
-              value={intent.salaryMax ?? ''}
-              onChange={(e) =>
-                setIntent({ ...intent, salaryMax: e.target.value ? Number(e.target.value) : undefined })
-              }
-              placeholder="40"
-              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs text-white/50">经验（可选）</span>
-            <input
-              value={intent.experience ?? ''}
-              onChange={(e) => setIntent({ ...intent, experience: e.target.value || undefined })}
-              placeholder="3-5年"
-              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs text-white/50">学历（可选）</span>
-            <input
-              value={intent.degree ?? ''}
-              onChange={(e) => setIntent({ ...intent, degree: e.target.value || undefined })}
-              placeholder="本科"
-              className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
-            />
-          </label>
-        </div>
       </div>
 
       <div className="mt-3 flex items-center gap-3">

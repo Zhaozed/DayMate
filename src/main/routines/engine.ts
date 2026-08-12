@@ -90,6 +90,10 @@ export interface EngineDeps {
    *  read user-configured criteria (Milestone C: `job_search.get_intent`).
    *  Optional so tests constructing a minimal EngineDeps compile unchanged. */
   settings?: Settings
+  /** Proxy-aware HTML fetch for `web.fetch_jd` (post-MVP JD enrichment).
+   *  Optional: the tool returns an error when absent. Wired to Electron
+   *  `net.fetch` in prod; tests omit it. */
+  webFetch?: import('../agent/tool-registry').WebFetch
   /** Push a notification to the robot surface. */
   notify: (message: string) => void
   /** Rich notify path (Milestone D §D2): carries the firing routineId +
@@ -407,6 +411,7 @@ export class RoutineEngine {
       memoryService: this.deps.memoryService,
       applicationService: this.deps.applicationService,
       settings: this.deps.settings,
+      webFetch: this.deps.webFetch,
       notify: this.deps.notify,
       approval
     }

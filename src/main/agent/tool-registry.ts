@@ -36,6 +36,59 @@ import {
   interviewNoteInputSchema
 } from '@shared/schemas'
 
+// ── web.fetch_jd (post-MVP) ─────────────────────────────────────────────────
+// Proxy-aware HTML fetch DI (mirrors GmailFetch/FeishuFetch). The container
+// wires Electron's `net.fetch` (Chromium stack → respects system proxy/VPN);
+// tests pass a stub. Returns the response body as a string (HTML text). The
+// `input` is a full URL. Defined via type queries to avoid bare `Response`/
+// `RequestInit` globals (eslint no-undef).
+export type WebFetch = (input: string) => Promise<string>
+
+/**
+ * Extract plain-text snippets from a DuckDuckGo HTML results page. DDG's
+ * `/html/` endpoint renders `<a class="result__snippet">…</a>` text blocks.
+ * We strip any nested tags and return an array of clean text snippets. §17:
+ * the JD text surfaced by this tool is UNTRUSTED (public web content) — the
+ * caller stores it as data and the renderer renders it in a `sandbox=""`
+ * iframe, so even if a snippet carried `<script>` it could not execute. This
+ * function additionally strips tags so the stored value is plain text.
+ */
+export function extractSnippets(html: string, max = 5): string[] {
+  const out: string[] = []
+  // Match `<a class="result__snippet"...>…</a>` blocks (DDG HTML). Non-greedy,
+  // tolerant of attribute order. Fall back to a generic <p>/<li> text sweep if
+  // DDG's markup shifts (best-effort — web quality is inconsistent by design).
+  const re = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html)) !== null && out.length < max) {
+    const text = stripTags(m[1]).trim()
+    if (text.length > 0) out.push(text)
+  }
+  if (out.length === 0) {
+    // Fallback: grab text from the first few <p>/<li> blocks. Crude but keeps
+    // the tool useful when DDG changes its markup or blocks the /html/ endpoint.
+    const fallback = /<(?:p|li)[^>]*>([\s\S]*?)<\/(?:p|li)>/gi
+    while ((m = fallback.exec(html)) !== null && out.length < max) {
+      const text = stripTags(m[1]).trim()
+      if (text.length > 0) out.push(text)
+    }
+  }
+  return out
+}
+
+/** Strip HTML tags + decode the few entities we care about, return plain text. */
+function stripTags(s: string): string {
+  return s
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+}
+
 export interface ToolContext {
   runId?: string
   routineRunId?: string
@@ -55,6 +108,10 @@ export interface ToolContext {
    *  tools that need user-configured criteria (e.g. `job_search.get_intent`
    *  reads `jobIntent`). Optional: absent in tests that don't exercise it. */
   settings?: Settings
+  /** Proxy-aware HTML fetch for `web.fetch_jd` (post-MVP). Optional: absent in
+   *  tests; the tool returns an error when it's missing. Wired to Electron's
+   *  `net.fetch` in prod (Chromium stack → respects system proxy/VPN). */
+  webFetch?: WebFetch
   notify: (message: string) => void
   /** Present only when executing an already-approved action (M2). */
   approval?: { requestId: string }
@@ -847,6 +904,41 @@ export function createToolRegistry(): ToolRegistry {
         content: a.content
       })
       return { status: 'ok', data: note }
+    }
+  })
+
+  // ── Web (post-MVP: JD enrichment) ──────────────────────────────────────────
+  registry.register({
+    name: 'web.fetch_jd',
+    description:
+      'Fetch a best-effort job-description snippet from the public web (DuckDuckGo HTML) for a company+position. R0 read — never sends, never writes externally. The returned text is UNTRUSTED public web content (§17): the caller stores it as data and the renderer renders it in a sandboxed iframe. On-demand only (web quality is inconsistent — the user reviews before accepting).',
+    risk: 'R0',
+    requiresApproval: false,
+    parameters: z.object({
+      company: z.string(),
+      position: z.string().optional()
+    }),
+    async execute(args, ctx) {
+      if (!ctx.webFetch) {
+        return { status: 'error', error: 'web 抓取未配置（无 webFetch 注入）' }
+      }
+      const a = args as { company: string; position?: string }
+      const q = `${a.company} ${a.position ?? ''} 招聘 岗位描述`.trim()
+      const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(q)}`
+      let html: string
+      try {
+        html = await ctx.webFetch(url)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return { status: 'error', error: `web 抓取失败：${msg}` }
+      }
+      const snippets = extractSnippets(html, 5)
+      if (snippets.length === 0) {
+        return { status: 'ok', data: { text: '', note: '未抓到 JD 片段（DDG 反爬或无结果），可手动粘贴' } }
+      }
+      // Plain-text join (§17: tags already stripped in extractSnippets; the
+      // stored value is inert text, rendered sandboxed regardless).
+      return { status: 'ok', data: { text: snippets.join('\n\n') } }
     }
   })
 

@@ -135,7 +135,7 @@ describe('application service — email→application inference (§3.3)', () => 
     expect(svc.listPendingEmailMatches()).toHaveLength(0)
   })
 
-  it('unmatched email lands in the pending queue (no candidate application)', async () => {
+  it('unmatched company+position mail AUTO-CREATES a new application (aggressive)', async () => {
     const { svc } = makeService()
     svc.create({ company: '腾讯', position: '前端' }) // a different company
     const emails = [
@@ -147,13 +147,62 @@ describe('application service — email→application inference (§3.3)', () => 
       })
     ]
     const res = await svc.syncFromEmails([makeEmailProvider(emails)], runtime)
+    // Aggressive routing: company+position extracted → create + append event.
+    expect(res.created).toBe(1)
+    expect(res.synced).toBe(1)
+    expect(res.pending).toBe(0)
+    const created = svc.list().find((v) => v.application.company === '美团')!
+    expect(created).toBeDefined()
+    expect(created.application.position).toBe('后端')
+    expect(created.application.source).toBe('email')
+    // emailRefId seeded → future mail in the thread links directly.
+    expect(created.application.emailRefId).toBe('m2')
+    // The interview event was appended (locked:false auto event).
+    const ev = created.events.find((e) => e.sourceRef === 'email:m2')
+    expect(ev).toBeDefined()
+    expect(ev!.type).toBe('interview')
+    expect(ev!.locked).toBe(false)
+  })
+
+  it('identity-less mail (no position extracted) lands in the pending queue', async () => {
+    const { svc } = makeService()
+    svc.create({ company: '腾讯', position: '前端' })
+    const emails = [
+      makeEmail({
+        messageId: 'm2b',
+        fromName: '美团招聘',
+        subject: '面试', // no `:position` → position not extracted
+        body: '美团 面试邀请 请到场面谈'
+      })
+    ]
+    const res = await svc.syncFromEmails([makeEmailProvider(emails)], runtime)
     expect(res.synced).toBe(0)
     expect(res.pending).toBe(1)
     const pending = svc.listPendingEmailMatches()
     expect(pending).toHaveLength(1)
-    expect(pending[0].messageId).toBe('m2')
+    expect(pending[0].messageId).toBe('m2b')
     expect(pending[0].company).toBe('美团')
     expect(pending[0].applicationId).toBeUndefined()
+  })
+
+  it('normalized dedup: "字节跳动有限公司" + same position → no duplicate', async () => {
+    const { svc } = makeService()
+    // Existing app created via a prior mail (company "字节跳动有限公司").
+    svc.create({ company: '字节跳动有限公司', position: '后端工程师' })
+    const emails = [
+      makeEmail({
+        messageId: 'm-norm',
+        fromName: '字节跳动招聘',
+        subject: '面试:后端',
+        body: '字节跳动 面试邀请'
+      })
+    ]
+    const res = await svc.syncFromEmails([makeEmailProvider(emails)], runtime)
+    // Normalized match ("字节跳动有限公司"→"字节跳动", "后端工程师"→"后端") hits
+    // the existing app → append, NOT a new application.
+    expect(res.created).toBe(0)
+    expect(res.synced).toBe(1)
+    expect(svc.list().filter((v) => v.application.company.includes('字节')).length).toBe(1)
   })
 
   it('multiple candidates demotes to low → pending (ambiguous)', async () => {
@@ -176,14 +225,16 @@ describe('application service — email→application inference (§3.3)', () => 
 
   it('confirmEmailMatch (no app) creates a new application + locked event + emailRefId', async () => {
     const { svc } = makeService()
-    // Seed a pending proposal via sync (unmatched).
+    // Seed a pending proposal via sync — use identity-less mail (no position)
+    // so it lands in the queue (aggressive routing only auto-creates when both
+    // company AND position are extracted).
     await svc.syncFromEmails(
       [
         makeEmailProvider([
           makeEmail({
             messageId: 'm4',
             fromName: '美团招聘',
-            subject: '面试:后端',
+            subject: '面试',
             body: '美团 面试邀请'
           })
         ])
@@ -194,7 +245,7 @@ describe('application service — email→application inference (§3.3)', () => 
     svc.confirmEmailMatch('m4')
     // Proposal cleared.
     expect(svc.listPendingEmailMatches()).toHaveLength(0)
-    // New application created.
+    // New application created (company from proposal, position defaulted).
     const apps = svc.list()
     expect(apps.some((v) => v.application.company === '美团')).toBe(true)
     const created = apps.find((v) => v.application.company === '美团')!
@@ -211,13 +262,14 @@ describe('application service — email→application inference (§3.3)', () => 
     const { svc } = makeService()
     // An existing app the email did NOT auto-match (different company).
     const app = svc.create({ company: '腾讯', position: '前端' })
+    // Identity-less mail (no position) → pending, NOT auto-created.
     await svc.syncFromEmails(
       [
         makeEmailProvider([
           makeEmail({
             messageId: 'm5',
             fromName: '美团招聘',
-            subject: '面试:后端',
+            subject: '面试',
             body: '美团 面试邀请'
           })
         ])
@@ -237,13 +289,14 @@ describe('application service — email→application inference (§3.3)', () => 
 
   it('ignoreEmailMatch removes a proposal without acting', async () => {
     const { svc } = makeService()
+    // Identity-less mail (no position) → pending.
     await svc.syncFromEmails(
       [
         makeEmailProvider([
           makeEmail({
             messageId: 'm6',
             fromName: '美团招聘',
-            subject: '面试:后端',
+            subject: '面试',
             body: '美团 面试邀请'
           })
         ])
@@ -313,7 +366,8 @@ describe('application service — email→application inference (§3.3)', () => 
           makeEmail({
             messageId: 'm8',
             fromName: '美团招聘',
-            subject: '面试:后端',
+            subject: '面试', // identity-less → pending (aggressive auto-create
+            // only fires when both company AND position are extracted)
             body: '美团 面试邀请'
           })
         ])

@@ -56,7 +56,9 @@ import type {
   FetchJobRecommendationsOpts,
   JobBucket,
   BossJob,
-  BossSearchQuery
+  BossSearchQuery,
+  EmailSyncCursor,
+  EmailQuery
 } from '@shared/types'
 import { newId, nowIso } from '../util/ids'
 import { sha256 } from '../util/hash'
@@ -68,10 +70,11 @@ const STALE_DAYS = 14 // no-progress threshold → auto-demote to priority 'back
 const PURGE_DAYS = 30 // soft-deleted rows are hard-purged after this
 const ARCHIVE_AFTER_REJECT_DAYS = 30 // terminal-rejected rows auto-archive
 
-// Domains of third-party recruiting/assessment platforms (Strategy 1 sender-
-// domain match). Mail from these is recruitment-related by construction, so a
-// company-name hit in the body is a strong signal. 初版清单，按实际邮件补充。
-const RECRUITING_PLATFORM_DOMAINS = [
+// Domains of third-party recruiting/assessment platforms. Retained for the
+// future confidence-tiered match path (sender-domain signal upgrades a fuzzy
+// match); the current aggressive auto-create routing uses normalized exact +
+// fuzzy substring only, so this list is not consulted yet. 初版清单，按实际邮件补充。
+export const RECRUITING_PLATFORM_DOMAINS = [
   'nowcoder.com', // 牛客
   'beisen.com', // 北森
   'acmcoder.com', // 赛码
@@ -92,7 +95,7 @@ function sortAsc(events: ApplicationEvent[]): ApplicationEvent[] {
 }
 
 /** Extract the registrable domain (last two labels) from an email address. */
-function extractDomain(address: string | undefined): string | undefined {
+export function extractDomain(address: string | undefined): string | undefined {
   if (!address) return undefined
   const at = address.lastIndexOf('@')
   if (at < 0) return undefined
@@ -104,9 +107,29 @@ function extractDomain(address: string | undefined): string | undefined {
 }
 
 /** Does the company name appear verbatim in the email subject or body? */
-function textHasEmail(email: NormalizedEmail, company: string): boolean {
+export function textHasEmail(email: NormalizedEmail, company: string): boolean {
   const text = (email.subject + ' ' + email.textBody).toLowerCase()
   return text.includes(company.toLowerCase())
+}
+
+// ── Normalized company/position comparison (mail-driven funnel rebuild) ────
+// The same company may surface in mail as "字节跳动有限公司", "字节跳动", "字节
+// 招聘"; the same position as "后端工程师", "后端开发工程师", "Go 后端". To avoid
+// creating duplicate applications per mail variant, we normalize both sides
+// (lowercase + strip corporate/role suffixes + collapse whitespace) before an
+// exact compare. This is a SAFETY NET on top of the per-event `sourceRef`
+// idempotency — it catches the cross-message case (different messageId, same
+// company+position) where sourceRef can't dedupe.
+const COMPANY_SUFFIX_RE = /(有限公司|有限责任公司|股份公司|集团|科技|技术|控股|分公司|co\.?,?\.?ltd\.?|inc\.?|corp\.?|公司)$/gi
+const POSITION_NOISE_RE = /(资深|高级|初级|实习|全职|全职|开发|研发|工程师|工程|师|岗)$/g
+
+function normalizeCompany(s: string | undefined): string {
+  if (!s) return ''
+  return s.toLowerCase().replace(COMPANY_SUFFIX_RE, '').replace(/[\s·]+/g, '').trim()
+}
+function normalizePosition(s: string | undefined): string {
+  if (!s) return ''
+  return s.toLowerCase().replace(POSITION_NOISE_RE, '').replace(/[\s·]+/g, '').trim()
 }
 
 export class ApplicationService {
@@ -281,13 +304,42 @@ export class ApplicationService {
    */
   async syncFromEmails(
     emailProviders: EmailProvider[],
-    agentRuntime: AgentRuntime
-  ): Promise<{ synced: number; pending: number; message: string }> {
+    agentRuntime: AgentRuntime,
+    cursor: EmailSyncCursor = {}
+  ): Promise<{
+    synced: number
+    created: number
+    pending: number
+    message: string
+    cursor: EmailSyncCursor
+  }> {
     const byMessageId = new Map<string, NormalizedEmail>()
+    // Per-provider incremental query: each provider gets its high-water-mark so
+    // the agent only runs on NEW mail (token-cost control). `unreadOnly` is NOT
+    // set — a user may read mail in their client before Daymate syncs; the cursor
+    // (UID / internalDate) is the sole "already processed" gate.
+    let nextMail163Uid = cursor.mail163LastUid ?? 0
+    let nextGmailInternalDate = cursor.gmailLastInternalDate ?? 0
     for (const p of emailProviders) {
+      const query: EmailQuery = { limit: 50 }
+      if (p.provider === 'mail163' && cursor.mail163LastUid) {
+        query.sinceUid = cursor.mail163LastUid
+      } else if (p.provider === 'gmail' && cursor.gmailLastInternalDate) {
+        query.sinceInternalDate = cursor.gmailLastInternalDate
+      }
       try {
-        const emails = await p.listMessages({ unreadOnly: true, sinceHours: 72, limit: 50 })
-        for (const e of emails) byMessageId.set(e.messageId, e)
+        const emails = await p.listMessages(query)
+        for (const e of emails) {
+          byMessageId.set(e.messageId, e)
+          // Advance the high-water-mark per provider type.
+          if (p.provider === 'mail163') {
+            const uid = Number(e.messageId)
+            if (Number.isFinite(uid) && uid > nextMail163Uid) nextMail163Uid = uid
+          } else if (p.provider === 'gmail') {
+            const ts = new Date(e.receivedAt).getTime()
+            if (Number.isFinite(ts) && ts > nextGmailInternalDate) nextGmailInternalDate = ts
+          }
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         this.activityService.record({
@@ -298,7 +350,16 @@ export class ApplicationService {
       }
     }
     if (byMessageId.size === 0) {
-      return { synced: 0, pending: 0, message: '邮件推断：无新邮件' }
+      return {
+        synced: 0,
+        created: 0,
+        pending: 0,
+        message: '邮件推断：无新邮件',
+        cursor: {
+          mail163LastUid: nextMail163Uid || undefined,
+          gmailLastInternalDate: nextGmailInternalDate || undefined
+        }
+      }
     }
 
     let output: ClassifyApplicationEmailOutput
@@ -313,86 +374,110 @@ export class ApplicationService {
         summary: `邮件推断分类失败：${message}`,
         metadata: { error: message }
       })
-      return { synced: 0, pending: 0, message: `邮件推断分类失败：${message}` }
+      return {
+        synced: 0,
+        created: 0,
+        pending: 0,
+        message: `邮件推断分类失败：${message}`,
+        cursor: {
+          mail163LastUid: nextMail163Uid || undefined,
+          gmailLastInternalDate: nextGmailInternalDate || undefined
+        }
+      }
     }
 
+    // Aggressive auto-create routing (user decision: "全部自动建"). For each
+    // non-untrusted result with company AND position: normalize-dedupe against
+    // existing applications — hit → append event; miss → create application +
+    // seed event. Missing company OR position → pending queue (no identity to
+    // dedupe/create on). Untrusted → skip entirely (§17).
     const apps = this.store.listApplications()
     let synced = 0
+    let created = 0
     let pending = 0
     for (const r of output.results) {
-      // §17: untrusted mail never produces an event (nor a pending proposal).
-      if (r.untrusted) continue
+      if (r.untrusted) continue // §17
       const email = byMessageId.get(r.messageId)
       if (!email) continue
-      const match = this.matchApplication(r, email, apps)
-      if (match.application && (match.confidence === 'high' || match.confidence === 'medium')) {
-        if (this.appendEmailEvent(match.application.id, r, email)) synced++
-      } else {
-        this.pushPending(r, email, match.application?.id)
+      if (!r.company || !r.position) {
+        this.pushPending(r, email, undefined)
         pending++
+        continue
       }
+      const match = this.findApplicationByNormalized(apps, r.company, r.position)
+      let appId: string
+      if (match) {
+        appId = match.id
+      } else {
+        // Aggressive: company+position extracted → create even at low confidence.
+        const view = this.create({
+          company: r.company,
+          position: r.position,
+          source: 'email',
+          city: r.city,
+          salaryRange: r.salary,
+          jdText: r.jdExcerpt
+        })
+        // Link the new application to this email so future mail in the thread
+        // matches directly (mirrors confirmEmailMatch's direct-link seeding).
+        this.store.updateApplication(view.application.id, { emailRefId: r.messageId })
+        view.application.emailRefId = r.messageId
+        appId = view.application.id
+        created++
+        apps.push(view.application)
+      }
+      if (this.appendEmailEvent(appId, r, email)) synced++
     }
     this.broadcastEmailMatches()
     this.activityService.record({
       type: 'tool_completed',
-      summary: `邮件推断完成：${synced} 条匹配，${pending} 条待确认`,
-      metadata: { synced, pending }
+      summary: `邮件推断完成：${synced} 条事件、${created} 条新建、${pending} 条待确认`,
+      metadata: { synced, created, pending }
     })
-    return { synced, pending, message: `邮件推断完成：${synced} 匹配 / ${pending} 待确认` }
+    return {
+      synced,
+      created,
+      pending,
+      message: `邮件推断完成：${synced} 事件 / ${created} 新建 / ${pending} 待确认`,
+      cursor: {
+        mail163LastUid: nextMail163Uid || undefined,
+        gmailLastInternalDate: nextGmailInternalDate || undefined
+      }
+    }
   }
 
   /**
-   * Deterministic match of a classified email result to an existing application.
-   * Returns the matched application (if any), the service-level confidence, and
-   * the candidate count. The model's `confidence` is a starting signal; the
-   * service refines it by match certainty (§C.3).
+   * Normalized exact match of company+position against existing applications.
+   * The normalized compare (lowercase + strip corporate/role suffixes) catches
+   * "字节跳动有限公司" vs "字节跳动" for the same job. There is intentionally NO
+   * fuzzy substring fallback: the user may apply to MULTIPLE positions at one
+   * company, so a company-only substring hit would wrongly merge two distinct
+   * funnel items. When the normalized compare misses, the caller aggressively
+   * creates a new application (user decision: 全部自动建). The per-event
+   * `sourceRef` idempotency still prevents duplicate events on the SAME email.
    */
-  private matchApplication(
-    r: ApplicationEmailResult,
-    email: NormalizedEmail,
-    apps: Application[]
-  ): { application?: Application; confidence: 'high' | 'medium' | 'low'; candidates: number } {
-    // Strategy 3: email_ref_id direct link.
-    const direct = apps.find((a) => a.emailRefId && a.emailRefId === r.messageId)
-    if (direct) return { application: direct, confidence: 'high', candidates: 1 }
-
-    // Strategy 1: sender domain — known recruiting platform?
-    const domain = extractDomain(email.from.address)
-    const isPlatform = !!domain && RECRUITING_PLATFORM_DOMAINS.some((p) => domain.includes(p))
-
-    // Strategy 2: company+position substring (bidirectional contains).
-    const lcContains = (haystack: string, needle: string): boolean =>
-      haystack.toLowerCase().includes(needle.toLowerCase())
-    const candidates = apps.filter((a) => {
-      if (r.company && (lcContains(a.company, r.company) || lcContains(r.company, a.company))) {
-        return true
-      }
-      if (r.position && lcContains(a.position, r.position)) return true
-      return false
-    })
-
-    if (candidates.length === 1) {
-      const companyInText = r.company && textHasEmail(email, r.company)
-      // Unique match + (company name verbatim in email OR platform domain OR model-high) → high.
-      if (companyInText || isPlatform || r.confidence === 'high') {
-        return { application: candidates[0], confidence: 'high', candidates: 1 }
-      }
-      if (r.confidence === 'medium') {
-        return { application: candidates[0], confidence: 'medium', candidates: 1 }
-      }
-      // Model low but a single candidate surfaced — still pending (model unsure).
-      return { application: candidates[0], confidence: 'low', candidates: 1 }
-    }
-    if (candidates.length > 1) {
-      return { application: undefined, confidence: 'low', candidates: candidates.length }
-    }
-    // No candidate — could be a new (untracked) application. Keep the model's
-    // confidence for the proposal card, but the decision is "pending" regardless.
-    return { application: undefined, confidence: r.confidence, candidates: 0 }
+  private findApplicationByNormalized(
+    apps: Application[],
+    company: string,
+    position: string
+  ): Application | undefined {
+    const nc = normalizeCompany(company)
+    const np = normalizePosition(position)
+    return apps.find(
+      (a) => normalizeCompany(a.company) === nc && normalizePosition(a.position) === np
+    )
   }
 
+  /**
+   * @deprecated Replaced by `findApplicationByNormalized` (mail-driven funnel
+   * rebuild). The normalized compare + fuzzy fallback there subsumes the old
+   * direct-link / domain / substring strategies. Removed: tsc noUnusedLocals.
+   */
+
   /** Append an email-detected event — idempotent by `email:<messageId>`.
-   * Returns true if a new event was inserted, false if it already existed. */
+   * Returns true if a new event was inserted, false if it already existed.
+   * Also patches the application's empty jdText/city/salaryRange fields from
+   * the classified result (R1 local write, §15 only gates external writes). */
   private appendEmailEvent(
     applicationId: string,
     r: ApplicationEmailResult,
@@ -412,6 +497,17 @@ export class ApplicationService {
       eventAt: email.receivedAt,
       createdAt: nowIso()
     })
+    // Backfill empty rich fields from the classified email. Minimal patch —
+    // only writes fields that are currently empty, so a manually-entered JD
+    // or a `web.fetch_jd` result is never clobbered by email extraction.
+    const app = this.store.getApplication(applicationId)
+    if (app) {
+      const patch: ApplicationUpdateFields = {}
+      if (!app.jdText && r.jdExcerpt) patch.jdText = r.jdExcerpt
+      if (!app.city && r.city) patch.city = r.city
+      if (!app.salaryRange && r.salary) patch.salaryRange = r.salary
+      if (Object.keys(patch).length > 0) this.store.updateApplication(applicationId, patch)
+    }
     return true
   }
 

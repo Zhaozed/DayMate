@@ -56,6 +56,8 @@ export interface Container {
   modelGateway: ModelGateway
   /** Plain (non-secret) app settings (LLM config + jobSearch paths). */
   settings: Settings
+  /** Proxy-aware HTML fetch (Electron `net.fetch`) for `web.fetch_jd`. */
+  webFetch: import('../agent/tool-registry').WebFetch
   agentRuntime: AgentRuntime
   engine: RoutineEngine
   scheduler: RoutineScheduler
@@ -149,6 +151,14 @@ export function initContainer(): Container {
   const settings = new Settings(join(app.getPath('userData'), 'settings.json'))
   const modelGateway = createModelGateway(secrets, settings)
   const agentRuntime = createAgentRuntime(modelGateway)
+  // Proxy-aware HTML fetch for `web.fetch_jd` (post-MVP JD enrichment).
+  // `net.fetch` (Chromium stack) routes through the system proxy/VPN — same
+  // reason Gmail/OAuth use it. Returns the response body as text. Wired into
+  // the engine's EngineDeps (for routine `tool` steps) and exposed for the
+  // on-demand APPLICATION_FETCH_JD handler.
+  const webFetch: import('../agent/tool-registry').WebFetch = (input: string) =>
+    net.fetch(input).then((r) => r.text())
+
   // Real Gmail provider — constructed once; connect swaps it into
   // emailProviders[0] (Spec §9). openExternal launches the OAuth browser flow.
   // `net.fetch` (Chromium network stack) routes Gmail/OAuth REST calls through
@@ -332,6 +342,7 @@ export function initContainer(): Container {
     agentRuntime,
     applicationService,
     settings,
+    webFetch,
     notify: (m) => {
       notify(m)
       broadcastActivity()
@@ -385,6 +396,52 @@ export function initContainer(): Container {
   })
   void fortuneJob
 
+  // Mail-driven funnel feed (post-MVP rebuild). NOT a routine preset and NOT
+  // scheduler-owned — a container-level setInterval polls every connected email
+  // provider for NEW mail (per-provider high-water-mark cursor in non-secret
+  // settings.json), runs `classify_application_email` on the delta only (token-
+  // cost control), and the service aggressively auto-creates / appends-to
+  // applications (user decision: 全部自动建). Independent of scheduler.pause
+  // (mail is the primary feed; a paused routine schedule should not stall the
+  // funnel). `enabled` is re-read each round so the user can toggle it live;
+  // the interval is read once at boot (a cadence change needs a restart). Per-
+  // round try/catch — a failed round logs an Activity and never kills the loop.
+  const startEmailSyncLoop = async (): Promise<void> => {
+    const { intervalSec } = await settings.readEmailSyncConfig()
+    const intervalMs = Math.max(60, intervalSec) * 1000
+    const tick = async (): Promise<void> => {
+      try {
+        const { enabled } = await settings.readEmailSyncConfig()
+        if (!enabled) return
+        const cursor = await settings.readEmailSyncCursor()
+        const result = await applicationService.syncFromEmails(
+          emailProviders,
+          agentRuntime,
+          cursor
+        )
+        // Persist the advanced high-water-mark (even on empty / partial rounds
+        // — the per-provider maxes already moved past the last-seen mail).
+        await settings.writeEmailSyncCursor(result.cursor)
+        // Surface changes only when something actually happened (avoid
+        // spamming the renderer with empty broadcasts every 180s).
+        if (result.synced > 0 || result.created > 0 || result.pending > 0) {
+          broadcastApplications()
+          broadcastEmailMatches()
+        }
+      } catch (err) {
+        activityService.record({
+          type: 'provider_unavailable',
+          summary: `邮件同步轮询失败：${err instanceof Error ? err.message : String(err)}`,
+          metadata: { error: err instanceof Error ? err.message : String(err) }
+        })
+      }
+    }
+    // Fire once shortly after boot (don't block startup), then on the interval.
+    setTimeout(() => void tick().catch(() => {}), 10_000)
+    setInterval(() => void tick().catch(() => {}), intervalMs)
+  }
+  void startEmailSyncLoop()
+
   container = {
     store,
     activityService,
@@ -395,6 +452,7 @@ export function initContainer(): Container {
     toolRegistry,
     modelGateway,
     settings,
+    webFetch,
     agentRuntime,
     engine,
     scheduler,

@@ -463,6 +463,14 @@ export const classifyApplicationEmailOutputSchema = z.object({
       eventType: applicationEventTypeSchema,
       company: z.string().optional(),
       position: z.string().optional(),
+      // jdExcerpt/city/salary: bonus structured fields extracted from the body
+      // (mail-driven funnel rebuild, post-MVP). jdExcerpt is the primary; city
+      // and salary are best-effort. Untrusted mail has these stripped in
+      // enforceTrust (§17 — never carry untrusted prose into the application
+      // record).
+      jdExcerpt: z.string().optional(),
+      city: z.string().optional(),
+      salary: z.string().optional(),
       confidence: z.enum(['high', 'medium', 'low']),
       evidence: z.string(),
       untrusted: z.boolean()

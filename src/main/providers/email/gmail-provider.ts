@@ -167,7 +167,15 @@ export class GmailProvider implements EmailProvider {
     if (!ids.messages) return []
     const out: NormalizedEmail[] = []
     for (const m of ids.messages) {
-      out.push(await this.getMessage(m.id))
+      const msg = await this.getMessage(m.id)
+      // Incremental high-water-mark: Gmail `list` returns newest-first, so once
+      // we hit a message at or before the cursor, the rest are already-seen —
+      // stop fetching (avoids re-running the agent on processed mail). The
+      // `format=full` get for the boundary message is the only wasted fetch.
+      if (query.sinceInternalDate && new Date(msg.receivedAt).getTime() <= query.sinceInternalDate) {
+        break
+      }
+      out.push(msg)
     }
     return out
   }

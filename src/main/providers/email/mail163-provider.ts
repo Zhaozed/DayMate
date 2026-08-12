@@ -113,6 +113,13 @@ export class Mail163Provider implements EmailProvider {
           search.since = new Date(Date.now() - query.sinceHours * 3600_000)
         }
         let uids = (await imap.search(search, { uid: true })) ?? []
+        // Incremental high-water-mark: only messages with UID strictly greater
+        // than the last-seen cursor. UIDs are monotonic in 163, so this is the
+        // clean "new mail since last sync" filter (avoids re-running the agent
+        // on already-processed messages → token cost).
+        if (query.sinceUid) {
+          uids = uids.filter((u) => Number(u) > query.sinceUid!)
+        }
         // Newest first.
         uids = [...uids].sort((a, b) => Number(b) - Number(a))
         if (query.limit) uids = uids.slice(0, query.limit)

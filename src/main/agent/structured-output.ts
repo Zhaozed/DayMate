@@ -252,6 +252,9 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
         eventType: applicationEventType,
         company: Type.Optional(Type.String()),
         position: Type.Optional(Type.String()),
+        jdExcerpt: Type.Optional(Type.String()),
+        city: Type.Optional(Type.String()),
+        salary: Type.Optional(Type.String()),
         confidence,
         evidence: Type.String(),
         untrusted: Type.Boolean()

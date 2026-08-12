@@ -983,6 +983,86 @@ preset 的 `boss.search` step 仍单桶，是 NTK 通告非双投主入口；评
 对照调整（延续 `0010/0011/0013/0017`，待用户安装）；岗位推荐历史趋势（需 brief 持久化
 时序存储）。
 
+## Post-MVP — 邮件驱动求职汇总重做 + BOSS 退场
+
+BOSS 反爬不可破（`0017` 验证：camoufox stoken 被 search 拒认、真实浏览器提取不稳）。
+用户决定 **BOSS 相关 UI 全隐藏**（后端休眠保留，可逆），投递模块 pivot 为「邮件自动
+汇总」：收到招聘相关邮件 → 自动维护投递面板（回执→建 item，面试/测评/笔试→追加事件），
+严格不重复、正确路由。同时投递卡片富展示（岗位名字在前 + 城市 + 薪资 + JD 片段），
+JD 尽可能补全（邮件正文抽 JD 为主 + 新 `web.fetch_jd` 工具补）。Verified: typecheck +
+lint + 368 tests (1 skipped) + build + 6 e2e（含 3× critical demo）全绿。
+
+六阶段，全做：
+
+- **Phase 1 — 隐藏 BOSS UI（reversible）。** `Applications.tsx` 删 `<JobRecommendation
+  Section>` mount + `BossStatus` 横幅 + Header「同步 BOSS」按钮 + 相关 state；组件定义
+  保留为 `export function`（dormant，便于恢复；export 满足 tsc noUnusedLocals）。
+  `Integrations.tsx` 删 `<BossCard />` mount（保留 dormant）+ `JobSearchCard` 内 jobIntent
+  子块；**保留** `baseResumePath`/`transcriptTemplatePath`（AI 简历/面经仍用）。后端
+  boss provider / `boss.*` 工具 / `score_job_matches` / `job_recommendation` preset /
+  boss IPC 全保留不动。
+- **Phase 2a — 增量游标（per-provider 高水位，非密 settings）。** `EmailQuery` 加
+  `sinceUid?`（163 IMAP UID）+ `sinceInternalDate?`（gmail internalDate ms）。新
+  `EmailSyncCursor` 接口。mail163/gmail/mock `listMessages` 走游标过滤。`Settings` 加
+  `EmailSyncSettings`（`enabled?`/`intervalSec?`/`cursor?`）+ `readEmailSyncConfig()`
+  （默认 enabled true / intervalSec 180 / min 60）+ `readEmailSyncCursor()`/
+  `writeEmailSyncCursor()` + `normalizeEmailSync()`。**`unreadOnly` 不再强制 true**
+  ——游标是唯一「已处理」闸；用户可能在客户端先读。agent 只跑新邮件 → cadence 可 180s。
+- **Phase 2b — 容器常驻 poll loop。** `container.ts` `startEmailSyncLoop()`：读
+  intervalSec → `setInterval(tick)`。`tick`：读 enabled（每轮重读，live 可切关）→
+  读 cursor → `syncFromEmails(...)` → `writeEmailSyncCursor(result.cursor)` → 有变更
+  broadcast。每轮 try/catch 不杀 loop。**放 container 不放 scheduler**（镜像运势 cron；
+  独立于 scheduler pause——邮件是主 feed）。
+- **Phase 2c — `classify_application_email` + jdExcerpt/city/salary（6-touchpoint）。**
+  Zod/TypeBox/TS interface/stub/prompt/enforceTrust 六处同步加 `jdExcerpt?`/`city?`/
+  `salary?`。stub 新 `extractJdExcerpt`（正则抽 JD 段落 ≤200 字）+ `extractCity`
+  （23 城市名）+ `extractSalary`（`20-40K`/`20K` 正则）。`enforceTrust` 对 untrusted
+  邮件 `delete` 三字段（§17——不把 untrusted prose 带进投递记录）。
+- **Phase 2d — 路由 + 自动建投递 + normalized 去重（service 确定性，激进）。** 重写
+  `syncFromEmails` 签名加 `cursor`，返回加 `created`/`cursor`。路由：non-untrusted +
+  company+position → `findApplicationByNormalized` 命中追加事件 / 未命中激进建；缺公司
+  或岗位 → 待确认队列；untrusted → skip。`findApplicationByNormalized` = normalized
+  exact（company AND position），**无 fuzzy 兜底**——用户多岗位同公司需求；未命中即建。
+  `normalizeCompany`/`normalizePosition`（lowercase + 去公司后缀/岗位噪音 + collapse
+  ws）。`appendEmailEvent` 扩展：jdExcerpt/city/salary 补空字段（minimal patch，R1 本地
+  写）。删 `matchApplication`（被取代）。`RECRUITING_PLATFORM_DOMAINS`/`extractDomain`/
+  `textHasEmail` 改 `export`（保留供未来 confidence-tiered 路径）。
+- **Phase 3 — 投递卡片富展示 + detail「搜索 JD」按钮。** `ApplicationCard` headline：
+  position 在前 + company + city + salaryRange + priority 'back' 灰角标 + JD 片段 1 行。
+  `ApplicationDetail.RichFields` JD 区加「搜索 JD」按钮 → `fetchJobJd(id)` → 填
+  `form.jdText`（用户审查后保存）；JD 渲染保持 `sandbox=""` iframe（§17）。
+- **Phase 4 — `web.fetch_jd` R0 工具 + on-demand IPC。** `tool-registry.ts` 新 R0 工具
+  `web.fetch_jd`（`{company, position?}` → DDG HTML → `extractSnippets` → plain-text）。
+  新 `WebFetch` 类型 + `extractSnippets`/`stripTags`（解 `result__snippet` + 去标签 +
+  entity 解码 + fallback `<p>/<li>`）。`ToolContext`/`EngineDeps` 加 `webFetch?`（optional
+  镜像 `settings?`）。`container` `webFetch = (input) => net.fetch(input).then(r=>r.text())`
+  （proxy-aware）。on-demand IPC `APPLICATION_FETCH_JD`（不经 routine engine，镜像
+  `generateResume` 先例）：handler 取 app.company/position → `toolRegistry.execute` →
+  `updateFields({jdText})` → broadcast。preload `fetchJobJd` + `DaymateApi.fetchJobJd`。
+- **Phase 5 — 测试。** `email-inference.test.ts` 重写以激进语义；新 `web-fetch-jd.test.ts`
+  （11 测试：extractSnippets 各 case + tool 各路径 + §17 不带可执行 HTML）；新
+  `normalize.test.ts`（3 测试：跨后缀/跨语言 dedup）；新 `email-sync.test.ts`（5 测试：
+  增量游标 + counting runtime 断言「无新邮件 → agent 不被调」）。
+
+Key decisions in `docs/decisions/0019-邮件驱动求职汇总重做-boss退场.md`:
+- **BOSS UI 全隐藏，后端休眠保留**——反爬不可破；UI 一行重新挂回即可恢复。
+- **feed 放 container 不放 scheduler**——镜像运势 cron；独立于 scheduler pause。
+- **增量游标 per-provider 持久化**——agent 只跑新邮件；`sourceRef` 事件级幂等作安全网。
+- **路由是 service 确定性逻辑，非模型**——模型只分类+提取；service 用 normalized 去重
+  + 规则决定建/追加/入队。镜像 `0011`。
+- **激进建投递 + normalized item 级去重，无 fuzzy 兜底**——公司+岗位提取到就建（含
+  low）；缺公司或岗位才入队；normalized exact（company AND position）防同公司多岗位
+  错误合并。
+- **JD 三层补全只补空字段**——邮件 jdExcerpt（主）→ `web.fetch_jd`（公网 on-demand）
+  → 手动粘贴；后抓永不被更后抓覆盖。
+- **`web.fetch_jd` 确定性 R0，非 model-callable**——M3 设计「模型永不调 Tool Registry
+  工具」未变；§17 sandbox iframe + stripTags 双防御；on-demand 让用户审查 web 质量。
+
+**Deferred (out of this pass):** IDLE 推送（163 不可靠，轮询足够）；`web.fetch_jd` 自动
+批量补全（on-demand 让用户审查 web 质量）；真实 BOSS funnel 同步路径（后端 dormant，
+恢复 = 一行挂回 `<BossCard />`）；邮件→投递第三方平台域名清单扩充（牛客/北森/赛码初版，
+当前激进路由不查 domain 信号）；classifier `memoryProposals`（per-contact，延续 0010）。
+
 ## Working rules (Spec §23)
 
 1. Implement one milestone at a time. 2. Do not add dependencies without

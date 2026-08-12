@@ -20,13 +20,13 @@ Generated against dataset version **1**. 65/65 cases passed.
 
 All categories run in single-digit milliseconds (rule-based stubs; no model call). Per-category wall-clock:
 
-- email_classification: 14 ms
-- action_extraction: 13 ms
-- need_to_know: 12 ms
-- morning_brief: 12 ms
-- meeting_prep: 1 ms
+- email_classification: 19 ms
+- action_extraction: 18 ms
+- need_to_know: 17 ms
+- morning_brief: 17 ms
+- meeting_prep: 2 ms
 - approval: 0 ms
-- prompt_injection: 1 ms
+- prompt_injection: 2 ms
 
 ## Estimated model cost (LLM path)
 

@@ -8,9 +8,23 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { LLM_PROVIDERS, DEFAULT_LLM_MODEL_IDS } from '@shared/constants'
-import type { LlmProvider, JobSearchSettings, NotificationPrefs, BirthData } from '@shared/types'
+import type {
+  LlmProvider,
+  JobSearchSettings,
+  NotificationPrefs,
+  BirthData,
+  EmailSyncCursor
+} from '@shared/types'
 
-export type { JobSearchSettings, NotificationPrefs, BirthData } from '@shared/types'
+export type { JobSearchSettings, NotificationPrefs, BirthData, EmailSyncCursor } from '@shared/types'
+
+/** Non-secret email-sync config (Milestone: 邮件驱动求职汇总). `cursor` is the
+ *  per-provider high-water-mark so the poll only classifies NEW mail. */
+export interface EmailSyncSettings {
+  enabled?: boolean
+  intervalSec?: number
+  cursor?: EmailSyncCursor
+}
 
 export interface LlmSettings {
   provider: LlmProvider
@@ -25,6 +39,8 @@ export interface AppSettings {
   /** Non-secret birth data for the daily 运势 (Milestone E). Trusted §17 —
    *  the user's own config (not a credential, not external untrusted text). */
   birthData?: BirthData
+  /** Non-secret email-sync poll config + incremental cursor (邮件驱动求职汇总). */
+  emailSync?: EmailSyncSettings
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -100,6 +116,34 @@ export class Settings {
     this.cached = next
   }
 
+  /** Email-sync poll config (enabled / interval) with defaults applied. */
+  async readEmailSyncConfig(): Promise<{ enabled: boolean; intervalSec: number }> {
+    const es = (await this.read()).emailSync
+    return {
+      enabled: es?.enabled !== false,
+      intervalSec: Number.isFinite(es?.intervalSec) && es!.intervalSec! >= 60
+        ? es!.intervalSec!
+        : 180
+    }
+  }
+
+  async readEmailSyncCursor(): Promise<EmailSyncCursor> {
+    return (await this.read()).emailSync?.cursor ?? {}
+  }
+
+  /** Merge the advanced cursor into the persisted email-sync block (only touches
+   *  `cursor`; `enabled`/`intervalSec` preserved). Called after each poll. */
+  async writeEmailSyncCursor(cursor: EmailSyncCursor): Promise<EmailSyncCursor> {
+    const current = await this.read()
+    const next: AppSettings = {
+      ...current,
+      emailSync: { ...(current.emailSync ?? {}), cursor }
+    }
+    await this.persist(next)
+    this.cached = next
+    return next.emailSync!.cursor!
+  }
+
   /**
    * Read the base resume file content (trusted §17 — the user's own document).
    * Returns undefined when no path is configured or the file is unreadable;
@@ -157,12 +201,37 @@ function normalize(parsed: Partial<AppSettings> | null | undefined): AppSettings
       : undefined
   const notifications = normalizeNotifications(parsed?.notifications)
   const birth = normalizeBirthData(parsed?.birthData)
+  const emailSync = normalizeEmailSync(parsed?.emailSync)
   return {
     llm: { provider, modelId },
     ...(jobSearch ? { jobSearch } : {}),
     ...(notifications ? { notifications } : {}),
-    ...(birth ? { birthData: birth } : {})
+    ...(birth ? { birthData: birth } : {}),
+    ...(emailSync ? { emailSync } : {})
   }
+}
+
+/** Coerce a parsed email-sync block into a valid shape. Drops non-numeric
+ *  cursors / intervals rather than throwing — a bad cursor just means the next
+ *  sync re-scans from zero (idempotent via `sourceRef`, never duplicates). */
+function normalizeEmailSync(e: unknown): EmailSyncSettings | undefined {
+  if (!e || typeof e !== 'object') return undefined
+  const raw = e as Record<string, unknown>
+  const out: EmailSyncSettings = {}
+  if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled
+  if (Number.isFinite(raw.intervalSec) && (raw.intervalSec as number) >= 60) {
+    out.intervalSec = raw.intervalSec as number
+  }
+  const c = raw.cursor
+  if (c && typeof c === 'object') {
+    const cursor: EmailSyncCursor = {}
+    const m163 = (c as Record<string, unknown>).mail163LastUid
+    const gmail = (c as Record<string, unknown>).gmailLastInternalDate
+    if (Number.isFinite(m163)) cursor.mail163LastUid = m163 as number
+    if (Number.isFinite(gmail)) cursor.gmailLastInternalDate = gmail as number
+    if (Object.keys(cursor).length) out.cursor = cursor
+  }
+  return Object.keys(out).length ? out : undefined
 }
 
 /** Coerce a parsed birth-data block into a valid `BirthData`. Drops anything

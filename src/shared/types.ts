@@ -137,6 +137,23 @@ export interface EmailQuery {
   unreadOnly?: boolean
   sinceHours?: number
   limit?: number
+  /** IMAP UID high-water-mark — fetch only messages with UID strictly greater
+   * than this (mail163). Lets the email-sync poll run incrementally instead of
+   * re-scanning the whole window each tick. */
+  sinceUid?: number
+  /** Gmail internalDate (ms epoch) high-water-mark — fetch only messages with
+   * internalDate strictly greater (gmail). Same incremental-sync purpose. */
+  sinceInternalDate?: number
+}
+
+/** Per-provider high-water-mark persisted in non-secret settings so the
+ * email-sync poll only classifies NEW mail (no re-running the agent on
+ * already-processed messages → token cost). The event-level `sourceRef`
+ * idempotency (`email:<messageId>`) remains as the safety net for a cursor
+ * reset/miss (re-processing is a no-op, never a duplicate). */
+export interface EmailSyncCursor {
+  mail163LastUid?: number
+  gmailLastInternalDate?: number
 }
 
 // Query for the user's OWN sent mail — the prior-reply tone corpus (Spec §13.5
@@ -1288,11 +1305,21 @@ export interface DaymateApi {
    *  deadline, interview link, notes, channel, priority). Local DB write (R1,
    *  no approval needed — §15 only gates external writes). */
   updateApplicationFields(id: string, patch: ApplicationUpdateFields): Promise<ApplicationView | undefined>
+  fetchJobJd(applicationId: string): Promise<{ jdText: string | null; error: string | null }>
   syncBossApplications(): Promise<{ synced: number; message: string }>
   getBossStatus(): Promise<BossStatus>
+  /** Spawn `boss login --qrcode` — QR opens in system viewer; user scans. */
+  loginBoss(): Promise<BossStatus>
+  /** `boss logout` — clears boss-cli's saved credential. */
+  logoutBoss(): Promise<BossStatus>
   onApplicationChanged(cb: (views: ApplicationView[]) => void): () => void
   // ── Milestone A: email inference, AI generation, recycle bin, config ──
-  syncEmailApplications(): Promise<{ synced: number; pending: number; message: string }>
+  syncEmailApplications(): Promise<{
+    synced: number
+    created: number
+    pending: number
+    message: string
+  }>
   generateResume(applicationId: string): Promise<ResumeVersion>
   generatePrepMaterial(applicationId: string): Promise<PrepMaterial>
   listResumeVersions(applicationId: string): Promise<ResumeVersion[]>
