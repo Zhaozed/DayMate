@@ -20,6 +20,10 @@ export interface ParsedMailLike {
   text?: string
   date?: Date
   messageId?: string
+  /** mailparser's case-insensitive header map (`get('list-id')`). Forwarded so
+   *  the 163 provider can compute the bulk flag at normalize time (ADR 0023).
+   *  Headers stay provider-local — never persisted on NormalizedEmail (§17). */
+  headers?: { get: (name: string) => string | undefined }
 }
 
 /** Build a minimal RFC822 message as a UTF-8 string (CRLF line endings). */
@@ -77,6 +81,7 @@ export async function normalizeRfc822ViaParser(source: Buffer): Promise<ParsedMa
     subject: parsed.subject ?? undefined,
     text: parsed.text ?? undefined,
     date: parsed.date ?? undefined,
-    messageId: parsed.messageId ?? undefined
+    messageId: parsed.messageId ?? undefined,
+    headers: parsed.headers as { get: (name: string) => string | undefined } | undefined
   }
 }

@@ -20,7 +20,15 @@
 // rules, not the model's discretion (Spec §12).
 
 import type { RoutineStore } from '../db/store'
-import type { MemoryItem, MemoryKey, MemorySaveInput, MemoryUpdate } from '@shared/types'
+import type {
+  MemoryItem,
+  MemoryKey,
+  MemorySaveInput,
+  MemoryUpdate,
+  PersonaOutput
+} from '@shared/types'
+import type { EmailProvider } from '../providers/email/email-provider'
+import type { AgentRuntime } from '../agent/agent-runtime'
 import { newId, nowIso } from '../util/ids'
 
 // §16 forbidden-content markers. A value matching any of these is rejected.
@@ -94,25 +102,48 @@ export class MemoryService {
   }
 
   /**
-   * Save a memory item. Agent proposals (`source` starts with `agent` or
-   * `routine`) always land proposed (`confirmed: false`); user-authored saves
-   * (`source: 'user'`) are confirmed immediately. Idempotent: an identical
-   * proposed (key, value) that already exists is a no-op.
+   * Save a memory item. Agent proposals now auto-confirm (the user does not want
+   * to manually confirm inferred memory — §16 confirmation gate removed by
+   * user preference). `validateMemoryContent` is the safety floor: it rejects
+   * tokens, full email bodies, and forbidden inferred traits BEFORE anything
+   * persists, regardless of confirmation.
+   *
+   * Merge / update semantics (one active value per key):
+   *   • If a CONFIRMED value for the same key already exists:
+   *     - User-authored prior (`source === 'user'`) is the user's explicit
+   *       truth — an agent proposal does NOT clobber it (return prior as-is).
+   *     - Agent-authored prior is refined in place: update its value (or no-op
+   *       if the new value equals the old — idempotent).
+   *   • If no confirmed value exists: clear any stale pending for the key and
+   *     create a new confirmed item.
+   * Either way, one confirmed value per key stays coherent.
    */
   save(input: MemorySaveInput): MemoryItem {
     validateMemoryContent(input.key, input.value)
     const isAgent = input.source !== 'user'
-    const confirmed = input.confirmed ?? !isAgent
+    const confirmed = input.confirmed ?? true // auto-confirm by default
+    const now = nowIso()
 
-    // Idempotent: an identical proposed item already exists → return it.
-    if (!confirmed) {
-      const dup = this.store
-        .listMemory()
-        .find((m) => !m.confirmed && m.key === input.key && m.value === input.value)
-      if (dup) return dup
+    const existing = this.store.listMemory()
+    const prior = existing.find((m) => m.confirmed && m.key === input.key)
+    if (prior) {
+      // Protect a user-authored value from agent overwrite (merge, not clobber).
+      if (isAgent && prior.source === 'user') return prior
+      // Idempotent: same value already active → nothing to do.
+      if (prior.value === input.value) return prior
+      // Update the existing confirmed row in place (one value per key).
+      const next = this.store.updateMemory(prior.id, {
+        value: input.value,
+        updatedAt: now
+      })
+      if (!next) throw new Error(`记忆更新失败：${prior.id}`)
+      return next
     }
 
-    const now = nowIso()
+    // No confirmed value for this key — drop any stale pending rows, then create.
+    for (const m of existing) {
+      if (!m.confirmed && m.key === input.key) this.store.deleteMemory(m.id)
+    }
     const item: MemoryItem = {
       id: newId('mem'),
       key: input.key,
@@ -160,5 +191,104 @@ export class MemoryService {
     const existing = this.store.getMemory(id)
     if (!existing) return // idempotent
     this.store.deleteMemory(id)
+  }
+
+  /**
+   * One-time boot reconciliation. Agent proposals now auto-confirm, so nothing
+   * should be pending going forward. This sweeps legacy state created before
+   * that change (rows left pending by the old confirm-gate path) and any
+   * duplicates: per key, keep exactly ONE confirmed value — promote the newest
+   * pending if no confirmed exists for that key, else keep the newest confirmed
+   * and drop everything else. Idempotent.
+   */
+  reconcile(): void {
+    const all = this.store.listMemory() // sorted by createdAt DESC
+    const byKey = new Map<string, MemoryItem[]>()
+    for (const m of all) {
+      if (!byKey.has(m.key)) byKey.set(m.key, [])
+      byKey.get(m.key)!.push(m)
+    }
+    for (const items of byKey.values()) {
+      const confirmed = items.filter((m) => m.confirmed)
+      const pending = items.filter((m) => !m.confirmed)
+      let keep: MemoryItem
+      if (confirmed.length > 0) {
+        keep = confirmed[0] // newest confirmed (DESC)
+      } else {
+        keep = pending[0] // newest pending — promote
+        this.store.updateMemory(keep.id, { confirmed: true })
+      }
+      for (const m of items) {
+        if (m.id !== keep.id) this.store.deleteMemory(m.id)
+      }
+    }
+  }
+
+  /** Backward-compatible alias for {@link reconcile}. */
+  dedupe(): void {
+    this.reconcile()
+  }
+
+  /**
+   * On-demand persona inference (§16 town-style profile). Reads the user's OWN
+   * sent mail from every connected email provider (`listSent`, last 30 days,
+   * capped at 100 per provider), runs the `generate_persona` agent step, and
+   * saves each proposal — proposals now auto-confirm and merge/update the
+   * existing confirmed value for that key in place (no manual confirmation;
+   * user-authored values are protected from agent overwrite). Sent mail is the
+   * user's trusted voice (framed by `frameSentReply`, the opposite of
+   * §17-untrusted inbound). Provider failures are graceful — a down provider
+   * contributes no sent mail, the run still completes with the others (mirrors
+   * email provider partial-failure handling).
+   *
+   * NOT via the routine engine — on-demand manual AI, mirroring
+   * `applicationService.generateResume` (single step, no orchestration).
+   * Returns the persona summary + the proposals that landed (for a toast).
+   */
+  async generatePersona(
+    emailProviders: EmailProvider[],
+    agentRuntime: AgentRuntime
+  ): Promise<PersonaOutput> {
+    // Gather the user's own sent mail across all connected providers. A provider
+    // that throws (down / not connected) contributes nothing — do not kill the
+    // run (partial-failure parity).
+    const sentEmails = []
+    for (const p of emailProviders) {
+      try {
+        const sent = await p.listSent({ sinceHours: 24 * 30, limit: 100 })
+        sentEmails.push(...sent)
+      } catch {
+        // provider unavailable — skip, the others still contribute
+      }
+    }
+
+    const memory = this.listConfirmed()
+    const output = (await agentRuntime.runAgentStep('generate_persona', {
+      sentEmails,
+      memory
+    })) as PersonaOutput
+
+    // Save each proposal — `save()` now auto-confirms and merges/updates the
+    // existing confirmed value for that key in place (no manual confirmation).
+    // User-authored values are protected from agent overwrite (merge, not
+    // clobber). `validateMemoryContent` re-checks before persisting
+    // (enforceTrust already filtered, but the service is the last word §12).
+    // A rejected proposal (full email body / token / forbidden trait) becomes
+    // a no-op skip, never throws — the user still gets the summary + the valid
+    // updates.
+    const proposals = output.memoryProposals ?? []
+    for (const proposal of proposals) {
+      try {
+        this.save({
+          key: proposal.key,
+          value: proposal.value,
+          source: 'agent'
+        })
+      } catch {
+        // rejected by validateMemoryContent — skip, do not fail the run
+      }
+    }
+
+    return output
   }
 }

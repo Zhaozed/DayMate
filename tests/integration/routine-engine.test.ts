@@ -58,17 +58,23 @@ describe('routine engine — Morning Brief end to end', () => {
     expect(tasks[0].sourceId).toBe('mock-msg-001')
     expect(tasks[0].routineRunId).toBe(run.id)
 
-    // A Need to Know was published.
-    const ntk = store.listNeedToKnow()
+    // A Need to Know was published. ADR 0026 — the morning brief is tagged
+    // kind='morning_brief', so it is filtered OUT of listNeedToKnow() (必读) and
+    // surfaces in listMorningBriefs() (the Home 晨报 carousel) instead.
+    const ntk = store.listMorningBriefs(7)
     expect(ntk.length).toBe(1)
     expect(ntk[0].sourceRefs.length).toBeGreaterThan(0)
+    expect(ntk[0].kind).toBe('morning_brief')
+    // And it does NOT leak into 必读.
+    expect(store.listNeedToKnow().length).toBe(0)
 
-    // A passive memory proposal landed from the brief (§16): the priority
-    // sender became a proposed (NOT yet confirmed) `contact` entry.
+    // A passive memory proposal landed from the brief (§16) and auto-confirmed
+    // (no manual confirmation gate — user preference): the priority sender
+    // became an active `contact` entry.
     const memory = store.listMemory()
-    const proposed = memory.filter((m) => !m.confirmed)
-    expect(proposed.length).toBeGreaterThan(0)
-    expect(proposed.some((m) => m.key === 'contact' && m.value.includes('alice@example.com'))).toBe(true)
+    expect(memory.length).toBeGreaterThan(0)
+    expect(memory.every((m) => m.confirmed)).toBe(true)
+    expect(memory.some((m) => m.key === 'contact' && m.value.includes('alice@example.com'))).toBe(true)
   })
 
   it('is idempotent: a second run with the same key is a no-op and does not duplicate Tasks', async () => {
@@ -99,6 +105,18 @@ describe('routine engine — pause and resume after approval', () => {
   it('pauses on an R3 tool and resumes after approval, running later steps', async () => {
     const { engine, store, deps } = buildEngine()
     const now = nowIso()
+    // `email.create_draft` is R1 (auto, no approval — ADR 0022), so it can no
+    // longer drive a pause. `email.send_draft` (the actual external send) stays
+    // R3 and is the gated tool here; pre-seed a real draft so send_draft has a
+    // draft to send on approve.
+    const draftId = (
+      await deps.emailProviders[0].createDraft({
+        accountId: 'mock-gmail-001',
+        to: [{ address: 'someone@example.com' }],
+        subject: 'draft',
+        body: 'body'
+      })
+    ).id
     const routine: RoutineDefinition = {
       id: 'approval_demo',
       name: 'Approval Demo',
@@ -110,15 +128,10 @@ describe('routine engine — pause and resume after approval', () => {
       steps: [
         { id: 'before', type: 'create_task', title: 'Before approval' },
         {
-          id: 'create_draft',
+          id: 'send_draft',
           type: 'tool',
-          tool: 'email.create_draft',
-          args: {
-            accountId: 'mock-gmail-001',
-            to: [{ address: 'someone@example.com' }],
-            subject: 'draft',
-            body: 'body'
-          }
+          tool: 'email.send_draft',
+          args: { accountId: 'mock-gmail-001', draftId }
         },
         { id: 'after', type: 'create_task', title: 'After approval' }
       ],
@@ -132,7 +145,7 @@ describe('routine engine — pause and resume after approval', () => {
     const run = await engine.run('approval_demo', { idempotencyKey: 'appr-1' })
     // Paused before the gated action executes and before later steps.
     expect(run.status).toBe('waiting_approval')
-    expect(run.currentStepId).toBe('create_draft')
+    expect(run.currentStepId).toBe('send_draft')
     expect(store.listTasks().map((t) => t.title)).toEqual(['Before approval'])
 
     // The engine created an ApprovalRequest for the gated action (M2).

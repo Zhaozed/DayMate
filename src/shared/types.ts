@@ -9,6 +9,8 @@ import type {
   TaskStatus,
   TaskPriority,
   TaskSourceType,
+  TaskCategory,
+  BriefingCategory,
   RoutineRunStatus,
   StepStatus,
   ApprovalStatus,
@@ -35,6 +37,8 @@ export type {
   TaskStatus,
   TaskPriority,
   TaskSourceType,
+  TaskCategory,
+  BriefingCategory,
   RoutineRunStatus,
   StepStatus,
   RiskLevel,
@@ -91,6 +95,11 @@ export interface NormalizedEmail {
   unread: boolean
   labels: string[]
   sourceUrl?: string
+  /** True if routing headers mark this as bulk / list / system mail (ADR 0023).
+   *  Determined at normalize time; only the boolean persists (raw headers stay
+   *  provider-local — §17). Drives pre-LLM filtering so mass mail never burns
+   *  a classify pass. */
+  bulk?: boolean
 }
 
 export interface EmailDraft {
@@ -132,6 +141,26 @@ export interface DraftReplyOutput {
   memoryProposals?: MemoryProposal[]
 }
 
+// Persona inference (on-demand "生成用户画像"). Built ONLY from the user's
+// OWN sent mail (trusted voice, framed by `frameSentReply` — the opposite of
+// §17-untrusted inbound). The output IS the memoryProposals payload —
+// persona / writing_style / email_tone / working_hours facts to save as
+// proposals (confirmed:false) for the user to confirm on the Memory page.
+// `summary` is a one-line recap for the Activity log / a confirmation toast.
+// §17: sent mail is the user's own content, never an instruction source.
+export interface PersonaOutput {
+  summary: string
+  memoryProposals?: MemoryProposal[]
+}
+
+/** Input for `generate_persona`. `sentEmails` is the user's OWN sent-mail
+ * corpus (trusted voice, framed by `frameSentReply`). `memory` is the
+ * confirmed profile (so the model can skip already-set keys). */
+export interface PersonaInput {
+  sentEmails?: NormalizedEmail[]
+  memory?: MemoryItem[]
+}
+
 export interface EmailQuery {
   accountId?: string
   unreadOnly?: boolean
@@ -170,6 +199,47 @@ export interface SentMailQuery {
   limit?: number
 }
 
+// ── Weather (ADR 0026 — Home 今日天气 card) ─────────────────────────────────
+// Real weather is fetched from wttr.in (no key, proxy-aware via Electron
+// net.fetch) for the user's configured city. The LLM-polished briefing
+// (穿衣 + 宜忌) is generated daily and cached in non-secret settings.json so
+// the Home card renders without a re-fetch. None of this is a secret.
+export interface WeatherData {
+  city: string
+  /** Celsius. */
+  tempC: number
+  feelsLikeC: number
+  /** English condition desc from wttr.in (e.g. "Partly cloudy") — the LLM
+   *  translates to Chinese in the briefing. */
+  desc: string
+  humidity: number
+  windSpeedKmph: number
+  /** Today's forecast high/low (Celsius). */
+  maxTempC: number
+  minTempC: number
+  /** wttr weather code (e.g. 113=sunny, 116=cloudy, 200-series=rain). */
+  weatherCode: number
+}
+
+export interface WeatherBriefing {
+  /** ISO date (YYYY-MM-DD) the briefing was generated for; used to detect a
+   *  stale cache ("today's weather"). */
+  date: string
+  city: string
+  /** One-line "23°C 多云 · 体感21°" style header. */
+  tempText: string
+  /** One-line natural-language summary ("今日多云转晴，午后有阵风"). */
+  summary: string
+  /** Concrete clothing advice ("薄外套 + 长裤，午后可脱外套"). */
+  clothing: string
+  /** Practical dos (宜带伞/宜防晒/宜添衣 — NOT mystical; mystical 宜忌 stays
+   *  in the daily 运势 bubble). 1-3 short clauses. */
+  yi: string[]
+  /** Practical don'ts. 1-3 short clauses. */
+  ji: string[]
+}
+
+
 // Result of classifying a single email in Auto Inbox (Spec §13.2). The
 // classifier dedupes by (provider, accountId, messageId), so a re-run never
 // re-classifies the same message. Prompt-injection / SPAM-labeled mail is
@@ -184,6 +254,22 @@ export interface EmailClassificationResult {
   untrusted: boolean
   reason: string
   suggestedAction?: SuggestedAction
+  /** A concrete, actionable next-step phrased as a human-readable ToDo title
+   *  (ADR 0026). The model fills this ONLY when there is a genuinely useful
+   *  action to take — absence = "nothing worth a ToDo" (the "没用的别生产"
+   *  filter lives in the model's own judgment, no separate LLM call). */
+  todoTitle?: string
+  /** ISO date/time when the mail mentions a deadline / interview / follow-up
+   *  date. Relative words ("下周五") are resolved to a concrete ISO date by
+   *  the model. Absent = no date mentioned. */
+  dueDate?: string
+  /** Coarse domain tag for the ToDo (ADR 0027). The model fills this from the
+   *  mail content; the deterministic stub falls back to a topic-derived value. */
+  category?: TaskCategory
+  /** 必读 top-level section tag (ADR 0029): 学校/求职/日常/其他. Filled on
+   *  every surfaced email so the 必读 page can group into 4 sections. Distinct
+   *  from `category` (5-value, tags the ToDo). Stub falls back to a topic value. */
+  briefingCategory?: BriefingCategory
 }
 
 /**
@@ -240,6 +326,16 @@ export interface Task {
   sourceType: TaskSourceType
   sourceId?: string
   routineRunId?: string
+  /** Which mail provider an auto-generated mail ToDo came from (ADR 0026).
+   *  Only set when sourceType='email'; lets the Home ToDo list badge the
+   *  origin (163 / Gmail). */
+  sourceProvider?: 'gmail' | 'mail163'
+  /** Coarse domain tag (ADR 0027) — 学校/求职/账单/会议/其他. */
+  category?: TaskCategory
+  /** Deep link back to the source mail (ADR 0027). Gmail only — 163 has no
+   *  web deep link so this stays undefined and the UI shows the provider badge
+   *  alone. */
+  sourceLink?: string
   createdAt: string
   updatedAt: string
 }
@@ -252,6 +348,9 @@ export interface TaskCreateInput {
   sourceType: TaskSourceType
   sourceId?: string
   routineRunId?: string
+  sourceProvider?: 'gmail' | 'mail163'
+  category?: TaskCategory
+  sourceLink?: string
 }
 
 export interface TaskUpdate {
@@ -286,6 +385,28 @@ export interface NeedToKnow {
   readAt?: string
   dismissedAt?: string
   createdAt: string
+  /** Distinguishes morning-brief NTKs (shown on the Home 晨报 carousel, kept
+   *  ~7 days) from email-driven NTKs (the 必读 page). null/undefined =
+   *  legacy / email-driven (filtered INTO 必读). 'morning_brief' is filtered
+   *  OUT of 必读 and INTO the Home carousel (ADR 0026). */
+  kind?: 'morning_brief' | 'email' | null
+  /** RFC822 / Gmail conversation key. Emails in the same thread collapse into
+   *  ONE 必读 item (ADR 0029). Gmail = native threadId; 163 = synthesized from
+   *  References/In-Reply-To/Message-ID headers. The full thread is fetched
+   *  lazily on expand (getEmailThread) — never persisted here. */
+  threadId?: string
+  /** Top-level 必读 section tag (ADR 0029): 学校/求职/日常/其他. Distinct from
+   *  the 5-value TaskCategory (which tags Home ToDos). Filled on every surfaced
+   *  email by the model / stub. */
+  briefingCategory?: BriefingCategory
+  /** Email source provider badge + deep link (ADR 0029). Gmail = real per-msg
+   *  deep link; 163 = generic webmail root (no per-msg deep link exists). */
+  sourceProvider?: 'gmail' | 'mail163'
+  sourceAccountId?: string
+  sourceLink?: string
+  /** Bumped on thread-merge so the renderer can sort a thread's latest update
+   *  to the top. Falls back to createdAt. */
+  updatedAt?: string
 }
 
 // ── Routine (Spec §8, §12) ──────────────────────────────────────────────────
@@ -349,6 +470,9 @@ export interface NeedToKnowStep extends BaseStep {
   summary?: string
   priority?: 'medium' | 'high' | 'urgent'
   reason?: string
+  /** ADR 0026 — 'morning_brief' tags the published NTK so it routes to the
+   *  Home 晨报 carousel (and out of 必读). Omitted/null → 必读 page. */
+  kind?: 'morning_brief' | 'email' | null
 }
 
 export interface ApprovalStep extends BaseStep {
@@ -915,6 +1039,39 @@ export interface JobSearchSettings {
   jobIntent?: JobIntent
 }
 
+/** Non-secret ToDo settings (ADR 0027 — ToDo 重构). Controls the mail-driven
+ *  ToDo pipeline: a one-time 60-day cold-start backfill per account, a
+ *  configurable list of school-spam subject tokens to skip, and a kill switch. */
+export interface TodoSettings {
+  /** One-time purge of legacy email-origin ToDos already done (boot guard). */
+  purgeDone?: boolean
+  /** Versioned purge guard: the boot purge re-runs whenever this is below the
+   *  container's `PURGE_VERSION`. Bump the version after each filtering fix
+   *  that needs to re-clear stale email-origin items (NTKs / ToDos / 投递)
+   *  and re-backfill with the fixed filters. Idempotent — a higher persisted
+   *  version means the purge is a no-op on the next boot. */
+  purgeVersion?: number
+  /** Connected account ids that have already run the 60-day cold-start
+   *  backfill. Keyed by accountId (not provider type) so re-connecting an
+   *  account can re-trigger via the manual 重新冷启动 button. */
+  coldStartDone?: string[]
+  /** Subject-substring tokens treated as school-wide broadcast spam (e.g.
+   *  `[student_ips]`). Such mail never reaches an LLM and never produces a
+   *  ToDo. Defaults to `['[student_ips]']` downstream. */
+  skipTokens?: string[]
+  /** Master switch for the cold-start backfill (default on). */
+  coldStartEnabled?: boolean
+  /** Emails per LLM batch during the cold-start backfill (default 20). */
+  backfillBatchSize?: number
+  /** One-time guard: `seedDemoData()` has already seeded its AI产品经理 demo
+   *  funnel. Set after the first (and only) seed so demo 投递 rows are never
+   *  re-created — the purge can clear them (they are source:'email') without
+   *  seedDemoData re-seeding them on the next boot. Demo data is for a fresh
+   *  empty install; a real user with connected providers must not see fake
+   *  投递 ("我啥时候投递过" — ADR 0027 fix). */
+  demoSeeded?: boolean
+}
+
 /** The user's structured job-search intent (Milestone C). Matched
  *  deterministically + by the agent against `BossJob` metadata. salaryMin/Max
  *  are monthly figures in 千 (k), e.g. 25 / 35 = 25-35k. */
@@ -1152,6 +1309,26 @@ export interface DailyFortuneInput {
   date: string
 }
 
+/** Daily weather briefing input (ADR 0026). The raw wttr.in figures are fed to
+ *  the LLM (or the deterministic stub when no key) which polishes them into a
+ *  Chinese summary + clothing advice + practical 宜/忌. No untrusted text enters
+ *  this step — wttr.in output is treated as inert DATA (§17). */
+export interface DailyWeatherInput {
+  /** Real weather figures (trusted DATA — wttr.in, not user/external prose). */
+  weather: WeatherData
+}
+
+/** Daily weather briefing output — the polished, cacheable briefing shape. This
+ *  is what `generate_daily_weather` returns (minus the date/city the service
+ *  stamps on afterwards when assembling the cached WeatherBriefing). */
+export interface DailyWeatherOutput {
+  tempText: string
+  summary: string
+  clothing: string
+  yi: string[]
+  ji: string[]
+}
+
 /** Daily fortune output — a short narrative + one practical tip. Deliberately
  *  NOT a PublishableBrief: it never publishes to Need-to-Know (no sourceRefs /
  *  suggestedActions fit a horoscope). */
@@ -1180,14 +1357,10 @@ export type RobotView = (typeof ROBOT_VIEWS)[number]
 /** The pages the workbench can deep-link to via `onNavigate` (M4). */
 export const WORKBENCH_PAGES = [
   'Home',
-  'Assistant',
   'Need to Know',
-  'Tasks',
   'Applications',
-  'InterviewNotes',
   'Routines',
   'Approvals',
-  'Activity',
   'Memory',
   'Integrations'
 ] as const
@@ -1237,12 +1410,32 @@ export interface DaymateApi {
   /** Delete a custom routine (M5 §14). Preset routines cannot be deleted. */
   deleteRoutine(routineId: string): Promise<void>
 
-  // Tasks (M1)
+  // Tasks (M1). create/delete/onTasksChanged added ADR 0026 (Home ToDo mgmt).
   listTasks(): Promise<Task[]>
+  createTask(input: TaskCreateInput): Promise<Task>
   updateTask(id: string, patch: TaskUpdate): Promise<Task>
+  deleteTask(id: string): Promise<void>
+  onTasksChanged(cb: () => void): () => void
 
-  // Need to Know (M1)
+  // Need to Know (M1). listMorningBriefs added ADR 0026 (Home 晨报 carousel).
   listNeedToKnow(): Promise<NeedToKnow[]>
+  dismissNeedToKnow(id: string): Promise<void>
+  clearAllNeedToKnow(): Promise<void>
+  /** ADR 0029 — edit a 必读 item's headline (title) / summary inline. */
+  updateNeedToKnow(id: string, patch: { title?: string; summary?: string }): Promise<void>
+  /** Last ~7 morning-brief NTKs (newest first) for the Home 晨报 carousel. */
+  listMorningBriefs(): Promise<NeedToKnow[]>
+  /**
+   * ADR 0029 — lazy R0 fetch of ALL emails in a conversation for the 必读
+   * thread-Item expand. Gmail uses threads.get; 163 does a best-effort IMAP
+   * header search. Returns [] on any failure (renderer falls back to the
+   * surfaced sourceRefs). Never persisted (§17).
+   */
+  getEmailThread(input: {
+    threadId: string
+    provider: 'gmail' | 'mail163'
+    accountId: string
+  }): Promise<NormalizedEmail[]>
 
   // Activity (M1)
   listActivity(runId?: string): Promise<ActivityEvent[]>
@@ -1260,8 +1453,16 @@ export interface DaymateApi {
   listMemory(): Promise<MemoryItem[]>
   saveMemory(input: MemorySaveInput): Promise<MemoryItem>
   updateMemory(id: string, patch: MemoryUpdate): Promise<MemoryItem>
+  /** Confirm a proposed item via the service path (one-per-key demote). */
+  confirmMemory(id: string): Promise<MemoryItem>
   deleteMemory(id: string): Promise<void>
   onMemoryChanged(cb: (items: MemoryItem[]) => void): () => void
+  /**
+   * On-demand persona inference (§16): reads the user's own sent mail from
+   * every connected provider, runs the `generate_persona` agent step, and
+   * saves each proposal as `confirmed:false`. Returns the persona summary.
+   */
+  generatePersona(): Promise<PersonaOutput>
 
   // LLM configuration (M3) — key is write-only; getLlmConfig never returns it.
   getLlmConfig(): Promise<LlmConfig>
@@ -1320,7 +1521,7 @@ export interface DaymateApi {
     pending: number
     message: string
   }>
-  generateResume(applicationId: string): Promise<ResumeVersion>
+  uploadResume(applicationId: string): Promise<ResumeVersion | null>
   generatePrepMaterial(applicationId: string): Promise<PrepMaterial>
   listResumeVersions(applicationId: string): Promise<ResumeVersion[]>
   listPrepMaterials(applicationId: string): Promise<PrepMaterial[]>
@@ -1359,6 +1560,20 @@ export interface DaymateApi {
   getBirthData(): Promise<BirthData | undefined>
   setBirthData(birth: BirthData): Promise<BirthData>
   clearBirthData(): Promise<void>
+  // ── ADR 0026: Home 今日天气 + 天气城市 + 晨报轮播 ──
+  /** Today's cached weather briefing (null when not generated / stale). */
+  getWeather(): Promise<WeatherBriefing | null>
+  /** Force a fresh fetch + generate + cache. Returns the new briefing or null. */
+  refreshWeather(): Promise<WeatherBriefing | null>
+  getWeatherCity(): Promise<string>
+  setWeatherCity(city: string): Promise<string>
+  // ── ADR 0027: ToDo overhaul settings + manual cold-start re-scan ──
+  /** ToDo pipeline settings (skip-tokens, cold-start toggle, done accounts). */
+  getTodoSettings(): Promise<TodoSettings>
+  setTodoSettings(todo: TodoSettings): Promise<TodoSettings>
+  /** Re-run the 60-day cold-start backfill for one account (accountId =
+   *  'gmail-real' / 'mail163-real'). Fire-and-forget on the main side. */
+  triggerTodoColdStart(accountId: string): Promise<{ ok: boolean; message?: string }>
 }
 
 // Contract on the `window.daymate` global injected by preload.

@@ -48,11 +48,37 @@ export interface RoutineStore {
   getTaskBySource(sourceType: string, sourceId?: string): Task | undefined
   listTasks(): Task[]
   updateTask(id: string, patch: Partial<Task>): Task | undefined
+  /** Hard-delete a task (user-removed ToDo). ADR 0026. */
+  deleteTask(id: string): void
 
   // Need to Know
   createNeedToKnow(item: NeedToKnow): void
   listNeedToKnow(): NeedToKnow[]
   dismissNeedToKnow(id: string): void
+  /** Delete every non-dismissed NTK item. Used by the 必读 "清空全部" reset. */
+  deleteAllNeedToKnow(): void
+  /** Last `days` morning-brief NTKs (kind='morning_brief'), newest first, for
+   *  the Home 晨报 carousel. ADR 0026. */
+  listMorningBriefs(days: number): NeedToKnow[]
+  /** Every NTK including dismissed ones, newest first. ADR 0028 purge — the
+   *  mock-calendar "Q3 roadmap" briefs a user dismissed before real providers
+   *  connected survive `list()` (excludes dismissed) + `listMorningBriefs()`
+   *  (kind filter); this scans the full table so the one-time purge can clear
+   *  mock-sourced stragglers. */
+  listAllNeedToKnow(): NeedToKnow[]
+  /** Delete every non-dismissed NTK item whose title matches exactly.
+   * One-time boot migration: clears stale "收件箱已分类" noise after the
+   * auto_inbox template dropped its publish step. */
+  deleteNeedToKnowByTitle(title: string): void
+  /** Hard-delete a single NTK item by id (ignores dismissed state). ADR 0027
+   *  purge — clears stale email-origin 必读 items so the re-backfill rebuilds
+   *  a clean set (a deleted NTK's sourceRef leaves the dedup `seen` set, so
+   *  the fixed classify pass re-evaluates the mail and drops junk). */
+  deleteNeedToKnowById(id: string): void
+  /** Patch a persisted NTK (ADR 0029 thread-merge: append a new email's
+   *  sourceRef, bump headline to latest, touch updatedAt). Only the
+   *  thread-merge-relevant fields are honored. */
+  updateNeedToKnow(id: string, patch: Partial<NeedToKnow>): void
 
   // Activity
   createActivity(event: ActivityEvent): void

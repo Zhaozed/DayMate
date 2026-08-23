@@ -50,12 +50,23 @@ const api: DaymateApi = {
   createRoutine: (def) => ipcRenderer.invoke(IPC.ROUTINE_CREATE, def),
   deleteRoutine: (routineId) => ipcRenderer.invoke(IPC.ROUTINE_DELETE, routineId),
 
-  // Tasks (M1)
+  // Tasks (M1). CREATE/DELETE/onTasksChanged added in ADR 0026 (Home ToDo mgmt).
   listTasks: () => ipcRenderer.invoke(IPC.TASK_LIST),
+  createTask: (input) => ipcRenderer.invoke(IPC.TASK_CREATE, input),
   updateTask: (id, patch) => ipcRenderer.invoke(IPC.TASK_UPDATE, id, patch),
+  deleteTask: (id) => ipcRenderer.invoke(IPC.TASK_DELETE, id),
+  onTasksChanged: (cb) => {
+    const listener = (_e: unknown): void => cb()
+    ipcRenderer.on(IPC.TASKS_CHANGED, listener)
+    return () => ipcRenderer.removeListener(IPC.TASKS_CHANGED, listener)
+  },
 
-  // Need to Know (M1)
+  // Need to Know (M1). listMorningBriefs added ADR 0026 (Home 晨报 carousel).
   listNeedToKnow: () => ipcRenderer.invoke(IPC.NEED_TO_KNOW_LIST),
+  dismissNeedToKnow: (id) => ipcRenderer.invoke(IPC.NEED_TO_KNOW_DISMISS, id),
+  clearAllNeedToKnow: () => ipcRenderer.invoke(IPC.NEED_TO_KNOW_CLEAR_ALL),
+  /** ADR 0029 — edit a 必读 item's headline / summary inline. */
+  updateNeedToKnow: (id, patch) => ipcRenderer.invoke(IPC.NEED_TO_KNOW_UPDATE, id, patch),
 
   // Activity (M1)
   listActivity: (runId) => ipcRenderer.invoke(IPC.ACTIVITY_LIST, runId),
@@ -81,12 +92,14 @@ const api: DaymateApi = {
   listMemory: () => ipcRenderer.invoke(IPC.MEMORY_LIST),
   saveMemory: (input) => ipcRenderer.invoke(IPC.MEMORY_SAVE, input),
   updateMemory: (id, patch) => ipcRenderer.invoke(IPC.MEMORY_UPDATE, id, patch),
+  confirmMemory: (id) => ipcRenderer.invoke(IPC.MEMORY_CONFIRM, id),
   deleteMemory: (id) => ipcRenderer.invoke(IPC.MEMORY_DELETE, id),
   onMemoryChanged: (cb) => {
     const listener = (_e: unknown, items: Parameters<typeof cb>[0]): void => cb(items)
     ipcRenderer.on(IPC.MEMORY_CHANGED, listener)
     return () => ipcRenderer.removeListener(IPC.MEMORY_CHANGED, listener)
   },
+  generatePersona: () => ipcRenderer.invoke(IPC.MEMORY_GENERATE_PERSONA),
 
   // LLM configuration (M3). The key is WRITE-ONLY: it is sent to main and
   // encrypted at rest; it is never read back into the renderer. getLlmConfig
@@ -140,7 +153,7 @@ const api: DaymateApi = {
 
   // ── Milestone A: email inference, AI generation, recycle bin, config ──
   syncEmailApplications: () => ipcRenderer.invoke(IPC.APPLICATION_SYNC_EMAIL),
-  generateResume: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_GENERATE_RESUME, applicationId),
+  uploadResume: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_UPLOAD_RESUME, applicationId),
   generatePrepMaterial: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_GENERATE_PREP, applicationId),
   listResumeVersions: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_LIST_RESUMES, applicationId),
   listPrepMaterials: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_LIST_PREP, applicationId),
@@ -156,6 +169,7 @@ const api: DaymateApi = {
   confirmEmailMatch: (messageId, applicationId) =>
     ipcRenderer.invoke(IPC.EMAIL_MATCH_CONFIRM, messageId, applicationId),
   ignoreEmailMatch: (messageId) => ipcRenderer.invoke(IPC.EMAIL_MATCH_IGNORE, messageId),
+  getEmailThread: (input) => ipcRenderer.invoke(IPC.EMAIL_THREAD_GET, input),
   onEmailMatchesChanged: (cb) => {
     const listener = (_e: unknown, matches: Parameters<typeof cb>[0]): void => cb(matches)
     ipcRenderer.on(IPC.EMAIL_MATCHES_CHANGED, listener)
@@ -176,7 +190,18 @@ const api: DaymateApi = {
   // Milestone E — birth data for the daily 运势 (non-secret settings.json).
   getBirthData: () => ipcRenderer.invoke(IPC.BIRTH_DATA_GET),
   setBirthData: (birth) => ipcRenderer.invoke(IPC.BIRTH_DATA_SET, birth),
-  clearBirthData: () => ipcRenderer.invoke(IPC.BIRTH_DATA_CLEAR)
+  clearBirthData: () => ipcRenderer.invoke(IPC.BIRTH_DATA_CLEAR),
+  // ADR 0026 — Home 今日天气 (cached briefing + manual refresh) + 天气城市 +
+  // 晨报轮播 (last 7 morning-brief NTKs).
+  getWeather: () => ipcRenderer.invoke(IPC.WEATHER_GET),
+  refreshWeather: () => ipcRenderer.invoke(IPC.WEATHER_REFRESH),
+  getWeatherCity: () => ipcRenderer.invoke(IPC.WEATHER_CITY_GET),
+  setWeatherCity: (city) => ipcRenderer.invoke(IPC.WEATHER_CITY_SET, city),
+  listMorningBriefs: () => ipcRenderer.invoke(IPC.MORNING_BRIEF_LIST),
+  // ADR 0027 — ToDo overhaul settings + manual cold-start re-scan.
+  getTodoSettings: () => ipcRenderer.invoke(IPC.TODO_GET_SETTINGS),
+  setTodoSettings: (todo) => ipcRenderer.invoke(IPC.TODO_SET_SETTINGS, todo),
+  triggerTodoColdStart: (accountId) => ipcRenderer.invoke(IPC.TODO_COLD_START, accountId)
 }
 
 // contextIsolation is on; this is the safe way to give the renderer a typed API.

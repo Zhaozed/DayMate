@@ -9,6 +9,8 @@ import {
   TASK_STATUSES,
   TASK_PRIORITIES,
   TASK_SOURCE_TYPES,
+  TASK_CATEGORIES,
+  BRIEFING_CATEGORIES,
   APPROVAL_POLICIES,
   ROUTINE_OUTPUTS,
   ROUTINE_RUN_STATUSES,
@@ -87,6 +89,11 @@ export const taskStatusSchema = z.enum(TASK_STATUSES)
 export const taskPrioritySchema = z.enum(TASK_PRIORITIES)
 export const taskSourceTypeSchema = z.enum(TASK_SOURCE_TYPES)
 
+export const taskCategorySchema = z.enum(TASK_CATEGORIES)
+
+// 必读 top-level section tag (ADR 0029). Distinct from taskCategorySchema.
+export const briefingCategorySchema = z.enum(BRIEFING_CATEGORIES)
+
 export const taskSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -97,6 +104,9 @@ export const taskSchema = z.object({
   sourceType: taskSourceTypeSchema,
   sourceId: z.string().optional(),
   routineRunId: z.string().optional(),
+  sourceProvider: z.enum(['gmail', 'mail163']).optional(),
+  category: taskCategorySchema.optional(),
+  sourceLink: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string()
 })
@@ -169,7 +179,10 @@ export const routineStepSchema = z.discriminatedUnion('type', [
     title: z.string().optional(),
     summary: z.string().optional(),
     priority: z.enum(['medium', 'high', 'urgent']).optional(),
-    reason: z.string().optional()
+    reason: z.string().optional(),
+    // ADR 0026 — routes the NTK to the Home 晨报 carousel ('morning_brief')
+    // instead of the 必读 list. Absent = legacy/email-driven (必读).
+    kind: z.enum(['morning_brief', 'email']).optional()
   }),
   z.object({
     id: z.string(),
@@ -265,7 +278,18 @@ export const classificationSchema = z.object({
   topic: emailTopicSchema,
   untrusted: z.boolean(),
   reason: z.string(),
-  suggestedAction: suggestedActionSchema.optional()
+  suggestedAction: suggestedActionSchema.optional(),
+  // ADR 0026 — fold ToDo extraction into the classify call (no new LLM). The
+  // model fills these ONLY when a genuinely useful, actionable next step exists
+  // + a date is mentioned; absence means "no ToDo worth creating" (the
+  // 没用的别生产 filter is the model's own judgment).
+  todoTitle: z.string().optional(),
+  dueDate: z.string().optional(),
+  category: taskCategorySchema.optional(),
+  // ADR 0029 — 必读 top-level section tag (学校/求职/日常/其他). Filled on
+  // EVERY surfaced email (not just todoTitle) so the 必读 page can group into
+  // 4 sections. Distinct from the 5-value `category` (which tags the ToDo).
+  briefingCategory: briefingCategorySchema.optional()
 })
 
 // ── LLM configuration (M3) ──────────────────────────────────────────────────
@@ -473,7 +497,13 @@ export const classifyApplicationEmailOutputSchema = z.object({
       salary: z.string().optional(),
       confidence: z.enum(['high', 'medium', 'low']),
       evidence: z.string(),
-      untrusted: z.boolean()
+      untrusted: z.boolean(),
+      // ADR 0026 — fold ToDo extraction into the funnel classify call (no new
+      // LLM). Filled when an interview/written-test notice etc. carries a
+      // concrete next step + date; absence = no ToDo.
+      todoTitle: z.string().optional(),
+      dueDate: z.string().optional(),
+      category: taskCategorySchema.optional()
     })
   ),
   matched: z.number().int(),
@@ -504,6 +534,19 @@ export const funnelReviewOutputSchema = z.object({
     })
   ),
   memoryProposals: z.array(memoryProposalSchema).optional()
+})
+
+// ── Weather briefing agent-step output (ADR 0026) ─────────────────────────────
+// The `generate_daily_weather` step takes real wttr.in data + produces the
+// Home 今日天气 card payload: Chinese summary, concrete clothing advice, and
+// practical 宜/忌 (NOT mystical — that stays in the 运势 bubble). The
+// deterministic stub (no LLM key) maps temp/condition → clothing/yi/ji by rules.
+export const weatherBriefingSchema = z.object({
+  tempText: z.string(),
+  summary: z.string(),
+  clothing: z.string(),
+  yi: z.array(z.string()),
+  ji: z.array(z.string())
 })
 
 // ── Milestone C: job recommendation (score_job_matches) ───────────────────
@@ -540,6 +583,21 @@ export const dailyFortuneOutputSchema = z.object({
   summary: z.string(),
   tip: z.string(),
   mood: z.number().int().min(0).max(100)
+})
+
+// ── Persona inference agent-step output (§16 town-style profile) ─────────────
+// The model reads the user's OWN sent mail (trusted, the opposite of §17
+// untrusted inbound — framed by frameSentReply) + existing memory, and proposes
+// persona / writing_style / email_tone / working_hours memory items. Proposals
+// land confirmed:false; the user confirms/edits/dismisses on the Memory page
+// (ADR 0009 "declarative proposals, not runtime injection"). On-demand manual
+// AI (not via routine engine), mirroring generateResume. enforceTrust caps
+// input length (§12 defense-in-depth); proposals are trusted-derived (user's
+// own sent mail), so no untrusted stripping is needed — but the overlay still
+// validates memoryProposals via the shared guard.
+export const personaOutputSchema = z.object({
+  summary: z.string(),
+  memoryProposals: z.array(memoryProposalSchema).optional()
 })
 
 export const applicationSchema = z.object({

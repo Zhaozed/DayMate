@@ -245,3 +245,100 @@ describe('email sync — incremental cursor', () => {
   })
 })
 
+// A bulk-aware email builder (ADR 0023 funnel pre-filter tests).
+function makeBulkEmail(opts: {
+  messageId: string
+  receivedAt: string
+  fromAddress: string
+  fromName?: string
+  subject: string
+  body: string
+  bulk?: boolean
+}): NormalizedEmail {
+  return {
+    provider: 'mail163',
+    accountId: 'mail163-test',
+    messageId: opts.messageId,
+    from: { address: opts.fromAddress, name: opts.fromName ?? '' },
+    to: [{ address: 'me@example.com' }],
+    cc: [],
+    subject: opts.subject,
+    textBody: opts.body,
+    receivedAt: opts.receivedAt,
+    unread: false,
+    labels: [],
+    bulk: opts.bulk ?? true
+  }
+}
+
+describe('email sync — 群发预过滤（漏斗路径, ADR 0023）', () => {
+  it('pure-marketing bulk (ads keywords) → classify_application_email NOT called, no 投递', async () => {
+    const svc = makeService()
+    const { rt, count } = countingRuntime()
+    const before = count()
+    const emails = [
+      makeBulkEmail({
+        messageId: '500',
+        receivedAt: '2026-08-10T10:00:00.000Z',
+        fromAddress: 'noreply@career-weekly.com',
+        subject: '本周热门职位推荐 限时优惠',
+        body: '点击查看更多职位。如不想收到请退订 unsubscribe。'
+      })
+    ]
+    const res = await svc.syncFromEmails([mail163Provider(emails)], rt, {})
+    expect(count()).toBe(before) // pure ads bulk skipped before LLM
+    expect(res.created).toBe(0)
+    expect(svc.list().length).toBe(0)
+  })
+
+  it('bulk application-confirmation (投递成功, not ads) → KEPT → classified (not dropped)', async () => {
+    const svc = makeService()
+    const { rt, count } = countingRuntime()
+    const before = count()
+    const emails = [
+      makeBulkEmail({
+        messageId: '501',
+        receivedAt: '2026-08-10T10:00:00.000Z',
+        fromAddress: 'noreply@zhipuai.com',
+        fromName: '智谱AI招聘',
+        subject: '投递成功 — 后端工程师',
+        body: '已收到您的简历，HR 将尽快审阅。'
+      })
+    ]
+    const res = await svc.syncFromEmails([mail163Provider(emails)], rt, {})
+    // 投递确认 is bulk but NOT ads → funnel keeps it → classify_application_email ran.
+    expect(count()).toBeGreaterThan(before)
+    // It was processed (synced/created/pending) — NOT silently dropped by the pre-filter.
+    expect(res.synced + res.created + res.pending).toBeGreaterThan(0)
+  })
+
+  it('mixed delta: ads bulk skipped, 投递确认 bulk kept', async () => {
+    const svc = makeService()
+    const { rt, count } = countingRuntime()
+    const before = count()
+    const emails = [
+      makeBulkEmail({
+        messageId: '502',
+        receivedAt: '2026-08-10T09:00:00.000Z',
+        fromAddress: 'noreply@edm.com',
+        subject: '招聘周报 限时优惠',
+        body: '退订 unsubscribe'
+      }),
+      makeBulkEmail({
+        messageId: '503',
+        receivedAt: '2026-08-10T10:00:00.000Z',
+        fromAddress: 'noreply@zhipuai.com',
+        fromName: '智谱AI招聘',
+        subject: '投递成功 — 后端工程师',
+        body: '已收到您的简历'
+      })
+    ]
+    const res = await svc.syncFromEmails([mail163Provider(emails)], rt, {})
+    // classify ran exactly once — on the kept 投递确认 (the ads edm was filtered out).
+    expect(count()).toBe(before + 1)
+    // The kept email was processed; the ads edm produced nothing.
+    expect(res.synced + res.created + res.pending).toBeGreaterThan(0)
+    expect(svc.list().some((v) => v.application.company === '招聘周报')).toBe(false)
+  })
+})
+

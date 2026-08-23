@@ -26,6 +26,7 @@ export type RobotState = (typeof ROBOT_STATES)[number]
 export type TaskStatus = (typeof TASK_STATUSES)[number]
 export type TaskPriority = (typeof TASK_PRIORITIES)[number]
 export type TaskSourceType = (typeof TASK_SOURCE_TYPES)[number]
+export type TaskCategory = (typeof TASK_CATEGORIES)[number]
 export type IntegrationStatus = (typeof INTEGRATION_STATUSES)[number]
 export type AccountProvider = (typeof ACCOUNT_PROVIDERS)[number]
 export type RoutineRunStatus = (typeof ROUTINE_RUN_STATUSES)[number]
@@ -58,6 +59,23 @@ export const TASK_STATUSES = [
 export const TASK_PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const
 
 export const TASK_SOURCE_TYPES = ['email', 'calendar', 'assistant', 'routine'] as const
+
+// ToDo categories (ADR 0027 — ToDo 重构). A coarse domain tag surfaced on
+// each Home ToDo so the user can tell 学校 / 求职 / 账单 / 会议 / 其他 apart at
+// a glance. Wire identifiers stay English; the UI maps them to Chinese
+// labels (学校/求职/账单/会议/其他). The model fills `category` in the
+// classify output when it sees the mail; the deterministic stub falls back to
+// a topic-derived value.
+export const TASK_CATEGORIES = ['school', 'job', 'bill', 'meeting', 'other'] as const
+
+// 必读 (NeedToKnow) top-level briefing categories (ADR 0029 — 必读页重构). A
+// 4-value section tag that organizes the 必读 page into 学校 / 求职 / 日常 / 其他
+// sections. Distinct from the 5-value TASK_CATEGORIES (which tags Home ToDos):
+// 必读 collapses 账单+会议+日常事务 into 'daily' per the user's 4-section
+// layout. The model fills `briefingCategory` on every surfaced email; the stub
+// falls back to a topic-derived value.
+export const BRIEFING_CATEGORIES = ['school', 'job', 'daily', 'other'] as const
+export type BriefingCategory = (typeof BRIEFING_CATEGORIES)[number]
 
 export const INTEGRATION_STATUSES = [
   'connected',
@@ -259,11 +277,20 @@ export const IPC = {
   ROUTINE_RESUME_ALL: 'daymate:routine:resume-all',
   ROUTINE_CREATE: 'daymate:routine:create',
   ROUTINE_DELETE: 'daymate:routine:delete',
-  // Tasks (M1)
+  // Tasks (M1). CREATE/DELETE added in ADR 0026 so the user can manage ToDos
+  // on the Home page (auto-generated mail ToDos + manual ones share the table).
+  // TASKS_CHANGED pushes on any task mutation so Home refreshes live.
   TASK_LIST: 'daymate:task:list',
+  TASK_CREATE: 'daymate:task:create',
   TASK_UPDATE: 'daymate:task:update',
+  TASK_DELETE: 'daymate:task:delete',
+  TASKS_CHANGED: 'daymate:task:changed',
   // Need to Know (M1)
   NEED_TO_KNOW_LIST: 'daymate:need-to-know:list',
+  NEED_TO_KNOW_DISMISS: 'daymate:need-to-know:dismiss',
+  NEED_TO_KNOW_CLEAR_ALL: 'daymate:need-to-know:clear-all',
+  /** ADR 0029 — user edits a 必读 item's headline/summary inline. */
+  NEED_TO_KNOW_UPDATE: 'daymate:need-to-know:update',
   // Activity (M1)
   ACTIVITY_LIST: 'daymate:activity:list',
   ACTIVITY_CHANGED: 'daymate:activity:changed',
@@ -277,8 +304,10 @@ export const IPC = {
   MEMORY_LIST: 'daymate:memory:list',
   MEMORY_SAVE: 'daymate:memory:save',
   MEMORY_UPDATE: 'daymate:memory:update',
+  MEMORY_CONFIRM: 'daymate:memory:confirm',
   MEMORY_DELETE: 'daymate:memory:delete',
   MEMORY_CHANGED: 'daymate:memory:changed',
+  MEMORY_GENERATE_PERSONA: 'daymate:memory:generate-persona',
   // LLM configuration (M3) — the key is write-only; GET never returns it.
   LLM_GET_CONFIG: 'daymate:llm:get-config',
   LLM_SET_CONFIG: 'daymate:llm:set-config',
@@ -321,7 +350,7 @@ export const IPC = {
   APPLICATION_SYNC_BOSS: 'daymate:application:sync-boss',
   APPLICATION_CHANGED: 'daymate:application:changed',
   APPLICATION_SYNC_EMAIL: 'daymate:application:sync-email',
-  APPLICATION_GENERATE_RESUME: 'daymate:application:generate-resume',
+  APPLICATION_UPLOAD_RESUME: 'daymate:application:upload-resume',
   APPLICATION_GENERATE_PREP: 'daymate:application:generate-prep',
   APPLICATION_LIST_RESUMES: 'daymate:application:list-resumes',
   APPLICATION_LIST_PREP: 'daymate:application:list-prep',
@@ -356,7 +385,27 @@ export const IPC = {
   // Milestone E — birth data for the daily 运势 (non-secret settings.json).
   BIRTH_DATA_GET: 'daymate:birth-data:get',
   BIRTH_DATA_SET: 'daymate:birth-data:set',
-  BIRTH_DATA_CLEAR: 'daymate:birth-data:clear'
+  BIRTH_DATA_CLEAR: 'daymate:birth-data:clear',
+  // ADR 0026 — Home 天气卡 (real weather via wttr.in + LLM-polished copy,
+  // cached in non-secret settings.json) + 晨报轮播 (morning-brief history, 7d)
+  // + 天气城市 config. WEATHER_GET returns the cache; WEATHER_REFRESH forces a
+  // fresh generate. MORNING_BRIEF_LIST returns the last 7 morning-brief NTKs.
+  WEATHER_GET: 'daymate:weather:get',
+  WEATHER_REFRESH: 'daymate:weather:refresh',
+  WEATHER_CITY_GET: 'daymate:weather:city-get',
+  WEATHER_CITY_SET: 'daymate:weather:city-set',
+  MORNING_BRIEF_LIST: 'daymate:morning-brief:list',
+  // ADR 0027 — ToDo overhaul: school-spam skip-token editor + cold-start
+  // toggle + manual re-scan. All R1 local reads/writes (§15 — settings.json is
+  // local config, no external side-effect). COLD_START clears one account's
+  // `coldStartDone` entry and fires the backfill (fire-and-forget in the handler).
+  TODO_GET_SETTINGS: 'daymate:todo:get-settings',
+  TODO_SET_SETTINGS: 'daymate:todo:set-settings',
+  TODO_COLD_START: 'daymate:todo:cold-start',
+  // ADR 0029 — 必读 thread context. Lazy R0 read-only fetch of ALL emails in a
+  // conversation (Gmail threads.get / 163 IMAP header search, best-effort). Used
+  // by the 必读 page to expand a thread Item; never persisted (§17).
+  EMAIL_THREAD_GET: 'daymate:email:thread:get'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]
@@ -369,12 +418,7 @@ export const ROUTINE_MAX_STEPS = 100
 // Delete control on preset rows.
 export const PRESET_ROUTINE_IDS = [
   'morning_brief',
-  'auto_inbox',
-  'draft_review',
-  'meeting_prep',
-  'daily_work_summary',
-  'interview_prep',
-  'job_recommendation'
+  'interview_prep'
 ] as const
 export type PresetRoutineId = (typeof PRESET_ROUTINE_IDS)[number]
 

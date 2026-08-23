@@ -359,10 +359,16 @@ export function createToolRegistry(): ToolRegistry {
   })
 
   registry.register({
+    // §15 exception (ADR 0022): draft CREATION is R1 (auto, no approval) at
+    // the user's explicit opt-out — drafts auto-save to the Drafts folder and
+    // the user reviews + sends manually from the mail client, so the only
+    // external write here is a low-risk draft insert (never a send). Draft
+    // SENDING (email.send_draft below) stays R3 / approval-gated.
     name: 'email.create_draft',
-    description: 'Create an email draft. R3 — preview + approval required before send.',
-    risk: 'R3',
-    requiresApproval: true,
+    description:
+      'Create an email draft (auto — no approval; §15 exception ADR 0022). The user reviews + sends the draft manually. Sending itself is email.send_draft (R3).',
+    risk: 'R1',
+    requiresApproval: false,
     parameters: z.object({
       accountId: z.string(),
       threadId: z.string().optional(),
@@ -536,10 +542,12 @@ export function createToolRegistry(): ToolRegistry {
     }
   })
 
-  // ── Memory (Spec §16) — search = R0; save/delete = R1 (local writes) ──────
-  // memory.save lands a PROPOSED item (confirmed:false); the user confirms it
-  // in the Memory page. It is never active until confirmed. Forbidden content
-  // (tokens, full email bodies, inferred traits …) is rejected by the service.
+  // ── Memory (Spec §16) — search = R0; save = R1 (local writes) ─────────────
+  // memory.save auto-confirms and merges/updates the existing value for that
+  // key in place (no manual confirmation gate — user preference). A user-
+  // authored value for the same key is protected from agent overwrite (merge,
+  // not clobber). Forbidden content (tokens, full email bodies, inferred
+  // traits …) is rejected by validateMemoryContent before persisting.
   registry.register({
     name: 'memory.search',
     description: 'Search confirmed memory entries by free-text query.',
@@ -556,7 +564,7 @@ export function createToolRegistry(): ToolRegistry {
   registry.register({
     name: 'memory.save',
     description:
-      'Propose a memory entry. Lands as proposed (not active) until the user confirms it (Spec §16).',
+      'Save a memory entry. Auto-confirms and merges/updates the existing value for that key (user-authored values are protected). Forbidden content is rejected (Spec §16).',
     risk: 'R1',
     requiresApproval: false,
     parameters: z.object({
@@ -575,16 +583,16 @@ export function createToolRegistry(): ToolRegistry {
     }
   })
 
-  // Save a batch of passive memory proposals from an agent step (Spec §16 —
-  // "town"-style: agent proposes, user confirms). Each proposal loops through
-  // MemoryService.save → confirmed:false. Per-item try/catch: a rejected item
-  // (validateMemoryContent throws on a secret / full email body / forbidden
-  // inferred trait) becomes a logged Activity, never fails the run. R0: these
-  // are local proposed-only writes, not external actions.
+  // Save a batch of passive memory proposals from an agent step (Spec §16).
+  // Each proposal loops through MemoryService.save → auto-confirms and merges/
+  // updates the existing value for that key (user-authored protected). Per-item
+  // try/catch: a rejected item (validateMemoryContent throws on a secret / full
+  // email body / forbidden inferred trait) becomes a logged Activity, never
+  // fails the run. R0: these are local writes, not external actions.
   registry.register({
     name: 'memory.save_proposals',
     description:
-      'Save a batch of passive memory proposals (Spec §16). Each lands proposed (confirmed:false) for the user to confirm. Per-item failures are logged, not fatal.',
+      'Save a batch of memory proposals (Spec §16). Each auto-confirms and merges/updates the existing value for that key. Per-item failures are logged, not fatal.',
     risk: 'R0',
     requiresApproval: false,
     parameters: z.object({

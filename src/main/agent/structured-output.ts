@@ -50,6 +50,8 @@ export interface OutputSchemas {
   submit_funnel_review: TSchema
   submit_score_job_matches: TSchema
   submit_daily_fortune: TSchema
+  submit_daily_weather: TSchema
+  submit_persona: TSchema
 }
 
 /**
@@ -84,6 +86,7 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
       Type.Literal('contact'),
       Type.Literal('project'),
       Type.Literal('notification_prefs'),
+      Type.Literal('job_search_profile'),
       Type.Literal('other')
     ]),
     value: Type.String()
@@ -141,7 +144,25 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
         topic,
         untrusted: Type.Boolean(),
         reason: Type.String(),
-        suggestedAction: Type.Optional(suggestedAction)
+        suggestedAction: Type.Optional(suggestedAction),
+        // ADR 0026 — when the email implies a concrete, useful next action,
+        // the model fills todoTitle (an easy-to-understand ToDo phrase). Leaving
+        // it empty = no useful action = no ToDo is created. dueDate (ISO date)
+        // only when the email states a concrete date/deadline/interview time.
+        todoTitle: Type.Optional(Type.String()),
+        dueDate: Type.Optional(Type.String()),
+        // ADR 0027 — coarse domain tag (学校/求职/账单/会议/其他). The model
+        // fills this from the mail content; absence falls back to a topic-derived
+        // value in the deterministic stub.
+        category: Type.Optional(
+          Type.Union([
+            Type.Literal('school'),
+            Type.Literal('job'),
+            Type.Literal('bill'),
+            Type.Literal('meeting'),
+            Type.Literal('other')
+          ])
+        )
       })
     ),
     counts: Type.Object({
@@ -257,7 +278,22 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
         salary: Type.Optional(Type.String()),
         confidence,
         evidence: Type.String(),
-        untrusted: Type.Boolean()
+        untrusted: Type.Boolean(),
+        // ADR 0026 — todoTitle only when the email implies a concrete next action
+        // (e.g. an interview/笔试 notice). dueDate only when a concrete date is
+        // stated. Empty todoTitle = no ToDo created (the "no useless ToDo" rule).
+        todoTitle: Type.Optional(Type.String()),
+        dueDate: Type.Optional(Type.String()),
+        // ADR 0027 — domain tag for the funnel ToDo (always 'job').
+        category: Type.Optional(
+          Type.Union([
+            Type.Literal('school'),
+            Type.Literal('job'),
+            Type.Literal('bill'),
+            Type.Literal('meeting'),
+            Type.Literal('other')
+          ])
+        )
       })
     ),
     matched: Type.Number(),
@@ -314,6 +350,28 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
     mood: Type.Number()
   })
 
+  // ADR 0026 — daily weather briefing output. The Home 今日天气 card payload
+  // (tempText header + Chinese summary + clothing + practical 宜/忌). NOT
+  // mystical — 宜/忌 are practical/weather-grounded; mystical 宜忌 stays in
+  // the separate 运势 bubble. Mirrors weatherBriefingSchema (Zod).
+  const submit_daily_weather = Type.Object({
+    tempText: Type.String(),
+    summary: Type.String(),
+    clothing: Type.String(),
+    yi: Type.Array(Type.String()),
+    ji: Type.Array(Type.String())
+  })
+
+  // ── Persona inference (§16 town-style profile) ────────────────────────────────
+  // The model proposes persona / writing_style / email_tone / working_hours
+  // memory items from the user's OWN sent mail (trusted, framed by
+  // frameSentReply — the opposite of §17 untrusted inbound). Proposals land
+  // confirmed:false. NOT a PublishableBrief (never published to NTK).
+  const submit_persona = Type.Object({
+    summary: Type.String(),
+    memoryProposals: Type.Optional(Type.Array(memoryProposal))
+  })
+
   return {
     submit_brief,
     submit_classifications,
@@ -325,7 +383,9 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
     submit_application_email_classifications,
     submit_funnel_review,
     submit_score_job_matches,
-    submit_daily_fortune
+    submit_daily_fortune,
+    submit_daily_weather,
+    submit_persona
   }
 }
 

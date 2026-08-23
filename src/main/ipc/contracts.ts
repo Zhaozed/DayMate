@@ -46,5 +46,8 @@ export type {
   FetchJobRecommendationsOpts,
   BossJob,
   NotificationPrefs,
-  BirthData
+  BirthData,
+  TaskCreateInput,
+  WeatherBriefing,
+  TodoSettings
 } from '@shared/types'

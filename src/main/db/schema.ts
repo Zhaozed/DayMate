@@ -34,6 +34,13 @@ export const tasks = sqliteTable('tasks', {
   sourceType: text('source_type').notNull(),
   sourceId: text('source_id'),
   routineRunId: text('routine_run_id'),
+  // ADR 0026 — which mail provider an auto-generated mail ToDo came from
+  // (badges the Home ToDo list with 163 / Gmail). Nullable for legacy/manual.
+  sourceProvider: text('source_provider'),
+  // ADR 0027 — coarse domain tag (学校/求职/账单/会议/其他) + deep link back
+  // to the source mail (Gmail only; 163 has no web deep link).
+  category: text('category'),
+  sourceLink: text('source_link'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull()
 })
@@ -49,6 +56,19 @@ export const needToKnow = sqliteTable('need_to_know', {
   suggestedActions: text('suggested_actions').notNull(), // JSON SuggestedAction[]
   readAt: text('read_at'),
   dismissedAt: text('dismissed_at'),
+  // ADR 0026 — distinguishes morning-brief NTKs (Home 晨报 carousel, ~7d) from
+  // email-driven NTKs (the 必读 page). null = legacy / email-driven.
+  kind: text('kind'),
+  // ADR 0029 — thread key (Gmail threadId / 163 synthesized from References).
+  // Emails in the same thread collapse into ONE 必读 item.
+  threadId: text('thread_id'),
+  // ADR 0029 — 必读 top-level section tag (学校/求职/日常/其他).
+  briefingCategory: text('briefing_category'),
+  // ADR 0029 — email source provider + deep link + account id (for getEmailThread).
+  sourceProvider: text('source_provider'),
+  sourceAccountId: text('source_account_id'),
+  sourceLink: text('source_link'),
+  updatedAt: text('updated_at'),
   createdAt: text('created_at').notNull()
 })
 

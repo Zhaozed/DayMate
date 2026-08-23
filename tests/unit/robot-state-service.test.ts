@@ -68,6 +68,14 @@ describe('RobotStateController', () => {
     expect(ctrl.getState()).toBe('error')
   })
 
+  it('error auto-resets to idle after the delay (a single classify_inbox failure must not pin the orb red forever)', () => {
+    const { ctrl, timer } = controller()
+    ctrl.onEvent(evt('agent_failed'))
+    expect(ctrl.getState()).toBe('error')
+    timer.flush()
+    expect(ctrl.getState()).toBe('idle')
+  })
+
   it('maps routine_completed → done and auto-resets to idle after the delay', () => {
     const { ctrl, timer } = controller()
     ctrl.onEvent(evt('routine_completed'))

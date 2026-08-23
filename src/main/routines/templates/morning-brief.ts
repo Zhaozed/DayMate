@@ -80,7 +80,11 @@ export const morningBriefTemplate: RoutineTemplate = {
     {
       id: 'publish',
       type: 'need_to_know',
-      fromKey: 'brief'
+      fromKey: 'brief',
+      // ADR 0026 — route this brief to the Home 晨报 carousel (and OUT of 必读,
+      // which is now mail-driven urgent/high). kind='morning_brief' is filtered
+      // out of listNeedToKnow() and into listMorningBriefs().
+      kind: 'morning_brief'
     },
     {
       id: 'notify',

@@ -48,6 +48,9 @@ export class TaskService {
       sourceType: input.sourceType,
       sourceId: input.sourceId,
       routineRunId: input.routineRunId,
+      sourceProvider: input.sourceProvider,
+      category: input.category,
+      sourceLink: input.sourceLink,
       createdAt: now,
       updatedAt: now
     }
@@ -76,5 +79,10 @@ export class TaskService {
 
   complete(id: string): Task {
     return this.update(id, { status: 'done' })
+  }
+
+  /** Hard-delete a task (user-removed ToDo). ADR 0026 — Home ToDo management. */
+  delete(id: string): void {
+    this.store.deleteTask(id)
   }
 }

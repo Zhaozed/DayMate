@@ -71,6 +71,40 @@ const FIXTURES: NormalizedEmail[] = [
     unread: true,
     labels: ['INBOX', 'SPAM'],
     sourceUrl: 'https://mail.google.com/mail/u/0/#inbox/mock-msg-003'
+  },
+  // Bulk / mass mail (ADR 0023) — pre-LLM filter fixtures. `bulk: true` stands
+  // in for the routing headers the real providers extract at normalize time.
+  {
+    provider: 'gmail',
+    accountId: ACCOUNT_ID,
+    messageId: 'mock-msg-004',
+    threadId: 'mock-thread-004',
+    from: { name: '教务处', address: 'notice@school.edu.cn' },
+    to: [{ name: 'All Students', address: 'all-students@school.edu.cn' }],
+    cc: [],
+    subject: '关于下学期选课安排的通知',
+    textBody: '各位同学，下学期选课系统将于周一开放，请按时完成选课。',
+    receivedAt: new Date(Date.now() - 3 * 3600_000).toISOString(),
+    unread: true,
+    labels: ['INBOX'],
+    sourceUrl: 'https://mail.google.com/mail/u/0/#inbox/mock-msg-004',
+    bulk: true
+  },
+  {
+    provider: 'gmail',
+    accountId: ACCOUNT_ID,
+    messageId: 'mock-msg-005',
+    threadId: 'mock-thread-005',
+    from: { name: 'Career Weekly', address: 'newsletter@jobs-edm.com' },
+    to: [{ name: 'Me', address: 'me@example.com' }],
+    cc: [],
+    subject: '本周热门职位推荐 限时优惠',
+    textBody: '精选岗位推荐，点击查看。如不想收到此类邮件请退订 unsubscribe。',
+    receivedAt: new Date(Date.now() - 4 * 3600_000).toISOString(),
+    unread: true,
+    labels: ['INBOX'],
+    sourceUrl: 'https://mail.google.com/mail/u/0/#inbox/mock-msg-005',
+    bulk: true
   }
 ]
 

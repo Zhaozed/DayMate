@@ -36,6 +36,25 @@ export interface EmailProvider {
    */
   listSent(query: SentMailQuery): Promise<NormalizedEmail[]>
 
+  /**
+   * ADR 0027 — one-time cold-start backfill: return all mail newer than
+   * `sinceDate` (newest-first), paging through full history as needed (Gmail
+   * consumes `nextPageToken`; 163 pages its in-memory uid list). Optional:
+   * providers that don't implement it fall back to `listMessages` with a wide
+   * `sinceHours`. Capped by the provider for cost/rate-limit safety. Used only
+   * by the container's cold-start orchestrator, never the incremental sync loop.
+   */
+  listBackfill?(sinceDate: Date, maxItems?: number): Promise<NormalizedEmail[]>
+
+  /**
+   * ADR 0029 — fetch ALL emails in a conversation, for the 必读 thread-Item
+   * expand. Gmail uses threads.get (native threadId); 163 does a best-effort
+   * IMAP header search on the synthesized thread key. Returns [] on any
+   * failure (caller falls back to surfaced sourceRefs). R0 read-only.
+   * Optional: providers without threading return [].
+   */
+  getThread?(threadId: string): Promise<NormalizedEmail[]>
+
   createDraft(input: EmailDraftInput): Promise<EmailDraft>
   sendDraft(draftId: string): Promise<EmailSendResult>
 }

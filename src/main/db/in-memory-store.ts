@@ -132,20 +132,57 @@ export class InMemoryStore implements RoutineStore {
     this.tasks.set(id, next)
     return { ...next }
   }
+  deleteTask(id: string): void {
+    this.tasks.delete(id)
+  }
 
   // ── Need to Know ──────────────────────────────────────────────────────────
   createNeedToKnow(item: NeedToKnow): void {
     this.needToKnow.set(item.id, { ...item })
   }
   listNeedToKnow(): NeedToKnow[] {
+    // 必读 excludes morning-brief NTKs (they live on the Home 晨报 carousel).
     return [...this.needToKnow.values()]
-      .filter((n) => !n.dismissedAt)
+      .filter((n) => !n.dismissedAt && n.kind !== 'morning_brief')
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .map((n) => ({ ...n }))
+  }
+  listMorningBriefs(days: number): NeedToKnow[] {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString()
+    return [...this.needToKnow.values()]
+      .filter((n) => n.kind === 'morning_brief' && n.createdAt > cutoff)
+      .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+      .map((n) => ({ ...n }))
+  }
+  listAllNeedToKnow(): NeedToKnow[] {
+    // ADR 0028 purge — includes dismissed mock-calendar stragglers.
+    return [...this.needToKnow.values()]
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
       .map((n) => ({ ...n }))
   }
   dismissNeedToKnow(id: string): void {
     const n = this.needToKnow.get(id)
     if (n) this.needToKnow.set(id, { ...n, dismissedAt: new Date().toISOString() })
+  }
+  deleteAllNeedToKnow(): void {
+    for (const [id, n] of this.needToKnow) if (!n.dismissedAt) this.needToKnow.delete(id)
+  }
+  deleteNeedToKnowByTitle(title: string): void {
+    for (const [id, n] of this.needToKnow)
+      if (!n.dismissedAt && n.title === title) this.needToKnow.delete(id)
+  }
+  deleteNeedToKnowById(id: string): void {
+    this.needToKnow.delete(id)
+  }
+  updateNeedToKnow(id: string, patch: Partial<NeedToKnow>): void {
+    // ADR 0029 — thread-merge: bump headline + append sourceRef + touch updatedAt.
+    const n = this.needToKnow.get(id)
+    if (!n) return
+    this.needToKnow.set(id, {
+      ...n,
+      ...patch,
+      updatedAt: new Date().toISOString()
+    })
   }
 
   // ── Activity ───────────────────────────────────────────────────────────────

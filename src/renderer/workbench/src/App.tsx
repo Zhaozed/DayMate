@@ -2,33 +2,31 @@ import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import type { WorkbenchPage } from '@shared/types'
 import { HomePage } from './pages/Home'
-import { TasksPage } from './pages/Tasks'
 import { RoutinesPage } from './pages/Routines'
-import { ActivityPage } from './pages/Activity'
 import { ApprovalsPage } from './pages/Approvals'
 import { NeedToKnowPage } from './pages/NeedToKnow'
 import { IntegrationsPage } from './pages/Integrations'
 import { MemoryPage } from './pages/Memory'
 import { ApplicationsPage } from './pages/Applications'
-import { InterviewNotesPage } from './pages/InterviewNotes'
 
-// Workbench shell. Spec §4 IA. M2 wires Approvals, Need to Know and
-// Integrations. Assistant and Memory remain placeholders (M4/M5). The robot
-// deep-links here via onNavigate (M4 §18 — "Review" opens Approvals).
+// Workbench shell. Spec §4 IA. The nav was trimmed from 11 → 6: Assistant
+// (empty placeholder), Tasks, Approvals, Activity, and InterviewNotes were
+// removed at the user's request — the funnel is now email-driven (BOSS
+// retired, ADR 0019), approvals never trigger (no R3 external-write routine
+// is active), the Activity log is backend noise the user doesn't want to see,
+// and 面经库 is unused. Tasks/Activity/InterviewNotes page files stay on disk
+// as dormant exports (BOSS-retirement pattern); Approvals keeps its mount
+// below as a dormant safety net — §15 approval gate stays in the backend, and
+// `approval-from-robot` e2e still deep-links here.
 //
 // The NAV values are the canonical IPC page identifiers (passed over the wire
 // via openWorkbenchAt / onNavigate) — they stay English. PAGE_LABELS maps each
 // identifier to its Chinese display label so the UI is zh-CN.
 const NAV = [
   'Home',
-  'Assistant',
   'Need to Know',
-  'Tasks',
   'Applications',
-  'InterviewNotes',
   'Routines',
-  'Approvals',
-  'Activity',
   'Memory',
   'Integrations'
 ] as const
@@ -37,20 +35,18 @@ type NavName = (typeof NAV)[number]
 
 const PAGE_LABELS: Record<NavName, string> = {
   Home: '首页',
-  Assistant: '助手',
   'Need to Know': '必读',
-  Tasks: '任务',
   Applications: '投递',
-  InterviewNotes: '面经库',
   Routines: '例程',
-  Approvals: '审批',
-  Activity: '动态',
   Memory: '记忆',
   Integrations: '集成与设置'
 }
 
 export function Workbench(): ReactElement {
-  const [active, setActive] = useState<NavName>('Home')
+  // `active` is a WorkbenchPage (not the narrower NavName) so the dormant
+  // Approvals mount — reachable only via the robot approval deep-link, not the
+  // sidebar — can hold a value outside NAV.
+  const [active, setActive] = useState<WorkbenchPage>('Home')
 
   // Robot deep-link: main tells the workbench which page to show (e.g. when the
   // user taps "Review" on an approval bubble → openWorkbenchAt('Approvals')).
@@ -82,22 +78,14 @@ export function Workbench(): ReactElement {
       <main className="flex-1 overflow-auto p-8">
         {active === 'Home' && <HomePage />}
         {active === 'Need to Know' && <NeedToKnowPage />}
-        {active === 'Tasks' && <TasksPage />}
         {active === 'Applications' && <ApplicationsPage />}
-        {active === 'InterviewNotes' && <InterviewNotesPage />}
         {active === 'Routines' && <RoutinesPage />}
-        {active === 'Approvals' && <ApprovalsPage />}
-        {active === 'Activity' && <ActivityPage />}
         {active === 'Memory' && <MemoryPage />}
         {active === 'Integrations' && <IntegrationsPage />}
-        {active === 'Assistant' && (
-          <>
-            <h1 className="text-xl font-semibold text-white">助手</h1>
-            <p className="mt-1 text-sm text-white/45">
-              完整的对话式助手（模型可调用工具 + 中止动作）推迟到后续里程碑实现。例程已覆盖无凭证的工作流。
-            </p>
-          </>
-        )}
+        {/* Dormant: reachable only via the robot approval deep-link
+         * (openWorkbenchAt('Approvals')). No nav button — §15 gate stays in
+         * the backend; nothing triggers it while no R3 routine is active. */}
+        {active === 'Approvals' && <ApprovalsPage />}
       </main>
     </div>
   )

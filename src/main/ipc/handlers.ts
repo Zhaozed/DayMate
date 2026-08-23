@@ -27,7 +27,9 @@ import type {
   FetchJobRecommendationsOpts,
   BossJob,
   NotificationPrefs,
-  BirthData
+  BirthData,
+  TaskCreateInput,
+  TodoSettings
 } from './contracts'
 import { APP_NAME, WINDOWS } from '@shared/constants'
 import { openWorkbench, openRobot } from '../windows'
@@ -35,7 +37,7 @@ import { getRobotWindow, setRobotView } from '../windows/robot-window'
 import { getWorkbenchWindow } from '../windows/workbench-window'
 import { getContainer, initContainer } from '../app/container'
 import { nowIso } from '../util/ids'
-import { writeFile } from 'node:fs/promises'
+import { writeFile, readFile } from 'node:fs/promises'
 
 // M0 in-memory robot state. From M4 onward the RobotStateController drives this
 // from Activity events (container.ts); it is still surfaced to the renderer
@@ -153,14 +155,50 @@ export function registerIpcHandlers(): void {
     container.scheduler.reschedule()
   })
 
-  // Tasks
+  // Tasks. CREATE/DELETE added ADR 0026 (Home ToDo mgmt). broadcasts on mutation.
   ipcMain.handle(IPC.TASK_LIST, () => container.taskService.list())
-  ipcMain.handle(IPC.TASK_UPDATE, (_e, id: string, patch: TaskUpdate) =>
-    container.taskService.update(id, patch)
-  )
+  ipcMain.handle(IPC.TASK_CREATE, (_e, input: TaskCreateInput) => {
+    const task = container.taskService.create(input)
+    container.broadcastTasks()
+    return task
+  })
+  ipcMain.handle(IPC.TASK_UPDATE, (_e, id: string, patch: TaskUpdate) => {
+    const task = container.taskService.update(id, patch)
+    container.broadcastTasks()
+    return task
+  })
+  ipcMain.handle(IPC.TASK_DELETE, (_e, id: string) => {
+    container.taskService.delete(id)
+    container.broadcastTasks()
+  })
 
-  // Need to Know
+  // Need to Know. listMorningBriefs added ADR 0026 (Home 晨报 carousel).
   ipcMain.handle(IPC.NEED_TO_KNOW_LIST, () => container.needToKnowService.list())
+  ipcMain.handle(IPC.NEED_TO_KNOW_DISMISS, (_e, id: string) => {
+    container.needToKnowService.dismiss(id)
+  })
+  ipcMain.handle(IPC.NEED_TO_KNOW_CLEAR_ALL, () => {
+    container.needToKnowService.clearAll()
+  })
+  // ADR 0029 — user edits a 必读 item's headline (title) / summary inline.
+  // Only title + summary are user-editable; thread/source fields stay put.
+  ipcMain.handle(
+    IPC.NEED_TO_KNOW_UPDATE,
+    (_e, id: string, patch: { title?: string; summary?: string }) => {
+      const clean: { title?: string; summary?: string } = {}
+      if (typeof patch?.title === 'string' && patch.title.trim().length > 0) {
+        clean.title = patch.title.trim().slice(0, 120)
+      }
+      if (typeof patch?.summary === 'string') {
+        clean.summary = patch.summary.trim().slice(0, 600)
+      }
+      if (Object.keys(clean).length === 0) return
+      container.needToKnowService.update(id, clean)
+    }
+  )
+  ipcMain.handle(IPC.MORNING_BRIEF_LIST, () =>
+    container.needToKnowService.listMorningBriefs(7)
+  )
 
   // Activity
   ipcMain.handle(IPC.ACTIVITY_LIST, (_e, runId?: string) =>
@@ -351,9 +389,31 @@ export function registerIpcHandlers(): void {
     container.broadcastMemory()
     return item
   })
+  // Confirm a proposed item via the service path (not the generic update) so
+  // the "one confirmed value per key" demote logic in service.confirm() runs
+  // — the UI used to call update({confirmed:true}) which bypassed it, leaving
+  // stale duplicate confirmed rows for the same key.
+  ipcMain.handle(IPC.MEMORY_CONFIRM, (_e, id: string) => {
+    const item = container.memoryService.confirm(id)
+    container.broadcastMemory()
+    return item
+  })
   ipcMain.handle(IPC.MEMORY_DELETE, (_e, id: string) => {
     container.memoryService.delete(id)
     container.broadcastMemory()
+  })
+  ipcMain.handle(IPC.MEMORY_GENERATE_PERSONA, async () => {
+    // On-demand persona inference (§16). Manual AI — NOT via the Routine
+    // Engine (mirrors generateResume/generateFunnelReview). Reads the user's
+    // own sent mail from every connected provider, runs `generate_persona`,
+    // saves proposals as confirmed:false. §17: sent mail is trusted voice
+    // (frameSentReply), never an instruction source.
+    const output = await container.memoryService.generatePersona(
+      container.emailProviders,
+      container.agentRuntime
+    )
+    container.broadcastMemory()
+    return output
   })
 
   // Job applications (boss-cli integration) — the cross-channel funnel panel.
@@ -483,15 +543,23 @@ export function registerIpcHandlers(): void {
       return result
     }
   )
-  ipcMain.handle(IPC.APPLICATION_GENERATE_RESUME, async (_e, applicationId: string) => {
-    // The base resume is the user's OWN document (trusted §17) — read from the
-    // configured path at generation time, never stored in the DB.
-    const baseResume = await container.settings.readBaseResumeContent()
-    const version = await container.applicationService.generateResume(
-      applicationId,
-      container.agentRuntime,
-      baseResume
-    )
+  ipcMain.handle(IPC.APPLICATION_UPLOAD_RESUME, async (_e, applicationId: string) => {
+    // The user uploads their OWN resume (trusted §17 — their document, never
+    // untrusted external mail). It is stored verbatim as a new resume version
+    // (version = prev+1; latest is active). The interview-transcript generator
+    // reads the latest resume via `application.get_latest_resume`, so uploading
+    // is what feeds transcript generation. Text-based formats only (.html/.txt/
+    // .md) — PDF binary can't feed the agent or render in the sandbox iframe.
+    const result = await dialog.showOpenDialog({
+      title: '上传简历',
+      filters: [
+        { name: '简历文件', extensions: ['html', 'htm', 'txt', 'md'] }
+      ],
+      properties: ['openFile']
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    const content = await readFile(result.filePaths[0], 'utf8')
+    const version = container.applicationService.saveResume(applicationId, content)
     container.broadcastApplications()
     return version
   })
@@ -607,6 +675,28 @@ export function registerIpcHandlers(): void {
     container.applicationService.ignoreEmailMatch(messageId)
     container.broadcastEmailMatches()
   })
+  // ADR 0029 — lazy R0 fetch of a whole email thread for the 必读 page expand.
+  // Locates the provider by (provider, accountId) in the live emailProviders
+  // array and calls its best-effort getThread. Never throws to the renderer:
+  // any failure (provider missing getThread, IMAP error) returns [] so the UI
+  // falls back to the surfaced sourceRefs. Read-only (§15 — no external write).
+  ipcMain.handle(
+    IPC.EMAIL_THREAD_GET,
+    async (
+      _e,
+      input: { threadId: string; provider: 'gmail' | 'mail163'; accountId: string }
+    ) => {
+      try {
+        const provider = container.emailProviders.find(
+          (p) => p.provider === input.provider && p.accountId === input.accountId
+        )
+        if (!provider?.getThread) return []
+        return await provider.getThread(input.threadId)
+      } catch {
+        return []
+      }
+    }
+  )
   // Job-search config (non-secret file paths, §G).
   ipcMain.handle(IPC.JOB_SEARCH_GET_CONFIG, () => container.settings.readJobSearch())
   ipcMain.handle(IPC.JOB_SEARCH_SET_CONFIG, (_e, jobSearch: JobSearchSettings) =>
@@ -645,6 +735,59 @@ export function registerIpcHandlers(): void {
   )
   ipcMain.handle(IPC.BIRTH_DATA_CLEAR, async () => {
     await container.settings.clearBirthData()
+  })
+
+  // ADR 0026 — Home 今日天气 card. WEATHER_GET returns today's cached briefing
+  // (or null when stale/absent → Home shows the empty state + 生成 button).
+  // WEATHER_REFRESH force-regenerates (manual). City is non-secret settings.json
+  // (default 北京), editable on the 集成与设置 page.
+  ipcMain.handle(IPC.WEATHER_GET, async () => container.weatherService.getCached())
+  ipcMain.handle(IPC.WEATHER_REFRESH, async () => container.weatherService.refresh())
+  ipcMain.handle(IPC.WEATHER_CITY_GET, async () => container.settings.readWeatherCity())
+  ipcMain.handle(IPC.WEATHER_CITY_SET, async (_e, city: string) =>
+    container.settings.writeWeatherCity(city)
+  )
+  // ADR 0027 — ToDo overhaul settings (school-spam skip tokens + cold-start
+  // toggle). R1 local reads/writes (§15 — no external side-effect).
+  ipcMain.handle(IPC.TODO_GET_SETTINGS, () => container.settings.readTodo())
+  ipcMain.handle(IPC.TODO_SET_SETTINGS, async (_e, todo: TodoSettings) => {
+    const next = await container.settings.writeTodo(todo)
+    // Propagate skip-tokens to the live services so a change applies without
+    // a restart (mirrors NOTIFICATION_SET_PREFS's refresh-on-write pattern).
+    const tokens =
+      next.skipTokens && next.skipTokens.length > 0
+        ? next.skipTokens
+        : ['[student_ips]']
+    container.emailBriefing.setSkipTokens(tokens)
+    container.applicationService.setSkipTokens(tokens)
+    return next
+  })
+  // Manual re-scan: clear the account's coldStartDone entry so the backfill
+  // re-runs, then fire-and-forget. `accountId` is 'gmail-real' / 'mail163-real'
+  // (the real provider accountIds) — matched against the live providers array.
+  ipcMain.handle(IPC.TODO_COLD_START, async (_e, accountId: string) => {
+    const todo = await container.settings.readTodo()
+    const cleared = (todo.coldStartDone ?? []).filter((a) => a !== accountId)
+    await container.settings.writeTodo({ ...todo, coldStartDone: cleared })
+    const provider = container.emailProviders.find((p) => p.accountId === accountId)
+    if (!provider) {
+      container.activityService.record({
+        type: 'provider_unavailable',
+        summary: `冷启动回填失败：未找到已连接的账号 ${accountId}`,
+        metadata: { accountId }
+      })
+      return { ok: false, message: '账号未连接' }
+    }
+    void container.emailBriefing
+      .backfillAccount(provider, { batchSize: todo.backfillBatchSize })
+      .catch((err: unknown) =>
+        container.activityService.record({
+          type: 'provider_unavailable',
+          summary: `手动冷启动失败 ${accountId}：${err instanceof Error ? err.message : String(err)}`,
+          metadata: { accountId }
+        })
+      )
+    return { ok: true }
   })
 }
 

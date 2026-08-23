@@ -127,13 +127,94 @@ describe('createDeterministicAgentRuntime (no-key path)', () => {
     expect(out.counts).toBeDefined()
     expect(out.counts.ignore).toBe(0)
   })
+
+  it('classify_inbox fills briefingCategory for surfaced mail (ADR 0029)', async () => {
+    const email: NormalizedEmail = {
+      provider: 'gmail',
+      accountId: 'mock-gmail-001',
+      messageId: 'rec-1',
+      threadId: 'rec-t',
+      from: { name: 'Alice', address: 'alice@example.com' },
+      to: [{ address: 'me@example.com' }],
+      cc: [],
+      subject: '面试通知 — please confirm',
+      textBody: 'We would like to schedule an interview.',
+      receivedAt: new Date().toISOString(),
+      unread: true,
+      labels: []
+    }
+    const out = (await rt.runAgentStep('classify_inbox', { emails: [email] })) as {
+      results: { messageId: string; briefingCategory: string; classification: string; untrusted: boolean }[]
+    }
+    const r = out.results[0]
+    expect(r.messageId).toBe('rec-1')
+    expect(r.classification).toBe('reply')
+    // recruiting topic → job section.
+    expect(r.briefingCategory).toBe('job')
+    expect(r.untrusted).toBe(false)
+  })
   it('generate_morning_brief returns a stub brief', async () => {
     const brief = (await rt.runAgentStep('generate_morning_brief', { emails: [] })) as {
       title: string
       taskToCreate: unknown
     }
-    expect(brief.title).toBe('晨报')
+    // No email/event/task/memory → no recs → plain "今日无紧急待办" headline.
+    expect(brief.title).toBe('今日无紧急待办')
     expect(brief.taskToCreate).toBeNull()
+  })
+
+  it('generate_morning_brief gives personalized recommendations when no priority email (ADR v11)', async () => {
+    const brief = (await rt.runAgentStep('generate_morning_brief', {
+      emails: [],
+      tasks: [
+        {
+          id: 't1',
+          title: '确认字节面试时间',
+          status: 'todo',
+          priority: 'high',
+          sourceType: 'assistant',
+          category: 'job',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        }
+      ]
+    })) as { title: string; summary: string; taskToCreate: unknown }
+    // No priority email → top recommendation becomes the headline.
+    expect(brief.title).toContain('跟进待办')
+    expect(brief.summary).toContain('确认字节面试时间')
+    expect(brief.taskToCreate).toBeNull()
+  })
+
+  it('generate_morning_brief filters bulk marketing mail out of the feed (ADR 0029 — no "试用到期" headline)', async () => {
+    // A bulk marketing email (Precedence: bulk + ads keywords) must be dropped
+    // by shouldSkipBriefing BEFORE the brief picks a priority item — it must
+    // never become the headline / taskToCreate / sourceRef.
+    const promo: NormalizedEmail = {
+      provider: 'gmail',
+      accountId: 'mock-gmail-001',
+      messageId: 'promo-1',
+      from: { name: 'Maxim Team', address: 'no-reply@maxim.ai' },
+      to: [{ address: 'me@example.com' }],
+      cc: [],
+      subject: 'Maxim AI 限时优惠 — 续订立减',
+      textBody: '您的 Business 试用将于 3 天后到期，续订享 Flash Sale 折扣。',
+      receivedAt: new Date().toISOString(),
+      unread: true,
+      bulk: true,
+      labels: []
+    }
+    const brief = (await rt.runAgentStep('generate_morning_brief', {
+      emails: [promo]
+    })) as {
+      title: string
+      taskToCreate: { sourceId: string } | null
+      sourceRefs: { id: string }[]
+      suggestedActions: { args: { threadId?: string } }[]
+    }
+    // The promo was filtered out → no priority item derived from it.
+    expect(brief.taskToCreate).toBeNull()
+    expect(brief.suggestedActions).toHaveLength(0)
+    expect(brief.sourceRefs.some((s) => s.id === 'promo-1')).toBe(false)
   })
 
   it('generate_draft_reply mirrors the prior-reply tone (greeting + sign-off)', async () => {
@@ -265,7 +346,7 @@ describe('createAgentRuntime — key-gated real path', () => {
   it('falls back to the deterministic stub when no key is configured', async () => {
     const rt = createAgentRuntime(fakeGateway(false))
     const brief = (await rt.runAgentStep('generate_morning_brief', { emails: [] })) as { title: string }
-    expect(brief.title).toBe('晨报')
+    expect(brief.title).toBe('今日无紧急待办')
   })
 
   it('captures + Zod-validates the brief output tool call', async () => {

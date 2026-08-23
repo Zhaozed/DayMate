@@ -60,6 +60,21 @@ function applyGuardedAlters(sqlite: Database.Database) {
   addColumnIfMissing(sqlite, 'applications', 'email_ref_id', 'TEXT')
   addColumnIfMissing(sqlite, 'applications', 'deleted_at', 'TEXT')
   addColumnIfMissing(sqlite, 'applications', 'archived_at', 'TEXT')
+  // ADR 0026 — Home 重构: need_to_know.kind (晨报轮播 vs 必读 分流) +
+  // tasks.source_provider (mail ToDo 来源 163/Gmail 徽章).
+  addColumnIfMissing(sqlite, 'need_to_know', 'kind', 'TEXT')
+  addColumnIfMissing(sqlite, 'tasks', 'source_provider', 'TEXT')
+  // ADR 0027 — ToDo 重构: coarse domain tag + deep link back to source mail.
+  addColumnIfMissing(sqlite, 'tasks', 'category', 'TEXT')
+  addColumnIfMissing(sqlite, 'tasks', 'source_link', 'TEXT')
+  // ADR 0029 — 必读页重构: thread key (线程聚合) + briefing_category (4 类分区)
+  // + source provider/link/accountId (来源徽章+链接) + updatedAt (线程合并排序).
+  addColumnIfMissing(sqlite, 'need_to_know', 'thread_id', 'TEXT')
+  addColumnIfMissing(sqlite, 'need_to_know', 'briefing_category', 'TEXT')
+  addColumnIfMissing(sqlite, 'need_to_know', 'source_provider', 'TEXT')
+  addColumnIfMissing(sqlite, 'need_to_know', 'source_account_id', 'TEXT')
+  addColumnIfMissing(sqlite, 'need_to_know', 'source_link', 'TEXT')
+  addColumnIfMissing(sqlite, 'need_to_know', 'updated_at', 'TEXT')
   // Indexes that reference guarded columns must be created AFTER the ALTERs
   // add those columns to pre-Milestone-A dev DBs (else "no such column").
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_applications_deleted ON applications(deleted_at);')

@@ -62,7 +62,7 @@ describe('NotificationService (§D2)', () => {
       routineOverrides: { morning_brief: true }
     })
     await offSvc.refreshPrefs()
-    offSvc.notify({ message: 'x', category: 'routine', routineId: 'auto_inbox' })
+    offSvc.notify({ message: 'x', category: 'routine', routineId: 'interview_prep' })
     expect(offB).toHaveLength(0)
   })
 

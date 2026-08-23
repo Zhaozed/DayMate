@@ -16,7 +16,8 @@ import type {
   NotificationPrefs,
   NotificationCategory,
   RoutineDefinition,
-  BirthData
+  BirthData,
+  TodoSettings
 } from '@shared/types'
 import { NOTIFICATION_CATEGORIES } from '@shared/types'
 import { LLM_PROVIDERS, DEFAULT_LLM_MODEL_IDS } from '@shared/constants'
@@ -59,6 +60,8 @@ export function IntegrationsPage(): ReactElement {
       <LlmCard />
       <JobSearchCard />
       <BirthDataCard />
+      <WeatherCityCard />
+      <TodoSettingsCard />
       <NotificationPrefsCard />
       <DataExportCard />
 
@@ -1149,10 +1152,217 @@ function BirthDataCard(): ReactElement {
   )
 }
 
+// ── ADR 0026 — weather city for the daily 今日天气 card (non-secret) ──
+function WeatherCityCard(): ReactElement {
+  const [city, setCity] = useState<string | undefined>(undefined) // undefined = loading
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+
+  const refresh = async (): Promise<void> => {
+    try {
+      const c = await window.daymate.getWeatherCity()
+      setCity(c)
+      setMsg(null)
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    }
+  }
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const save = async (): Promise<void> => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      const saved = await window.daymate.setWeatherCity(city?.trim() || '北京')
+      setCity(saved)
+      setMsg('已保存。每日 08:27 将刷新首页今日天气。')
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
+      <h2 className="text-sm font-semibold text-white/90">天气城市（今日天气）</h2>
+      <p className="mt-1 text-xs text-white/45">
+        首页「今日天气」卡片的城市。数据来自 wttr.in（免 key），仅存于本地 settings.json。
+      </p>
+      {msg && (
+        <div className="mt-3 rounded border border-white/10 p-2 text-xs text-white/70" style={{ background: 'rgba(0,0,0,0.2)' }}>
+          {msg}
+        </div>
+      )}
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          className="rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
+          value={city ?? ''}
+          placeholder="北京"
+          onChange={(e) => setCity(e.target.value)}
+        />
+        <button
+          onClick={save}
+          disabled={busy}
+          className="rounded bg-white/10 px-3 py-1.5 text-sm text-white/90 hover:bg-white/20 disabled:opacity-50"
+        >
+          {busy ? '保存中…' : '保存'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** 生肖 derived from birth year (mirrors the agent-runtime stub). */
 const ZODIAC = ['鼠', '牛', '虎', '兔', '龙', '蛇', '马', '羊', '猴', '鸡', '狗', '猪']
 function zodiacOf(year: number): string {
   return ZODIAC[((year - 1900) % 12 + 12) % 12]
+}
+
+// ADR 0027 — ToDo pipeline settings: school-spam skip-token editor + cold-start
+// toggle + manual re-scan button per connected account.
+const REAL_ACCOUNTS: { id: string; label: string }[] = [
+  { id: 'gmail-real', label: 'Gmail' },
+  { id: 'mail163-real', label: '163' }
+]
+function TodoSettingsCard(): ReactElement {
+  const [todo, setTodo] = useState<TodoSettings | null>(null)
+  const [tokensText, setTokensText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+
+  const refresh = async (): Promise<void> => {
+    try {
+      const t = await window.daymate.getTodoSettings()
+      setTodo(t)
+      const tokens = t.skipTokens && t.skipTokens.length > 0 ? t.skipTokens : ['[student_ips]']
+      setTokensText(tokens.join('\n'))
+      setMsg(null)
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    }
+  }
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const enabled = todo?.coldStartEnabled !== false
+
+  const save = async (): Promise<void> => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      const skipTokens = tokensText
+        .split('\n')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+      const next = await window.daymate.setTodoSettings({
+        ...(todo ?? {}),
+        skipTokens,
+        coldStartEnabled: enabled
+      })
+      setTodo(next)
+      setMsg('已保存。学校群发邮件将在 LLM 之前被过滤。')
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleEnabled = async (): Promise<void> => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      const next = await window.daymate.setTodoSettings({
+        ...(todo ?? {}),
+        coldStartEnabled: !enabled
+      })
+      setTodo(next)
+      setMsg(!enabled ? '已开启冷启动回填（连接邮箱时自动扫近 60 天）。' : '已关闭冷启动回填。')
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const rescan = async (accountId: string): Promise<void> => {
+    setBusy(true)
+    setMsg(null)
+    try {
+      const r = await window.daymate.triggerTodoColdStart(accountId)
+      setMsg(
+        r.ok
+          ? `已触发 ${accountId} 的冷启动回填（后台运行，完成后可在动态查看）。`
+          : r.message ?? '触发失败'
+      )
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
+      <h2 className="text-sm font-semibold text-white/90">邮件待办设置</h2>
+      <p className="mt-1 text-xs text-white/45">
+        过滤学校群发垃圾邮件（按主题子串匹配，每行一个 token），并控制冷启动回填。仅本地配置，不外发。
+      </p>
+      {msg && (
+        <div className="mt-3 rounded border border-white/10 p-2 text-xs text-white/70" style={{ background: 'rgba(0,0,0,0.2)' }}>
+          {msg}
+        </div>
+      )}
+      <div className="mt-3">
+        <label className="text-xs text-white/55">跳过的主题 token（每行一个）</label>
+        <textarea
+          className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 font-mono text-xs text-white/90"
+          rows={3}
+          value={tokensText}
+          onChange={(e) => setTokensText(e.target.value)}
+        />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          onClick={save}
+          disabled={busy}
+          className="rounded bg-white/10 px-3 py-1.5 text-sm text-white/90 hover:bg-white/20 disabled:opacity-50"
+        >
+          {busy ? '处理中…' : '保存'}
+        </button>
+        <button
+          onClick={toggleEnabled}
+          disabled={busy}
+          className={`rounded px-3 py-1.5 text-sm disabled:opacity-50 ${
+            enabled
+              ? 'bg-emerald-900/50 text-emerald-200 hover:bg-emerald-900/70'
+              : 'bg-white/10 text-white/70 hover:bg-white/20'
+          }`}
+        >
+          {enabled ? '冷启动：已开启' : '冷启动：已关闭'}
+        </button>
+      </div>
+      <div className="mt-3 border-t border-white/5 pt-3">
+        <div className="text-xs text-white/55">重新冷启动（回填近 60 天邮件建待办）</div>
+        <div className="mt-2 flex gap-2">
+          {REAL_ACCOUNTS.map((a) => (
+            <button
+              key={a.id}
+              onClick={() => rescan(a.id)}
+              disabled={busy}
+              className="rounded bg-sky-900/40 px-3 py-1.5 text-xs text-sky-200 hover:bg-sky-900/60 disabled:opacity-50"
+            >
+              {a.label} 重新扫描
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function NotificationPrefsCard(): ReactElement {

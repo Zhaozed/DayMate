@@ -23,6 +23,7 @@ import type {
 import type { EmailProvider } from './email-provider'
 import type { SecretStore } from '../../util/secrets'
 import { nowIso } from '../../util/ids'
+import { detectBulkFromHeaders } from '../../util/bulk-mail'
 import {
   buildAuthUrl,
   exchangeCode,
@@ -180,6 +181,48 @@ export class GmailProvider implements EmailProvider {
     return out
   }
 
+  /** ADR 0027 — cold-start backfill: page backward through the full history
+   *  (via `nextPageToken`, which `listMessages` deliberately does NOT consume)
+   *  until the oldest message on a page predates `sinceInternalDate` or pages
+   *  run out. Caps at `maxPages × 100` mails for cost/rate-limit safety. This
+   *  path is SEPARATE from the incremental `listMessages` so the sync loop's
+   *  cursor logic is untouched. Returns newest-first. */
+  async listAllSince(sinceInternalDate: number, maxPages = 20): Promise<NormalizedEmail[]> {
+    const accessToken = await this.ensureAccessToken()
+    const out: NormalizedEmail[] = []
+    let pageToken: string | undefined
+    let pages = 0
+    let hitBoundary = false
+    while (pages < maxPages && !hitBoundary) {
+      const params = new URLSearchParams({ maxResults: '100' })
+      if (pageToken) params.set('pageToken', pageToken)
+      const ids = await this.gmailGet<{
+        messages?: Array<{ id: string; threadId?: string }>
+        nextPageToken?: string
+      }>(accessToken, `/users/me/messages?${params}`)
+      if (!ids.messages || ids.messages.length === 0) break
+      for (const m of ids.messages) {
+        const msg = await this.getMessage(m.id)
+        if (new Date(msg.receivedAt).getTime() <= sinceInternalDate) {
+          hitBoundary = true
+          break
+        }
+        out.push(msg)
+      }
+      pageToken = ids.nextPageToken
+      pages++
+      if (!pageToken) break // no more pages
+    }
+    return out
+  }
+
+  /** ADR 0027 — EmailProvider.listBackfill for the cold-start orchestrator. */
+  async listBackfill(sinceDate: Date, maxItems = 2000): Promise<NormalizedEmail[]> {
+    const since = sinceDate.getTime()
+    const maxPages = Math.max(1, Math.ceil(maxItems / 100))
+    return this.listAllSince(since, maxPages)
+  }
+
   async getMessage(messageId: string): Promise<NormalizedEmail> {
     const accessToken = await this.ensureAccessToken()
     const msg = await this.gmailGet<GmailMessageRaw>(
@@ -187,6 +230,22 @@ export class GmailProvider implements EmailProvider {
       `/users/me/messages/${encodeURIComponent(messageId)}?format=full`
     )
     return normalizeGmailMessage(msg, this.accountId)
+  }
+
+  /** ADR 0029 — fetch the whole conversation via threads.get (native threadId).
+   *  Returns the thread's messages oldest-first so the 必读 expand reads top-
+   *  down. R0 read-only; never persisted. */
+  async getThread(threadId: string): Promise<NormalizedEmail[]> {
+    const accessToken = await this.ensureAccessToken()
+    const thread = await this.gmailGet<{ messages?: GmailMessageRaw[] }>(
+      accessToken,
+      `/users/me/threads/${encodeURIComponent(threadId)}?format=full`
+    )
+    if (!thread.messages?.length) return []
+    const out = thread.messages.map((m) => normalizeGmailMessage(m, this.accountId))
+    // Oldest first (Gmail returns newest-first).
+    out.sort((a, b) => new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime())
+    return out
   }
 
   async searchMessages(query: string, limit?: number): Promise<NormalizedEmail[]> {
@@ -392,6 +451,10 @@ export function normalizeGmailMessage(msg: GmailMessageRaw, accountId: string): 
       : nowIso()
   const labelIds = msg.labelIds ?? []
   const body = extractText(msg.payload) || msg.snippet || ''
+  // ADR 0023: read the bulk-signal routing headers (provider-local; only the
+  // boolean persists on NormalizedEmail — §17) so mass mail is filtered before
+  // any LLM pass downstream.
+  const bulk = detectBulkFromHeaders((name) => header(h, name))
   return {
     provider: 'gmail',
     accountId,
@@ -405,7 +468,8 @@ export function normalizeGmailMessage(msg: GmailMessageRaw, accountId: string): 
     receivedAt,
     unread: labelIds.includes('UNREAD'),
     labels: labelIds,
-    sourceUrl: `https://mail.google.com/mail/u/0/#all/${msg.id}`
+    sourceUrl: `https://mail.google.com/mail/u/0/#all/${msg.id}`,
+    bulk
   }
 }
 

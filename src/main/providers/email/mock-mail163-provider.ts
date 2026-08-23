@@ -69,6 +69,24 @@ const FIXTURES: NormalizedEmail[] = [
     unread: true,
     labels: ['INBOX', 'SPAM'],
     sourceUrl: 'https://mail.163.com/coremail/cgi/ftetabc?msgid=mock-163-003'
+  },
+  // Bulk application-confirmation mail (ADR 0023): bulk, but NOT ads — must be
+  // KEPT in the 投递 funnel (it's the funnel's feed) while skipped from 必读.
+  {
+    provider: 'mail163',
+    accountId: ACCOUNT_ID,
+    messageId: 'mock-163-004',
+    from: { name: '智谱AI 招聘', address: 'noreply@zhipuai.com' },
+    to: [{ name: 'Me', address: 'me@163.com' }],
+    cc: [],
+    subject: '投递成功 — 您已成功投递 后端工程师 岗位',
+    textBody:
+      '您好，我们已收到您投递的 后端工程师 岗位简历，HR 将尽快审阅。感谢您的关注。',
+    receivedAt: new Date(Date.now() - 2 * 3600_000).toISOString(),
+    unread: true,
+    labels: ['INBOX'],
+    sourceUrl: 'https://mail.163.com/coremail/cgi/ftetabc?msgid=mock-163-004',
+    bulk: true
   }
 ]
 

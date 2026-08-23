@@ -13,10 +13,19 @@ import type {
   JobSearchSettings,
   NotificationPrefs,
   BirthData,
-  EmailSyncCursor
+  EmailSyncCursor,
+  WeatherBriefing,
+  TodoSettings
 } from '@shared/types'
 
-export type { JobSearchSettings, NotificationPrefs, BirthData, EmailSyncCursor } from '@shared/types'
+export type {
+  JobSearchSettings,
+  NotificationPrefs,
+  BirthData,
+  EmailSyncCursor,
+  WeatherBriefing,
+  TodoSettings
+} from '@shared/types'
 
 /** Non-secret email-sync config (Milestone: 邮件驱动求职汇总). `cursor` is the
  *  per-provider high-water-mark so the poll only classifies NEW mail. */
@@ -41,6 +50,14 @@ export interface AppSettings {
   birthData?: BirthData
   /** Non-secret email-sync poll config + incremental cursor (邮件驱动求职汇总). */
   emailSync?: EmailSyncSettings
+  /** Non-secret weather briefing cache for the Home 今日天气 card (ADR 0026).
+   *  Generated daily (real wttr.in + LLM-polished copy); `date` detects staleness. */
+  weather?: WeatherBriefing
+  /** Non-secret weather city (default 北京). ADR 0026. */
+  weatherCity?: string
+  /** Non-secret ToDo pipeline settings (ADR 0027 — ToDo 重构): cold-start
+   *  backfill state, school-spam skip tokens, kill switch. */
+  todo?: TodoSettings
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -83,6 +100,27 @@ export class Settings {
     return next.jobSearch!
   }
 
+  /** ADR 0027 — ToDo pipeline settings (cold-start state, skip tokens, switch). */
+  async readTodo(): Promise<TodoSettings> {
+    return (await this.read()).todo ?? {}
+  }
+
+  async writeTodo(todo: TodoSettings): Promise<TodoSettings> {
+    const current = await this.read()
+    // ADR 0027 — MERGE at the field level, not replace. The boot purge IIFE
+    // (writes purgeDone/skipTokens) and the cold-start trigger (writes
+    // coldStartDone) are both fire-and-forget async writers; a replace would
+    // let one clobber the other's keys (observed: coldStartDone overwrote
+ // purgeDone → every restart re-purged → email ToDos vanished after the
+ // 2nd boot because cold-start wouldn't re-run). Merge keeps every key the
+ // caller didn't touch.
+    const merged: TodoSettings = { ...(current.todo ?? {}), ...todo }
+    const next: AppSettings = { ...current, todo: merged }
+    await this.persist(next)
+    this.cached = next
+    return next.todo!
+  }
+
   async readNotifications(): Promise<NotificationPrefs> {
     return (await this.read()).notifications ?? {}
   }
@@ -114,6 +152,32 @@ export class Settings {
     delete next.birthData
     await this.persist(next)
     this.cached = next
+  }
+
+  /** Today's weather briefing cache (null = not generated yet / stale). ADR 0026. */
+  async readWeatherCache(): Promise<WeatherBriefing | undefined> {
+    return (await this.read()).weather
+  }
+
+  async writeWeatherCache(weather: WeatherBriefing): Promise<WeatherBriefing> {
+    const current = await this.read()
+    const next: AppSettings = { ...current, weather }
+    await this.persist(next)
+    this.cached = next
+    return next.weather!
+  }
+
+  /** Weather city for wttr.in (default 北京). ADR 0026. */
+  async readWeatherCity(): Promise<string> {
+    return (await this.read()).weatherCity ?? '北京'
+  }
+
+  async writeWeatherCity(city: string): Promise<string> {
+    const current = await this.read()
+    const next: AppSettings = { ...current, weatherCity: city }
+    await this.persist(next)
+    this.cached = next
+    return next.weatherCity!
   }
 
   /** Email-sync poll config (enabled / interval) with defaults applied. */
@@ -202,13 +266,54 @@ function normalize(parsed: Partial<AppSettings> | null | undefined): AppSettings
   const notifications = normalizeNotifications(parsed?.notifications)
   const birth = normalizeBirthData(parsed?.birthData)
   const emailSync = normalizeEmailSync(parsed?.emailSync)
+  const weather = normalizeWeather(parsed?.weather)
+  const weatherCity =
+    typeof parsed?.weatherCity === 'string' && parsed.weatherCity.trim().length > 0
+      ? parsed.weatherCity.trim()
+      : undefined
+  const todo = normalizeTodo(parsed?.todo)
   return {
     llm: { provider, modelId },
     ...(jobSearch ? { jobSearch } : {}),
     ...(notifications ? { notifications } : {}),
     ...(birth ? { birthData: birth } : {}),
-    ...(emailSync ? { emailSync } : {})
+    ...(emailSync ? { emailSync } : {}),
+    ...(weather ? { weather } : {}),
+    ...(weatherCity ? { weatherCity } : {}),
+    ...(todo ? { todo } : {})
   }
+}
+
+/** Coerce a parsed ToDo block into a valid shape (ADR 0027). Drops junk rather
+ *  than throwing — a bad block just means defaults apply downstream. */
+function normalizeTodo(t: unknown): TodoSettings | undefined {
+  if (!t || typeof t !== 'object') return undefined
+  const raw = t as Record<string, unknown>
+  const out: TodoSettings = {}
+  if (typeof raw.purgeDone === 'boolean') out.purgeDone = raw.purgeDone
+  if (Number.isFinite(raw.purgeVersion) && (raw.purgeVersion as number) >= 0) {
+    out.purgeVersion = raw.purgeVersion as number
+  }
+  if (Array.isArray(raw.coldStartDone)) {
+    out.coldStartDone = (raw.coldStartDone as unknown[]).filter(
+      (s): s is string => typeof s === 'string'
+    )
+  }
+  if (Array.isArray(raw.skipTokens)) {
+    out.skipTokens = (raw.skipTokens as unknown[]).filter(
+      (s): s is string => typeof s === 'string' && s.length > 0
+    )
+  }
+  if (typeof raw.coldStartEnabled === 'boolean') out.coldStartEnabled = raw.coldStartEnabled
+  if (
+    Number.isFinite(raw.backfillBatchSize) &&
+    (raw.backfillBatchSize as number) >= 5 &&
+    (raw.backfillBatchSize as number) <= 100
+  ) {
+    out.backfillBatchSize = raw.backfillBatchSize as number
+  }
+  if (typeof raw.demoSeeded === 'boolean') out.demoSeeded = raw.demoSeeded
+  return Object.keys(out).length ? out : undefined
 }
 
 /** Coerce a parsed email-sync block into a valid shape. Drops non-numeric
@@ -234,11 +339,37 @@ function normalizeEmailSync(e: unknown): EmailSyncSettings | undefined {
   return Object.keys(out).length ? out : undefined
 }
 
-/** Coerce a parsed birth-data block into a valid `BirthData`. Drops anything
+/** Coerce a parsed weather-briefing block into a valid `WeatherBriefing`. Drops
+ *  a malformed cache (the Home card then shows "not generated yet" + a button). */
+function normalizeWeather(w: unknown): WeatherBriefing | undefined {
+  if (!w || typeof w !== 'object') return undefined
+  const raw = w as Record<string, unknown>
+  if (
+    typeof raw.date !== 'string' ||
+    typeof raw.city !== 'string' ||
+    typeof raw.tempText !== 'string' ||
+    typeof raw.summary !== 'string' ||
+    typeof raw.clothing !== 'string' ||
+    !Array.isArray(raw.yi) ||
+    !Array.isArray(raw.ji)
+  ) {
+    return undefined
+  }
+  return {
+    date: raw.date,
+    city: raw.city,
+    tempText: raw.tempText,
+    summary: raw.summary,
+    clothing: raw.clothing,
+    yi: raw.yi.filter((s) => typeof s === 'string') as string[],
+    ji: raw.ji.filter((s) => typeof s === 'string') as string[]
+  }
+}
+
+/** Coerce a parsed birth-data block into a valid `BirthData`. Drops a block
  *  with out-of-range year/month/day (a bad date mutes nothing — the fortune
  *  degrades to a generic read). */
-function normalizeBirthData(b: unknown): BirthData | undefined
-{
+function normalizeBirthData(b: unknown): BirthData | undefined {
   if (!b || typeof b !== 'object') return undefined
   const raw = b as Record<string, unknown>
   const year = Number(raw.year)

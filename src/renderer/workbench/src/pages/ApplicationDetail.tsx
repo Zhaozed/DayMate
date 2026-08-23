@@ -15,16 +15,19 @@ import {
   APPLICATION_SOURCE_LABEL,
   APPLICATION_EVENT_LABEL,
   APPLICATION_PRIORITY_LABEL,
+  INTERVIEW_ROLE_LABEL,
+  EVENT_SUBSTATE_LABEL,
   statusLabel
 } from '../labels'
 
 // Application detail (Spec §4.2/§4.3). Rich fields are inline-editable (Milestone
 // E polish): each field is an input; "保存" writes the changed fields via
 // updateApplicationFields (R1 local DB write, no approval — §15 only gates
-// external writes). The editable actions are "重新生成简历"/"重新生成逐字稿"
-// (which run the AI generators) and "移到回收站" (soft-delete). Resume/prep
-// HTML previews use <iframe srcDoc sandbox=""> so any injected script in the
-// generated HTML is neutralized (§17).
+// external writes). The editable actions are "上传简历" (the user's own
+// document, trusted §17 — it feeds the 逐字稿 generator) /
+// "重新生成逐字稿" (AI) and "移到回收站" (soft-delete). Resume/prep HTML
+// previews use <iframe srcDoc sandbox=""> so any injected script in the
+// content is neutralized (§17).
 
 export function ApplicationDetail({
   applicationId,
@@ -329,7 +332,7 @@ function ResumeSection({ applicationId }: { applicationId: string }): ReactEleme
     [applicationId]
   )
   const [busy, setBusy] = useState(false)
-  const [genErr, setGenErr] = useState<string | null>(null)
+  const [upErr, setUpErr] = useState<string | null>(null)
   const [selected, setSelected] = useState<string>('')
 
   const versions = data ?? []
@@ -339,15 +342,22 @@ function ResumeSection({ applicationId }: { applicationId: string }): ReactEleme
     : '')
   const current = versions.find((v) => v.id === currentId)
 
-  const generate = async (): Promise<void> => {
+  // Upload the user's OWN resume (trusted §17 — their document). Stored
+  // verbatim as a new version; the interview-transcript generator reads the
+  // latest resume, so uploading is what feeds 逐字稿 generation. Text formats
+  // only (.html/.txt/.md) — PDF binary can't feed the agent or render in the
+  // sandbox iframe.
+  const upload = async (): Promise<void> => {
     setBusy(true)
-    setGenErr(null)
+    setUpErr(null)
     try {
-      await window.daymate.generateResume(applicationId)
-      setSelected('')
-      refetch()
+      const v = await window.daymate.uploadResume(applicationId)
+      if (v) {
+        setSelected('')
+        refetch()
+      }
     } catch (e) {
-      setGenErr(e instanceof Error ? e.message : String(e))
+      setUpErr(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }
@@ -357,23 +367,25 @@ function ResumeSection({ applicationId }: { applicationId: string }): ReactEleme
     <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
       <div className="flex items-center justify-between">
         <div className="text-xs font-semibold uppercase tracking-wide text-white/40">
-          定制简历
+          我的简历
         </div>
         <button
-          onClick={generate}
+          onClick={upload}
           disabled={busy}
           className="rounded bg-white/10 px-3 py-1.5 text-sm text-white/90 hover:bg-white/20 disabled:opacity-50"
         >
-          {busy ? '生成中…' : versions.length > 0 ? '重新生成简历' : '生成简历'}
+          {busy ? '上传中…' : versions.length > 0 ? '重新上传简历' : '上传简历'}
         </button>
       </div>
-      {genErr && <div className="mt-2 text-xs text-rose-300/80">{genErr}</div>}
+      {upErr && <div className="mt-2 text-xs text-rose-300/80">{upErr}</div>}
       {loading ? (
         <p className="mt-2 text-sm text-white/45">加载版本…</p>
       ) : error ? (
         <p className="mt-2 text-sm text-rose-300/80">{error.message}</p>
       ) : versions.length === 0 ? (
-        <p className="mt-2 text-sm text-white/40">尚无简历版本，点击「生成简历」。</p>
+        <p className="mt-2 text-sm text-white/40">
+          尚无简历。点击「上传简历」上传你的简历（.html/.txt/.md），将作为生成逐字稿的底稿。
+        </p>
       ) : (
         <>
           <div className="mt-2 flex items-center gap-2">
@@ -455,7 +467,7 @@ function PrepSection({ applicationId }: { applicationId: string }): ReactElement
       ) : error ? (
         <p className="mt-2 text-sm text-rose-300/80">{error.message}</p>
       ) : versions.length === 0 ? (
-        <p className="mt-2 text-sm text-white/40">尚无逐字稿版本，点击「生成逐字稿」。</p>
+        <p className="mt-2 text-sm text-white/40">尚无逐字稿。先「上传简历」后点击「生成逐字稿」。</p>
       ) : (
         <>
           <div className="mt-2 flex items-center gap-2">
@@ -515,6 +527,16 @@ function EventTimeline({ view }: { view: ApplicationView }): ReactElement {
               </span>
               {e.type === 'interview' && e.round ? (
                 <span className="text-xs text-white/55">{e.round}面</span>
+              ) : null}
+              {e.type === 'interview' && e.role ? (
+                <span className="rounded bg-sky-400/15 px-1.5 text-xs text-sky-200/80">
+                  {INTERVIEW_ROLE_LABEL[e.role]}
+                </span>
+              ) : null}
+              {e.subState ? (
+                <span className="text-xs text-white/50">
+                  · {EVENT_SUBSTATE_LABEL[e.subState]}
+                </span>
               ) : null}
               {e.locked && <span className="text-xs text-amber-300/70">🔒</span>}
               <span className="text-xs text-white/40">{sourceLabel(e.source)}</span>

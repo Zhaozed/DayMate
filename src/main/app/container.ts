@@ -41,9 +41,13 @@ import type { CalendarProvider } from '../providers/calendar/calendar-provider'
 import type { BossProvider } from '../providers/boss/boss-provider'
 import { ApplicationService } from '../services/application-service'
 import { NotificationService } from '../services/notification-service'
+import { EmailBriefingService } from '../services/email-briefing-service'
+import { WeatherService } from '../services/weather-service'
+import { purgeEmailOriginTasks } from '../services/todo-purge'
 import { RobotStateController } from '../services/robot-state-service'
 import { setRobotState, pushRobotNotify } from '../ipc/handlers'
 import { IPC } from '@shared/constants'
+import type { ToolContext } from '../agent/tool-registry'
 
 export interface Container {
   store: SqliteStore
@@ -93,6 +97,13 @@ export interface Container {
   broadcastApplications: () => void
   /** Push the pending email→application matches to the workbench queue. */
   broadcastEmailMatches: () => void
+  /** Push a tasks-changed ping to the workbench Home ToDo list (ADR 0026). */
+  broadcastTasks: () => void
+  /** Daily weather briefing cache + refresh (ADR 0026 Home 今日天气). */
+  weatherService: WeatherService
+  /** Email-briefing pipeline (必读 + ToDo extraction + cold-start backfill,
+   *  ADR 0022/0026/0027). Exposed for the manual re-scan IPC handler. */
+  emailBriefing: EmailBriefingService
   /**
    * Reconcile emailProviders with Gmail + 163 connection state: when a real
    * provider is connected, ensure it is in the array (Gmail at index 0 so
@@ -141,8 +152,10 @@ export function initContainer(): Container {
   // page — so the credential-free default still uses the mocks. The array is
   // the same reference the engine reads each buildContext, so in-place swaps
   // are visible to the running engine without re-wiring.
-  const emailProviders: EmailProvider[] = [new MockEmailProvider(), new MockMail163Provider()]
-  const calendarProvider: CalendarProvider = new MockCalendarProvider()
+  const mockGmail = new MockEmailProvider()
+  const mockMail163 = new MockMail163Provider()
+  const emailProviders: EmailProvider[] = [mockGmail, mockMail163]
+  const mockCalendar = new MockCalendarProvider()
 
   // LLM access (Spec §17.6/§17.8). The key is encrypted at rest by the
   // SecretStore (safeStorage → macOS Keychain) and NEVER crosses to the
@@ -183,7 +196,7 @@ export function initContainer(): Container {
     openExternal: (url) => shell.openExternal(url),
     fetch: net.fetch
   })
-  const calendarDelegate = new SwappableCalendarProvider(calendarProvider)
+  const calendarDelegate = new SwappableCalendarProvider(mockCalendar)
 
   // Real boss-cli subprocess provider (boss-cli integration). boss-cli auth is
   // cookie-based (handled by boss-cli itself); `getStatus` validates the saved
@@ -277,30 +290,139 @@ export function initContainer(): Container {
   }
   applicationService.setEmailMatchesListener(broadcastEmailMatches)
 
+  // ADR 0026 — push the latest tasks to the Home ToDo list whenever a task is
+  // created / updated / deleted (manual or auto-extracted from email). The
+  // briefing + funnel services call this after auto-extracting a ToDo so the
+  // Home list updates live without a manual refetch.
+  const broadcastTasks = (): void => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send(IPC.TASKS_CHANGED)
+    }
+  }
+
   // Reconcile the emailProviders array with the real Gmail + 163 connection
   // state. Real providers are kept in the array when connected (Gmail at index 0)
   // and removed when disconnected so the mocks take over again. The array is the
   // same reference the engine reads each buildContext, so in-place swaps are
   // visible to the running engine without re-wiring.
+  // ADR 0027 — one-time cold-start backfill per account. Triggered from
+  // refreshEmailProviders the moment a real provider is confirmed connected
+  // (and not already in `coldStartDone`). Fire-and-forget: never blocks boot or
+  // the provider reconciliation. Reads `coldStartEnabled !== false` so the user
+  // can opt out from the 集成与设置 page; marks the account done on completion
+  // so a reconnect (or app restart) doesn't re-run the 60-day scan. State is
+  // kept SEPARATE from the incremental EmailSyncCursor (keyed by accountId, not
+  // provider type) so the sync loop's high-water-mark is untouched.
+  // ADR 0027 — boot purge must settle BEFORE the cold-start trigger reads +
+  // writes todo settings, else the two fire-and-forget writers race and
+  // cold-start's writeTodo clobbers purge's `purgeDone` (→ every restart
+  // re-purged email ToDos → they vanished after the 2nd boot because
+  // cold-start wouldn't re-run). The gate resolves once the purge IIFE
+  // completes (success or failure); the trigger awaits it before touching
+  // settings. writeTodo also merges at field level now (defense in depth).
+  let resolvePurgeGate: () => void = () => {}
+  const purgeSettled: Promise<void> = new Promise((resolve) => {
+    resolvePurgeGate = resolve
+  })
+
+  // In-flight cold-start backfills, so a reconnect mid-scan doesn't kick off
+  // a duplicate scan (the account is marked done only AFTER backfill settles —
+  // see below — so without this guard a second trigger would fire).
+  const coldStartInFlight = new Set<string>()
+  const triggerColdStartIfNeeded = (provider: EmailProvider): void => {
+    void (async () => {
+      try {
+        // Wait for the one-time purge to land so our readTodo sees purgeDone
+        // and our writeTodo (merged) preserves it.
+        await purgeSettled
+        const todo = await settings.readTodo()
+        if (todo.coldStartEnabled === false) return
+        const done = todo.coldStartDone ?? []
+        if (done.includes(provider.accountId)) return
+        if (coldStartInFlight.has(provider.accountId)) return
+        coldStartInFlight.add(provider.accountId)
+        // Mark done ONLY after the backfill settles (success). The previous
+        // code marked done BEFORE the fire-and-forget backfill, so if the app
+        // was killed mid-scan (restart during a 60-day gmail backfill), the
+        // account stayed "done" but its history was never re-surfaced — the
+        // incremental cursor is past those emails, so they were gone for good.
+        // Leaving it un-marked on interruption makes the next boot re-fire.
+        void emailBriefing
+          .backfillAccount(provider, { batchSize: todo.backfillBatchSize })
+          .then(async () => {
+            coldStartInFlight.delete(provider.accountId)
+            const t = await settings.readTodo()
+            const d = t.coldStartDone ?? []
+            if (!d.includes(provider.accountId)) {
+              await settings.writeTodo({ ...t, coldStartDone: [...d, provider.accountId] })
+            }
+          })
+          .catch(() => {
+            // Leave un-marked so the next boot/reconnect retries. Don't spam
+            // the activity log — backfillAccount already records failures.
+            coldStartInFlight.delete(provider.accountId)
+          })
+      } catch (err) {
+        coldStartInFlight.delete(provider.accountId)
+        activityService.record({
+          type: 'provider_unavailable',
+          summary: `冷启动回填触发失败 ${provider.accountId}：${err instanceof Error ? err.message : String(err)}`,
+          metadata: { accountId: provider.accountId }
+        })
+      }
+    })()
+  }
+
   const refreshEmailProviders = async (): Promise<void> => {
-    // Gmail → index 0 when connected (email.list with no accountId picks it).
+    try {
+    // Gmail → real at index 0 when connected (email.list with no accountId
+    // picks it); mock takes over when disconnected. CRITICAL: when the real
+    // provider is connected the matching mock MUST be removed — otherwise both
+    // coexist and the mock re-feeds its fixtures to the sync loop every round,
+    // burning LLM on already-seen mail (cursor can't advance past mock
+    // fixtures whose messageId is non-numeric → NaN).
     const gmailConnected = (await gmailProvider.getStatus()) === 'connected'
-    const gmailIdx = emailProviders.indexOf(gmailProvider)
-    if (gmailConnected && gmailIdx !== 0) {
+    if (gmailConnected) {
+      const gmailIdx = emailProviders.indexOf(gmailProvider)
+      if (gmailIdx !== 0) {
+        if (gmailIdx >= 0) emailProviders.splice(gmailIdx, 1)
+        emailProviders.unshift(gmailProvider)
+      }
+      const mockIdx = emailProviders.indexOf(mockGmail)
+      if (mockIdx >= 0) emailProviders.splice(mockIdx, 1)
+      triggerColdStartIfNeeded(gmailProvider)
+    } else {
+      const gmailIdx = emailProviders.indexOf(gmailProvider)
       if (gmailIdx >= 0) emailProviders.splice(gmailIdx, 1)
-      emailProviders.unshift(gmailProvider)
-    } else if (!gmailConnected && gmailIdx >= 0) {
-      emailProviders.splice(gmailIdx, 1)
+      if (emailProviders.indexOf(mockGmail) < 0) emailProviders.unshift(mockGmail)
     }
-    // 163 → present when connected (after Gmail, before any mock).
+    // 163 → real present when connected (after Gmail); mock when disconnected.
     const mail163Connected = (await mail163Provider.getStatus()) === 'connected'
-    const mail163Idx = emailProviders.indexOf(mail163Provider)
-    if (mail163Connected && mail163Idx < 0) {
-      // Insert after a connected Gmail (index 0) if present, else at 0.
-      const insertAt = gmailConnected && emailProviders[0] === gmailProvider ? 1 : 0
-      emailProviders.splice(insertAt, 0, mail163Provider)
-    } else if (!mail163Connected && mail163Idx >= 0) {
-      emailProviders.splice(mail163Idx, 1)
+    if (mail163Connected) {
+      const mail163Idx = emailProviders.indexOf(mail163Provider)
+      if (mail163Idx < 0) {
+        const insertAt = gmailConnected && emailProviders[0] === gmailProvider ? 1 : 0
+        emailProviders.splice(insertAt, 0, mail163Provider)
+      }
+      const mockIdx = emailProviders.indexOf(mockMail163)
+      if (mockIdx >= 0) emailProviders.splice(mockIdx, 1)
+      triggerColdStartIfNeeded(mail163Provider)
+    } else {
+      const mail163Idx = emailProviders.indexOf(mail163Provider)
+      if (mail163Idx >= 0) emailProviders.splice(mail163Idx, 1)
+      if (emailProviders.indexOf(mockMail163) < 0) {
+        const insertAt = gmailConnected && emailProviders[0] === gmailProvider ? 1 : 0
+        emailProviders.splice(insertAt, 0, mockMail163)
+      }
+    }
+    // ADR 0028 — mute the mock calendar fixtures the moment a real email
+    // provider is connected (real user), so the morning_brief routine stops
+    // generating fake "Q3 roadmap review" briefs. Harmless when Feishu is
+    // connected (the delegate swaps to Feishu and never reads the mock).
+    const hasRealEmail = emailProviders.some((p) => !p.accountId.startsWith('mock'))
+    mockCalendar.setRealMode(hasRealEmail)
+    } catch (err) {
+      console.error('[refreshEmailProviders] FAILED:', err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -311,6 +433,18 @@ export function initContainer(): Container {
   const refreshCalendarProvider = async (): Promise<void> => {
     const connected = (await feishuProvider.getStatus()) === 'connected'
     calendarDelegate.swap(feishuProvider, connected)
+    // ADR 0028 — when Feishu isn't connected but a real EMAIL provider is,
+    // the user is real (not a fresh dev install): mute the mock calendar's
+    // canned fixtures so the morning_brief routine stops generating fake
+    // "Q3 roadmap review" briefs + the routine-extracted ToDo "Decide:
+    // Approval Center in P0 or defer for Q3 roadmap". In real mode the mock
+    // returns no events (honest: no calendar connected) instead of fake ones.
+    // When no real email is connected either (dev/credential-free path), the
+    // mock fixtures stay so the Routine Engine runs end-to-end (Spec rule 9).
+    if (!connected) {
+      const realEmail = emailProviders.some((p) => !p.accountId.startsWith('mock'))
+      mockCalendar.setRealMode(realEmail)
+    }
   }
 
   // Reconcile the swappable boss delegate with boss-cli auth state: real
@@ -361,8 +495,23 @@ export function initContainer(): Container {
 
   const scheduler = new RoutineScheduler(engine, store, calendarDelegate, applicationService)
 
-  // Seed preset routines, then start the scheduler.
+  // Seed preset routines, then start the scheduler. (AI产品经理 demo funnel
+  // data is seeded inside the ToDo-purge IIFE below — gated by a one-time
+  // `demoSeeded` flag so it never re-seeds after a purge clears it.)
   seedPresets(store)
+  // One-time cleanup: the auto_inbox routine (now retired — ADR 0024) used to
+  // publish a "收件箱已分类" bucket-count NeedToKnow that was pure noise.
+  // 必读 is now the curated daily brief only (mail-driven urgent/high, ADR
+  // 0022/0023). Purge any stale rows with that exact title (both the zh-CN
+  // localized title and the pre-localization English "Inbox classified" title)
+  // so they don't linger in the 必读 list.
+  needToKnowService.deleteByTitle('收件箱已分类')
+  needToKnowService.deleteByTitle('Inbox classified')
+  // One-time memory reconciliation: agent proposals now auto-confirm (no
+  // manual confirmation gate), so nothing should be pending going forward.
+  // Promote any legacy pending rows + collapse duplicates to one confirmed
+  // value per key.
+  memoryService.reconcile()
   scheduler.start()
 
   // Daily 运势 (fortune) bubble (Milestone E). NOT a routine preset and NOT a
@@ -396,6 +545,36 @@ export function initContainer(): Container {
   })
   void fortuneJob
 
+  // Daily weather briefing (ADR 0026 — Home 今日天气 card). Real weather is
+  // fetched from wttr.in (no key, proxy-aware via Electron `net.fetch`) for the
+  // user's configured city, then a daily LLM step (`generate_daily_weather`)
+  // polishes it into a Chinese summary + clothing + practical 宜/忌 and caches
+  // it in non-secret settings.json (keyed by date). The Home card reads the
+  // cache; stale/absent → empty state with a "生成" button (WEATHER_REFRESH).
+  // 27 8 — off the :00 fleet mark, after the 08:17 fortune bubble. One LLM call
+  // per day; the no-key path falls back to the deterministic stub (zero LLM).
+  const weatherService = new WeatherService({
+    settings,
+    agentRuntime,
+    activityService,
+    // `net.fetch` (Chromium stack) routes wttr.in through the system proxy; its
+    // input type omits `URL` so a narrow cast satisfies the `typeof fetch` dep.
+    fetch: net.fetch as unknown as typeof fetch
+  })
+  const weatherJob = cron.schedule('27 8 * * *', () => {
+    void (async () => {
+      try {
+        await weatherService.refresh()
+      } catch (err) {
+        console.error(
+          '[container] daily weather failed:',
+          err instanceof Error ? err.message : err
+        )
+      }
+    })()
+  })
+  void weatherJob
+
   // Mail-driven funnel feed (post-MVP rebuild). NOT a routine preset and NOT
   // scheduler-owned — a container-level setInterval polls every connected email
   // provider for NEW mail (per-provider high-water-mark cursor in non-secret
@@ -406,6 +585,139 @@ export function initContainer(): Container {
   // funnel). `enabled` is re-read each round so the user can toggle it live;
   // the interval is read once at boot (a cadence change needs a restart). Per-
   // round try/catch — a failed round logs an Activity and never kills the loop.
+  //
+  // After the funnel pass, the SAME delta is handed to EmailBriefingService,
+  // which runs `classify_inbox` (topic dimension) to surface important mail
+  // (招聘 / 账单 / 会议 / 导师 / reply-needed) as urgent/high 必读 and, for
+  // reply-needed important mail, auto-saves a tone-mirrored draft to the
+  // Drafts folder (R1, no approval — §15 exception, ADR 0022). The briefing
+  // records its own Activity on success, which is the 必读 page's refetch
+  // signal (it has no dedicated push channel).
+  const briefingToolContext: ToolContext = {
+    emailProviders,
+    calendarProvider: calendarDelegate,
+    bossProvider: bossDelegate,
+    taskService,
+    needToKnowService,
+    activityService,
+    memoryService,
+    applicationService,
+    settings,
+    webFetch,
+    notify: (m: string) => notificationService.notify({ message: m, category: 'info' })
+  }
+  const emailBriefing = new EmailBriefingService({
+    agentRuntime,
+    needToKnowService,
+    toolRegistry,
+    memoryService,
+    emailProviders,
+    activityService,
+    toolContext: briefingToolContext,
+    // ADR 0026 — auto-extract ToDos from the 必读 classify pass (todoTitle).
+    taskService,
+    onTasksChanged: broadcastTasks
+  })
+  // ADR 0026 — auto-extract ToDos from the funnel classify pass (面试/笔试
+  // notices with todoTitle). The setter avoids touching the ApplicationService
+  // constructor signature (a circular-dep-risky wide ctor).
+  applicationService.setTaskExtraction(taskService, broadcastTasks)
+
+  // ADR 0027 — wire ToDo pipeline settings (school-spam skip tokens) + one-time
+  // purge of legacy email-origin ToDos / 必读 / 投递 (unreadable stub titles,
+  // mock mail, fake low-confidence recruiting-outlook 投递, junk NTKs the
+  // pre-fix surface logic let through). Gated by `settings.todo.purgeVersion`
+  // — bump the version to re-run once after a filtering fix so the cold-start
+  // re-backfill regenerates a clean set with the fixed filters. Fire-and-forget;
+  // the cold-start trigger `await purgeSettled`s this so it lands first.
+  void (async () => {
+    try {
+      const todo = await settings.readTodo()
+      const tokens = todo.skipTokens && todo.skipTokens.length > 0
+        ? todo.skipTokens
+        : ['[student_ips]']
+      emailBriefing.setSkipTokens(tokens)
+      applicationService.setSkipTokens(tokens)
+      // ADR 0027 fix — one-time demo-seed gate. `seedDemoData()` seeds
+      // AI产品经理 demo 投递 (source:'email') whenever the funnel is empty.
+      // Its own `hasRealData` guard treats its demo rows as "real", so once a
+      // versioned purge wipes them the guard drops and seedDemoData RE-SEEDS
+      // on every subsequent boot → fake 投递 persist forever for a real user
+      // with connected providers ("我啥时候投递过"). Gate the seed behind a
+      // one-time `demoSeeded` flag (never reset by the purge) so demo data
+      // seeds at most once ever; after the purge clears it, it stays cleared.
+      if (!todo.demoSeeded) {
+        applicationService.seedDemoData()
+        await settings.writeTodo({ demoSeeded: true })
+      }
+      // Bump PURGE_VERSION after each filtering fix that needs to re-clear
+      // stale email-origin items + re-backfill. v2 = respect LLM `ignore` +
+      // gate 投递 creation on confidence. v3 = drop bulk mail from 必读
+      // entirely (LinkedIn ads / game notifications were surfacing via the
+      // keyword carve-out). v4 = clear the re-seeded demo 投递 tug-of-war
+      // (now blocked by `demoSeeded` so they won't reappear). v5 = clear
+      // mock-sourced morning_brief NTKs + routine-extracted mock ToDos (the
+      // mock calendar "Q3 roadmap" event fed morning_brief before real
+      // providers connected; mock calendar now muted in real mode). v6 = clear
+      // DISMISSED mock-sourced NTKs too (a user dismissed the "Q3 roadmap"
+      // mock brief before real providers connected; `list()` excludes
+      // dismissed so they survived v5 — `listAll()` scans the full table).
+      // v7 = ADR 0029 必读 redesign: the old NTKs are one-per-email with no
+      // threadId / briefingCategory / sourceProvider / sourceLink, so the new
+      // thread-aggregated 4-section page would render them all under 其他
+      // with no source badge / no expand. Purge them so the cold-start re-
+      // backfill rebuilds every surfaced email as a thread-merged item with
+      // the new fields + relaxed filter (operation-triggered bulk now kept).
+      // v8 = ADR 0029 fix: the v7 `operationTriggered` surface arm force-
+      // surfaced ANY bulk that cleared the pre-LLM ads/codes/alerts gate as
+      // `medium`, overriding the LLM `ignore`. Grab / Malay promo marketing
+      // ("Flash Sale" / "Deals" / "Diskaun" / "happy prices") the narrow
+      // ADS_KEYWORD_RE missed flooded 必读 ("啥内容都没有"). Fix: surface
+      // gate back to `important || actionable` (operation-triggered mail the
+      // user cares about — 投递/面试/账单/会议 — lands on an important topic
+      // anyway) + always respect the LLM `ignore`. Purge the junk NTKs the
+      // broken arm let through so the cold-start re-backfill rebuilds clean.
+      // v9 = 必读 headline swap: title is now the model's Chinese summary
+      // (r.reason), with the raw email subject demoted to a subtitle. Existing
+      // NTKs were created with title=subject (old behavior), so purge + re-
+      // backfill to rebuild them with title=reason. Also widens the ToDo
+      // todoTitle cap 25→40 chars so the advisor/sender name fits.
+      const PURGE_VERSION = 9
+      if ((todo.purgeVersion ?? 0) < PURGE_VERSION) {
+        const purged = purgeEmailOriginTasks(
+          taskService,
+          applicationService,
+          needToKnowService
+        )
+        const total = purged.tasks + purged.applications + purged.ntk
+        if (total > 0) {
+          activityService.record({
+            type: 'tool_completed',
+            summary: `清理旧邮件数据：待办 ${purged.tasks} / 必读 ${purged.ntk} / 投递 ${purged.applications} 条（已由冷启动回填按修复后过滤重建）`,
+            metadata: { purged }
+          })
+        }
+        // Reset coldStartDone so triggerColdStartIfNeeded re-fires the 60-day
+        // backfill once with the FIXED filters (writeTodo MERGES, so this only
+        // touches coldStartDone — purgeVersion/purgeDone/skipTokens survive).
+        await settings.writeTodo({
+          purgeVersion: PURGE_VERSION,
+          purgeDone: true,
+          skipTokens: tokens,
+          coldStartDone: []
+        })
+      }
+    } catch (err) {
+      activityService.record({
+        type: 'provider_unavailable',
+        summary: `ToDo 设置初始化失败：${err instanceof Error ? err.message : String(err)}`
+      })
+    } finally {
+      // Release the cold-start trigger's gate regardless of outcome so it
+      // never deadlocks waiting on a failed purge.
+      resolvePurgeGate()
+    }
+  })()
   const startEmailSyncLoop = async (): Promise<void> => {
     const { intervalSec } = await settings.readEmailSyncConfig()
     const intervalMs = Math.max(60, intervalSec) * 1000
@@ -427,6 +739,11 @@ export function initContainer(): Container {
         if (result.synced > 0 || result.created > 0 || result.pending > 0) {
           broadcastApplications()
           broadcastEmailMatches()
+        }
+        // Brief the same delta into 必读 + (for reply-needed important mail)
+        // a draft. Runs after the funnel pass so the cursor is already advanced.
+        if (result.newEmails.length > 0) {
+          await emailBriefing.briefNewEmails(result.newEmails)
         }
       } catch (err) {
         activityService.record({
@@ -467,11 +784,14 @@ export function initContainer(): Container {
     bossDelegate,
     bossCliProvider,
     notificationService,
+    weatherService,
+    emailBriefing,
     broadcastActivity,
     broadcastApprovals,
     broadcastMemory,
     broadcastApplications,
     broadcastEmailMatches,
+    broadcastTasks,
     refreshEmailProviders,
     refreshCalendarProvider,
     refreshBossProvider

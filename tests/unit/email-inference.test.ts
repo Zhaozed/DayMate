@@ -164,6 +164,29 @@ describe('application service — email→application inference (§3.3)', () => 
     expect(ev!.locked).toBe(false)
   })
 
+  it('low-confidence recruiting-outreach mail (communicated, no progress keywords) → pending, NOT auto-created (ADR 0027 fix)', async () => {
+    const { svc } = makeService()
+    // A recruiting-outreach email: company + position extracted, but no
+    // interview/offer/reject/test/applied keywords → stub confidence=low
+    // (eventType=communicated). The candidate never applied, so it MUST NOT
+    // auto-create a 投递 row — it lands in the manual-confirm queue.
+    const emails = [
+      makeEmail({
+        messageId: 'm-outreach',
+        fromName: 'Universiti Malaya HR',
+        subject: 'RA position available',
+        body: 'We have an open Research Assistant position. Reach out if interested.'
+      })
+    ]
+    const res = await svc.syncFromEmails([makeEmailProvider(emails)], runtime)
+    expect(res.created).toBe(0)
+    expect(res.pending).toBe(1)
+    expect(svc.list().find((v) => v.application.company.includes('Malaya'))).toBeUndefined()
+    const pending = svc.listPendingEmailMatches()
+    expect(pending).toHaveLength(1)
+    expect(pending[0].company).toContain('Malaya')
+  })
+
   it('identity-less mail (no position extracted) lands in the pending queue', async () => {
     const { svc } = makeService()
     svc.create({ company: '腾讯', position: '前端' })

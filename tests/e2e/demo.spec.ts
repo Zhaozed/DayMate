@@ -1,22 +1,23 @@
 import { test, expect } from '@playwright/test'
 import { launchDaymate, robotWindow, workbenchWindow, getRobotStatesStable } from './helpers'
 
-// Critical demo flow (Spec §22) — the three-minute demo's ten steps, exercised
-// end-to-end on the credential-free mock path. Run THREE consecutive times
-// (fresh isolated app each time) to satisfy the §19 release gate "critical
-// demo flow succeeds three consecutive times".
+// Critical demo flow (Spec §22) — exercised end-to-end on the credential-free
+// mock path. Run THREE consecutive times (fresh isolated app each time) to
+// satisfy the §19 release gate "critical demo flow succeeds three consecutive
+// times".
 //
-// Steps mapped:
-//  1. Robot wakes + Morning Brief ready        → run Morning Brief; robot → done
-//  2. Home shows combined Gmail/163/Feishu/Tasks → Home data present
-//  3. Important email becomes Need to Know      → a NTK was published
-//  4. Agent extracts action + creates a Task   → a Task exists from the brief
-//  5. Agent drafts a response                   → Draft Review pauses
-//  6. Robot enters Need Approval                → robot state need_approval
-//  7. User previews + approves                  → Approve & send
-//  8. Exact reviewed draft is sent             → approval executed
-//  9. Activity shows the complete trace         → listActivity non-empty
-// 10. Routines page shows config + next run     → navigate + routine present
+// The slimmed product (ADR 0022) has no draft-approval step in the critical
+// flow: `email.create_draft` is R1 (auto, no approval — drafts save to the
+// Drafts folder and the user sends manually); the §15 send gate is covered by
+// the integration `approval-flow.test.ts` (via `email.send_draft`). This e2e
+// therefore traces the new product's main line:
+//  1. Run Morning Brief from Home        → robot → done
+//  2. Morning Brief publishes Need-to-Know → a 必读 item exists (urgent/high)
+//  3. Morning Brief extracts an action     → a Task exists
+//  4. Activity shows the brief trace       → listActivity non-empty
+//  5. Routines page shows the active presets and no retired ones
+//     (morning_brief / auto_inbox / interview_prep present; draft_review /
+//     meeting_prep / daily_work_summary / job_recommendation absent)
 
 async function runCriticalDemo(): Promise<void> {
   const app = await launchDaymate()
@@ -24,72 +25,36 @@ async function runCriticalDemo(): Promise<void> {
     const robot = await robotWindow(app)
     const workbench = await workbenchWindow(app)
 
-    // 1 + 3 + 4: Run Morning Brief from Home → robot done; a NTK + a Task land.
+    // 1: Run Morning Brief from Home → robot done.
     await workbench.getByRole('button', { name: '运行晨报' }).click()
     await getRobotStatesStable(robot, (s) => s === 'done' || s === 'idle', 10_000)
 
+    // 2: A 必读 item was published (the page filters to urgent/high; the IPC
+    // returns all, so assert at least one is urgent or high — the only kind
+    // the slimmed 必读 page surfaces).
     const ntk = await workbench.evaluate(() =>
-      (window as unknown as { daymate: { listNeedToKnow(): Promise<{ id: string; title: string }[]> } })
+      (window as unknown as { daymate: { listNeedToKnow(): Promise<{ id: string; title: string; priority: string }[]> } })
         .daymate.listNeedToKnow()
     )
     expect(ntk.length).toBeGreaterThan(0)
+    expect(ntk.some((n) => n.priority === 'urgent' || n.priority === 'high')).toBe(true)
 
+    // 3: A Task was created from the brief.
     const tasks = await workbench.evaluate(() =>
       (window as unknown as { daymate: { listTasks(): Promise<{ id: string; sourceType: string }[]> } })
         .daymate.listTasks()
     )
     expect(tasks.length).toBeGreaterThan(0)
 
-    // 9 (partial): Activity already recorded for Morning Brief.
-    const activityBefore = await workbench.evaluate(() =>
+    // 4: Activity recorded the Morning Brief trace.
+    const activity = await workbench.evaluate(() =>
       (window as unknown as { daymate: { listActivity(): Promise<{ id: string; summary: string }[]> } })
         .daymate.listActivity()
     )
-    expect(activityBefore.some((e) => e.summary.includes('晨报'))).toBe(true)
+    expect(activity.some((e) => e.summary.includes('晨报'))).toBe(true)
 
-    // 5 + 6: Draft Review pauses for approval; robot → need_approval.
-    const run = await workbench.evaluate(() =>
-      (window as unknown as { daymate: { runRoutine: (id: string) => Promise<{ id: string; status: string }> } })
-        .daymate.runRoutine('draft_review')
-    )
-    expect(run.status).toBe('waiting_approval')
-    await getRobotStatesStable(robot, (s) => s === 'need_approval', 10_000)
-
-    // 7: A pending approval exists; open Approvals and approve.
-    const approvalsBefore = await workbench.evaluate(() =>
-      (window as unknown as { daymate: { listApprovals(): Promise<{ id: string; status: string; toolName: string }[]> } })
-        .daymate.listApprovals()
-    )
-    const pending = approvalsBefore.filter((a) => a.status === 'pending')
-    expect(pending.length).toBe(1)
-    expect(pending[0].toolName).toBe('email.create_draft')
-
-    await workbench.evaluate(() =>
-      (window as unknown as { daymate: { openWorkbenchAt: (p: string) => Promise<void> } })
-        .daymate.openWorkbenchAt('Approvals')
-    )
-    await expect(workbench.getByText('在你批准之前，什么都不会发出。')).toBeVisible()
-    await workbench.getByRole('button', { name: '批准并发送' }).click()
-
-    // 8: Robot returns to done/idle (execution completed under the approval
-    // context, content hash rechecked at resume), THEN the approval is executed.
-    await getRobotStatesStable(robot, (s) => s === 'done' || s === 'idle', 10_000)
-    const approvalsAfter = await workbench.evaluate(() =>
-      (window as unknown as { daymate: { listApprovals(): Promise<{ id: string; status: string }[]> } })
-        .daymate.listApprovals()
-    )
-    const mine = approvalsAfter.find((a) => a.id === pending[0].id)
-    expect(mine?.status).toBe('executed')
-
-    // 9: Activity shows the complete trace (both runs).
-    const activityAfter = await workbench.evaluate(() =>
-      (window as unknown as { daymate: { listActivity(): Promise<{ id: string; summary: string }[]> } })
-        .daymate.listActivity()
-    )
-    expect(activityAfter.length).toBeGreaterThan(activityBefore.length)
-
-    // 10: Routines page shows configured routines (the presets) and is
-    // reachable via the same deep-link path the robot's quick-panel uses.
+    // 5: Routines page shows the active presets and no retired ones. Reachable
+    // via the same deep-link path the robot's quick-panel uses.
     await workbench.evaluate(() =>
       (window as unknown as { daymate: { openWorkbenchAt: (p: string) => Promise<void> } })
         .daymate.openWorkbenchAt('Routines')
@@ -100,7 +65,13 @@ async function runCriticalDemo(): Promise<void> {
         .daymate.listRoutines()
     )
     expect(routines.some((r) => r.id === 'morning_brief')).toBe(true)
-    expect(routines.some((r) => r.id === 'draft_review')).toBe(true)
+    expect(routines.some((r) => r.id === 'interview_prep')).toBe(true)
+    // Retired presets must not survive seedPresets' boot cleanup.
+    expect(routines.some((r) => r.id === 'auto_inbox')).toBe(false)
+    expect(routines.some((r) => r.id === 'draft_review')).toBe(false)
+    expect(routines.some((r) => r.id === 'meeting_prep')).toBe(false)
+    expect(routines.some((r) => r.id === 'daily_work_summary')).toBe(false)
+    expect(routines.some((r) => r.id === 'job_recommendation')).toBe(false)
   } finally {
     await app.close()
   }

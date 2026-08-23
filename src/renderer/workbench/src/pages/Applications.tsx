@@ -29,15 +29,19 @@ import {
 } from '../labels'
 import { ApplicationDetail } from './ApplicationDetail'
 
-// 投递漏斗 (Spec §3, §5). Cross-channel single source of truth: BOSS 直聘
-// (boss-cli sync) + manual 官网/内推/线下 entries. Smart-sort grouping mirrors
-// the backend smartSortedViews (urgent → active → stale → offered → ended).
-// A collapsible 邮件待确认 queue (email→app inference) sits above the funnel;
-// a collapsible 回收站 (soft-deleted) sits below. Clicking a card opens the
-// detail view (rich fields, resume/prep AI generators, event timeline).
+// 投递漏斗 (Spec §3, §5). Email-driven: 163 mail is auto-aggregated into the
+// funnel (回执→建 item，面试/测评/笔试→追加事件); manual 官网/内推/线下 entries
+// coexist. BOSS 直聘 is retired (ADR 0019 — anti-bot wall; UI hidden, backend
+// dormant), so it no longer appears here. Smart-sort grouping mirrors the
+// backend smartSortedViews (urgent → active → stale → offered → ended).
+// A collapsible 回收站 (soft-deleted) sits below. Clicking a card opens the
+// detail view (rich fields, resume upload, 逐字稿 generator, event timeline).
+//
+// The 邮件待确认 queue (low-confidence email→app inference) is unmounted from
+// this page — its home is TBD (discussed separately). The component is kept
+// `export`ed below (dormant) so re-mounting is a one-line change.
 
 const EVENT_TYPES: ApplicationEventType[] = [
-  'communicated',
   'assessment',
   'written_test',
   'interview',
@@ -68,9 +72,8 @@ export function ApplicationsPage(): ReactElement {
   const { data: apps, loading, error, setData, refetch } = useAsync(
     () => window.daymate.listApplications()
   )
-  const [emailSyncing, setEmailSyncing] = useState(false)
+  const [syncing, setSyncing] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
-  const [showEmailQueue, setShowEmailQueue] = useState(true)
   const [showReview, setShowReview] = useState(false)
   const [showRecycle, setShowRecycle] = useState(false)
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
@@ -105,28 +108,25 @@ export function ApplicationsPage(): ReactElement {
 
   return (
     <div>
-      <Header onAdd={() => setShowAdd((v) => !v)} />
-
-      <ReviewSection
-        open={showReview}
-        onToggle={() => setShowReview((v) => !v)}
-        onChanged={refetch}
-      />
-
-      <EmailQueueSection
-        open={showEmailQueue}
-        onToggle={() => setShowEmailQueue((v) => !v)}
-        emailSyncing={emailSyncing}
+      <Header
+        onAdd={() => setShowAdd((v) => !v)}
+        syncing={syncing}
         onSyncEmail={async () => {
-          setEmailSyncing(true)
+          setSyncing(true)
           try {
             await window.daymate.syncEmailApplications()
           } catch (e) {
             console.error(e)
           } finally {
-            setEmailSyncing(false)
+            setSyncing(false)
           }
         }}
+      />
+
+      <ReviewSection
+        open={showReview}
+        onToggle={() => setShowReview((v) => !v)}
+        onChanged={refetch}
       />
 
       {showAdd && (
@@ -143,7 +143,7 @@ export function ApplicationsPage(): ReactElement {
       {list.length === 0 ? (
         <EmptyState
           title="暂无投递记录"
-          hint="点击「新增投递」手动添加，或「同步 BOSS」从 BOSS 直聘拉取。"
+          hint="点击「同步邮件」从 163 邮箱拉取招聘邮件自动汇总，或「新增投递」手动添加。"
         />
       ) : (
         <FunnelList
@@ -168,9 +168,11 @@ export function ApplicationsPage(): ReactElement {
 // 复盘 is an on-demand snapshot (not persisted); suggestedActions are plain
 // text labels with no one-click follow-up (this milestone has no external write).
 
+// `communicated` is a retired BOSS-only stage (HR replied on BOSS); the
+// email-driven funnel never produces it, so it is not a funnel-conversion
+// stage. The wire value stays in APPLICATION_EVENT_LABEL (dormant).
 const FUNNEL_STAGES = [
   'applied',
-  'communicated',
   'assessment',
   'written_test',
   'interview',
@@ -1117,9 +1119,11 @@ function FunnelList({
   )
 }
 
-// ── Email pending-queue section ───────────────────────────────────────────
+// ── Email pending-queue section (DORMANT — unmounted from the 投递 page; its
+// home is TBD. Kept `export`ed so re-mounting is a one-line change once a new
+// surface is decided.) ─────────────────────────────────────────────────────
 
-function EmailQueueSection({
+export function EmailQueueSection({
   open,
   onToggle,
   emailSyncing,
@@ -1663,7 +1667,15 @@ function ApplicationCard({
   )
 }
 
-function Header({ onAdd }: { onAdd: () => void }): ReactElement {
+function Header({
+  onAdd,
+  syncing,
+  onSyncEmail
+}: {
+  onAdd: () => void
+  syncing: boolean
+  onSyncEmail: () => Promise<void>
+}): ReactElement {
   return (
     <div className="flex items-center justify-between">
       <div>
@@ -1671,6 +1683,13 @@ function Header({ onAdd }: { onAdd: () => void }): ReactElement {
         <p className="mt-1 text-sm text-white/45">邮件自动汇总 + 手动录入（官网/内推/线下）。</p>
       </div>
       <div className="flex gap-2">
+        <button
+          onClick={() => void onSyncEmail()}
+          disabled={syncing}
+          className="rounded bg-white/5 px-3 py-1.5 text-sm text-white/80 hover:bg-white/10 disabled:opacity-50"
+        >
+          {syncing ? '同步中…' : '同步邮件'}
+        </button>
         <button
           onClick={onAdd}
           className="rounded bg-white/10 px-3 py-1.5 text-sm text-white/90 hover:bg-white/20"

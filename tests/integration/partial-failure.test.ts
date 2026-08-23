@@ -1,22 +1,18 @@
 import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
+import { ApplicationService } from '../../src/main/services/application-service'
 import { ActivityService } from '../../src/main/services/activity-service'
-import { TaskService } from '../../src/main/services/task-service'
-import { NeedToKnowService } from '../../src/main/services/need-to-know-service'
-import { ApprovalService } from '../../src/main/services/approval-service'
-import { MemoryService } from '../../src/main/services/memory-service'
-import { createToolRegistry } from '../../src/main/agent/tool-registry'
-import { createDeterministicAgentRuntime } from '../../src/main/agent/agent-runtime'
-import { RoutineEngine, type EngineDeps } from '../../src/main/routines/engine'
-import { seedPresets } from '../../src/main/routines/presets'
+import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
-import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
 import type { EmailProvider, EmailQuery, NormalizedEmail } from '@shared/types'
 
-// Spec M3 partial-failure: a down provider does not kill a routine. Auto Inbox
-// marks its email.list steps `continueOnError`, so one provider throwing → the
-// other is still triaged, a `provider_unavailable` Activity event is recorded,
-// the run completes, and a Need to Know is published.
+// Spec M3 partial-failure: a down provider does not kill the mail-driven
+// funnel. The container's email sync loop calls `syncFromEmails` with every
+// connected provider; a provider whose `listMessages` throws is caught inside
+// the service, recorded as a `provider_unavailable` Activity, and the other
+// provider's mail is still classified + built into 投递. (Originally anchored
+// on the `auto_inbox` routine — ADR 0024 retired it; the sync loop now owns
+// this path, so the partial-failure guarantee is re-anchored here.)
 
 /** A provider whose `listMessages` always throws — simulates 163 being down. */
 function throwingProvider(accountId: string): EmailProvider {
@@ -51,56 +47,38 @@ function throwingProvider(accountId: string): EmailProvider {
   } as EmailProvider
 }
 
-function buildEngine(providers: EmailProvider[]) {
-  const store = new InMemoryStore()
-  const deps: EngineDeps = {
-    store,
-    toolRegistry: createToolRegistry(),
-    activityService: new ActivityService(store),
-    taskService: new TaskService(store),
-    needToKnowService: new NeedToKnowService(store),
-    approvalService: new ApprovalService(store),
-    emailProviders: providers,
-    calendarProvider: new MockCalendarProvider(),
-    agentRuntime: createDeterministicAgentRuntime(),
-    memoryService: new MemoryService(store),
-    notify: () => {}
+function countingRuntime() {
+  let n = 0
+  const rt = {
+    runAgentStep: async (a: string, i: Record<string, unknown>) => {
+      n++
+      const { runAgentStep } = await import('../../src/main/agent/agent-runtime')
+      return runAgentStep(a, i)
+    }
   }
-  return { engine: new RoutineEngine(deps), store, deps }
+  return { rt, count: () => n }
 }
 
-describe('partial failure — one provider down', () => {
-  it('records provider_unavailable, still triages the other provider, completes', async () => {
-    // Gmail works; 163 (mock-163-001) throws.
-    const { engine, store } = buildEngine([
+describe('partial failure — one provider down (sync loop)', () => {
+  it('records provider_unavailable, still builds 投递 from the surviving provider', async () => {
+    const store = new InMemoryStore()
+    const activity = new ActivityService(store)
+    const svc = new ApplicationService(store, new MockBossProvider(), activity)
+    const { rt } = countingRuntime()
+    // Gmail works; 163 throws.
+    const providers: EmailProvider[] = [
       new MockEmailProvider(),
       throwingProvider('mock-163-001')
-    ])
-    seedPresets(store)
+    ]
 
-    const run = await engine.run('auto_inbox', { idempotencyKey: 'pf-1' })
-    expect(run.status).toBe('completed')
+    const res = await svc.syncFromEmails(providers, rt, {})
+    // The run completes — Gmail mail was still classified + built.
+    expect(res.synced + res.created + res.pending).toBeGreaterThan(0)
 
-    const events = store.listActivity(run.id)
-    // The 163 outage is surfaced as a provider_unavailable event.
-    expect(events.some((e) => e.type === 'provider_unavailable')).toBe(true)
-    const outage = events.find((e) => e.type === 'provider_unavailable')!
-    expect(outage.summary).toContain('163')
-
-    // Gmail mail was still triaged — tasks created from the Gmail feed only.
-    const tasks = store.listTasks()
-    expect(tasks.length).toBeGreaterThan(0)
-    expect(tasks.every((t) => t.sourceType === 'email')).toBe(true)
-
-    // A Need to Know summarizing the buckets was still published.
-    const ntk = store.listNeedToKnow()
-    expect(ntk.length).toBe(1)
-    expect(ntk[0].title).toBe('收件箱已分类')
-
-    // Agent step ran (classify) and completed despite one inbox missing.
-    expect(events.some((e) => e.type === 'agent_completed')).toBe(true)
-    expect(events.some((e) => e.type === 'routine_completed')).toBe(true)
-    // No agent failure (the stub path ran fine on the single feed).
-    expect(events.some((e) => e.type === 'agent_failed')).toBe(false)
+    // The 163 outage is surfaced as a provider_unavailable Activity event.
+    const events = activity.list()
+    const outage = events.find((e) => e.type === 'provider_unavailable')
+    expect(outage).toBeDefined()
+    expect(outage!.summary).toContain('163')
   })
 })

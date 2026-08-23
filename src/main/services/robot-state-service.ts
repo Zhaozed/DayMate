@@ -84,15 +84,18 @@ export class RobotStateController {
   }
 
   private setState(next: RobotState): void {
-    // Cancel any pending done→idle reset: a newer event supersedes it.
+    // Cancel any pending done/error→idle reset: a newer event supersedes it.
     this.clearReset()
     this.state = next
     this.onChange(next)
-    if (next === 'done') {
-      // Schedule the idle reset. `need_approval` is sticky and never set here.
+    // `done` and `error` are transient — both auto-relax to `idle` after
+    // resetDelayMs so a single failed classify_inbox (agent_failed → error)
+    // doesn't pin the orb red forever. `need_approval` is sticky and never
+    // set here (only cleared by an approval_resolved event).
+    if (next === 'done' || next === 'error') {
       this.resetHandle = this.timer.setTimeout(() => {
         this.resetHandle = undefined
-        if (this.state === 'done') this.setState('idle')
+        if (this.state === 'done' || this.state === 'error') this.setState('idle')
       }, this.resetDelayMs)
     }
   }

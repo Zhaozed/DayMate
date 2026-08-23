@@ -25,6 +25,7 @@ import type {
 import type { EmailProvider } from './email-provider'
 import type { SecretStore } from '../../util/secrets'
 import { newId, nowIso } from '../../util/ids'
+import { detectBulkFromHeaders } from '../../util/bulk-mail'
 import { buildRfc822Raw, normalizeRfc822ViaParser, type ParsedMailLike } from './mail-mime'
 
 const CLIENT_KEY = 'mail163-client'
@@ -148,6 +149,14 @@ export class Mail163Provider implements EmailProvider {
     }
   }
 
+  /** ADR 0027 — cold-start backfill: all mail newer than `sinceDate` (newest-
+   *  first). 163's IMAP search + the client-side sinceHours filter already do
+   *  the job, so this just widens `listMessages` to the requested window + cap. */
+  async listBackfill(sinceDate: Date, maxItems = 2000): Promise<NormalizedEmail[]> {
+    const sinceHours = Math.max(1, Math.ceil((Date.now() - sinceDate.getTime()) / 3600_000))
+    return this.listMessages({ sinceHours, limit: maxItems })
+  }
+
   async getMessage(messageId: string): Promise<NormalizedEmail> {
     const client = await this.getClient()
     const imap = await this.openImap(client)
@@ -165,6 +174,54 @@ export class Mail163Provider implements EmailProvider {
       }
     } finally {
       await imap.logout()
+    }
+  }
+
+  /** ADR 0029 — best-effort thread fetch for 163. The synthesized `threadId` is
+   *  the conversation ROOT's Message-ID (first References token, or the
+   *  message's own Message-ID for the root). Replies carry the root in their
+   *  References header; the root carries it in Message-Id. So searching both
+   *  headers for the thread key + de-duping UIDs recovers the thread. IMAP
+   *  header-substring search is unreliable on 163 → on any error / empty
+   *  result, return [] (the 必读 expand falls back to surfaced sourceRefs).
+   *  Never throws. R0 read-only; never persisted. */
+  async getThread(threadId: string): Promise<NormalizedEmail[]> {
+    if (!threadId) return []
+    const client = await this.getClient()
+    const imap = await this.openImap(client)
+    try {
+      const lock = await imap.getMailboxLock('INBOX')
+      try {
+        const uidSets = [
+          await safeSearch(imap, { header: ['references', threadId] }),
+          await safeSearch(imap, { header: ['in-reply-to', threadId] }),
+          await safeSearch(imap, { header: ['message-id', threadId] })
+        ]
+        const uids = [...new Set(uidSets.flat().map((u) => Number(u)))].sort((a, b) => a - b)
+        if (uids.length === 0) return []
+        const out: NormalizedEmail[] = []
+        for (const uid of uids) {
+          const msg = await imap.fetchOne(uid, { source: true, internalDate: true, flags: true }, { uid: true })
+          if (!msg || !msg.source) continue
+          const parsed = await normalizeRfc822ViaParser(msg.source instanceof Buffer ? msg.source : Buffer.from(msg.source))
+          const receivedAt = msg.internalDate ? msg.internalDate.toISOString() : parsed.date?.toISOString() ?? nowIso()
+          const unread = msg.flags ? !msg.flags.has('\\Seen') : true
+          out.push(toNormalized(parsed, this.accountId, String(uid), receivedAt, unread, msg.flags ? [...msg.flags] : []))
+        }
+        // Oldest first (internalDate ascending).
+        out.sort((a, b) => new Date(a.receivedAt).getTime() - new Date(b.receivedAt).getTime())
+        return out
+      } finally {
+        lock.release()
+      }
+    } catch {
+      return [] // best-effort — never surface a 163 IMAP error to the 必读 page
+    } finally {
+      try {
+        await imap.logout()
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -378,10 +435,21 @@ function toNormalized(
   flags: string[]
 ): NormalizedEmail {
   const from = parsed.from.value?.[0] ? toAddress(parsed.from.value[0]) : { address: parsed.from.text ?? '' }
+  // ADR 0023: compute the bulk flag from routing headers (provider-local;
+  // only the boolean persists — §17) so mass mail is filtered pre-LLM.
+  const bulk = detectBulkFromHeaders((name) => parsed.headers?.get(name) ?? '')
+  // ADR 0029 — synthesize a thread key from RFC822 threading headers so 163
+  // emails in the same conversation collapse into one 必读 item. References is
+  // a space-separated list of angle-bracket ids; the FIRST is the thread root
+  // (same for every reply). Fall back to In-Reply-To, then the message's own
+  // Message-ID (the root itself has no References). mailparser parses these
+  // headers; `toNormalized` previously discarded them.
+  const threadId = synthesizeThreadId(parsed)
   return {
     provider: 'mail163',
     accountId,
     messageId: uid,
+    threadId,
     from,
     to: (parsed.to?.value ?? []).map(toAddress),
     cc: (parsed.cc?.value ?? []).map(toAddress),
@@ -390,8 +458,50 @@ function toNormalized(
     receivedAt,
     unread,
     labels: flags,
-    sourceUrl: `https://mail.163.com/`
+    sourceUrl: `https://mail.163.com/`,
+    bulk
   }
+}
+
+/** Extract the first `<...>` angle-bracket token from a References /
+ *  In-Reply-To header value (may contain several ids). Returns the bare id
+ *  without angle brackets, or undefined if none. Exported for unit tests.
+ *  Coerces mailparser's `.get()` which can return a non-string (array) for
+ *  list-valued headers. */
+export function firstAngleToken(headerVal: unknown): string | undefined {
+  if (!headerVal) return undefined
+  const s = Array.isArray(headerVal) ? headerVal.join(' ') : String(headerVal)
+  const m = s.match(/<([^>]+)>/)
+  return m ? m[1] : undefined
+}
+
+/** Best-effort IMAP header search that never throws — 163's IMAP header search
+ *  is unreliable, so a thrown error just yields an empty UID set (the thread
+ *  fetch degrades to surfaced-only). */
+async function safeSearch(imap: ImapFlowLike, query: Record<string, unknown>): Promise<number[]> {
+  try {
+    const r = await imap.search(query, { uid: true })
+    return r ?? []
+  } catch {
+    return []
+  }
+}
+
+/** ADR 0029 — synthesize a 163 thread key. Prefer the first References token
+ *  (the conversation root, shared by every reply); fall back to In-Reply-To;
+ *  fall back to the message's own Message-ID (the root message has neither).
+ *  The messageId fallback ALSO strips angle brackets so the root's key matches
+ *  the bare id every reply references (mailparser returns Message-Id WITH
+ *  brackets; References/In-Reply-To tokens are extracted WITHOUT). Exported
+ *  for unit tests (pure function over parsed headers). */
+export function synthesizeThreadId(parsed: ParsedMailLike): string | undefined {
+  const fromRefs = firstAngleToken(parsed.headers?.get('references'))
+  if (fromRefs) return fromRefs
+  const fromIrt = firstAngleToken(parsed.headers?.get('in-reply-to'))
+  if (fromIrt) return fromIrt
+  const mid = parsed.messageId
+  if (!mid) return undefined
+  return firstAngleToken(mid) ?? mid
 }
 
 function toAddress(v: { name?: string; address?: string }): MailAddress {

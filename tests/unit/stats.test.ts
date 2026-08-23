@@ -110,8 +110,12 @@ describe('ApplicationService.stats() — funnel review statistics', () => {
   it('urgent = apps with a stage_deadline within 3 days', () => {
     const { svc, store } = makeService()
     const soon = new Date(Date.now() + 1 * 86_400_000).toISOString() // tomorrow
+    // Recent activity so the app isn't stale (smartSortedViews checks stale
+    // BEFORE urgent) — a stage_deadline within 3 days then buckets as urgent.
     store.createApplication(makeApp({ id: 'a1', stageDeadline: soon }))
-    store.createApplicationEvent(makeEvent('a1', { id: 'e1', type: 'applied', eventAt: iso('2026-08-01T10:00:00Z') }))
+    store.createApplicationEvent(
+      makeEvent('a1', { id: 'e1', type: 'applied', eventAt: new Date().toISOString() })
+    )
     const s = svc.stats()
     expect(s.urgent).toBe(1)
     expect(s.byFunnelGroup.urgent).toBe(1)

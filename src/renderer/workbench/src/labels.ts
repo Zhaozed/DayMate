@@ -20,7 +20,10 @@ import type {
   ApplicationPriority,
   InterviewNoteTag,
   SmartFunnelGroup,
-  JobMatchResult
+  JobMatchResult,
+  MemoryKey,
+  TaskCategory,
+  BriefingCategory
 } from '@shared/types'
 
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
@@ -37,6 +40,45 @@ export const TASK_PRIORITY_LABEL: Record<TaskPriority, string> = {
   medium: '中',
   high: '高',
   urgent: '紧急'
+}
+
+// ADR 0027 — ToDo category badge (coarse domain tag: 学校/求职/账单/会议/其他).
+export const TASK_CATEGORY_LABEL: Record<TaskCategory, string> = {
+  school: '学校',
+  job: '求职',
+  bill: '账单',
+  meeting: '会议',
+  other: '其他'
+}
+
+// ADR 0029 — 必读 page 4-value section tag (distinct from TaskCategory's 5
+// values). Drives the section grouping on the 必读 page (学校 / 求职 / 日常 /
+// 其他). Wire values stay English; only the display label translates.
+export const BRIEFING_CATEGORY_LABEL: Record<BriefingCategory, string> = {
+  school: '学校',
+  job: '求职',
+  daily: '日常',
+  other: '其他'
+}
+
+// 必读 page section order (学校 → 求职 → 日常 → 其他).
+export const BRIEFING_CATEGORY_ORDER: BriefingCategory[] = ['school', 'job', 'daily', 'other']
+
+// ADR 0029 — email source provider badge. Maps the wire value to the brand
+// label the user recognizes. Gmail has a real deep link; 163 links to the
+// webmail root (no per-message deep link on 163).
+export const PROVIDER_LABEL: Record<'gmail' | 'mail163', string> = {
+  gmail: 'Gmail',
+  mail163: '163'
+}
+
+// ADR 0029 — 必读 sourceRef type label (replaces the raw `s.type` string that
+// used to render as "email：…" inline).
+export const SOURCE_REF_TYPE_LABEL: Record<string, string> = {
+  email: '邮件',
+  calendar: '日历',
+  task: '任务',
+  activity: '动态'
 }
 
 export const APPROVAL_STATUS_LABEL: Record<ApprovalStatus, string> = {
@@ -83,6 +125,20 @@ export const APPLICATION_EVENT_LABEL: Record<ApplicationEventType, string> = {
   offer: '录用',
   rejected: '已拒',
   withdrawn: '已放弃'
+}
+
+/** Interview role label — only for `interview` events. */
+export const INTERVIEW_ROLE_LABEL: Record<'hr' | 'tech' | 'business' | 'cross', string> = {
+  hr: 'HR',
+  tech: '技术',
+  business: '业务',
+  cross: '交叉'
+}
+
+/** Interview/assessment sub-state label. */
+export const EVENT_SUBSTATE_LABEL: Record<'scheduled' | 'done', string> = {
+  scheduled: '已约',
+  done: '已完成'
 }
 
 // Milestone A — funnel priority + 面经 tags + smart-funnel buckets.
@@ -141,6 +197,34 @@ export const NOTIFICATION_CATEGORY_LABEL: Record<string, string> = {
   info: '其他通知',
   fortune: '每日运势'
 }
+
+// Memory key labels (Spec §16, ADR 0009 town-style profile). The key VALUES are
+// wire identifiers (stored in the memory_items table, used by the agent's
+// memory.search); only the display label translates. Used by the Memory page's
+// 用户画像 grouping + the key selector.
+export const MEMORY_KEY_LABEL: Record<MemoryKey, string> = {
+  email_tone: '邮件语气',
+  writing_style: '写作风格',
+  persona: '用户画像',
+  working_hours: '工作时间',
+  meeting_duration: '会议时长',
+  contact: '联系人',
+  project: '项目',
+  notification_prefs: '通知偏好',
+  job_search_profile: '求职画像',
+  other: '其他'
+}
+
+// Which memory keys form the "用户画像" (profile) section vs. the flat lists.
+export const PROFILE_MEMORY_KEYS: MemoryKey[] = [
+  'persona',
+  'writing_style',
+  'email_tone',
+  'working_hours',
+  'job_search_profile',
+  'meeting_duration'
+]
+export const LIST_MEMORY_KEYS: MemoryKey[] = ['contact', 'project', 'notification_prefs']
 
 /** Status badges surface raw enum values; never blank for a new member. */
 export function statusLabel<T extends string>(map: Record<T, string>, value: string): string {

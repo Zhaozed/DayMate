@@ -41,6 +41,13 @@ CREATE TABLE IF NOT EXISTS need_to_know (
   suggested_actions TEXT NOT NULL,
   read_at TEXT,
   dismissed_at TEXT,
+  kind TEXT,
+  thread_id TEXT,
+  briefing_category TEXT,
+  source_provider TEXT,
+  source_account_id TEXT,
+  source_link TEXT,
+  updated_at TEXT,
   created_at TEXT NOT NULL
 );
 

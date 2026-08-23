@@ -599,7 +599,8 @@ export class RoutineEngine {
           priority: brief.priority,
           sourceRefs: brief.sourceRefs,
           suggestedActions: brief.suggestedActions,
-          routineRunId: run.id
+          routineRunId: run.id,
+          kind: step.kind ?? null
         })
         this.deps.activityService.record({
           runId: run.id,
@@ -614,7 +615,8 @@ export class RoutineEngine {
       title: step.title ? String(resolveTemplate(step.title, this.ctx(run))) : 'Untitled',
       summary: step.summary ? String(resolveTemplate(step.summary, this.ctx(run))) : '',
       reason: step.reason ? String(resolveTemplate(step.reason, this.ctx(run))) : '',
-      priority: step.priority
+      priority: step.priority,
+      kind: step.kind ?? null
     })
     return item
   }

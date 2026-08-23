@@ -5,7 +5,7 @@
 // See ADR 0002 for why the engine depends on the RoutineStore interface, not
 // this class.
 
-import { eq, desc, and, isNull, isNotNull } from 'drizzle-orm'
+import { eq, desc, and, or, isNull, isNotNull, ne, gt } from 'drizzle-orm'
 import type { RoutineStore } from './store'
 import type { AppDb } from './client'
 import {
@@ -74,6 +74,9 @@ function rowToTask(r: TaskRow): Task {
     sourceType: r.sourceType as Task['sourceType'],
     sourceId: r.sourceId ?? undefined,
     routineRunId: r.routineRunId ?? undefined,
+    sourceProvider: (r.sourceProvider as Task['sourceProvider']) ?? undefined,
+    category: (r.category as Task['category']) ?? undefined,
+    sourceLink: r.sourceLink ?? undefined,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt
   }
@@ -147,6 +150,13 @@ function rowToNtk(r: NtkRow): NeedToKnow {
     suggestedActions: parseJson(r.suggestedActions, []),
     readAt: r.readAt ?? undefined,
     dismissedAt: r.dismissedAt ?? undefined,
+    kind: (r.kind as NeedToKnow['kind']) ?? null,
+    threadId: r.threadId ?? undefined,
+    briefingCategory: (r.briefingCategory as NeedToKnow['briefingCategory']) ?? undefined,
+    sourceProvider: (r.sourceProvider as NeedToKnow['sourceProvider']) ?? undefined,
+    sourceAccountId: r.sourceAccountId ?? undefined,
+    sourceLink: r.sourceLink ?? undefined,
+    updatedAt: r.updatedAt ?? undefined,
     createdAt: r.createdAt
   }
 }
@@ -420,10 +430,16 @@ export class SqliteStore implements RoutineStore {
         sourceType: task.sourceType,
         sourceId: task.sourceId ?? null,
         routineRunId: task.routineRunId ?? null,
+        sourceProvider: task.sourceProvider ?? null,
+        category: task.category ?? null,
+        sourceLink: task.sourceLink ?? null,
         createdAt: task.createdAt,
         updatedAt: task.updatedAt
       })
       .run()
+  }
+  deleteTask(id: string): void {
+    this.db.delete(tasksTbl).where(eq(tasksTbl.id, id)).run()
   }
   getTask(id: string): Task | undefined {
     const r = this.db.select().from(tasksTbl).where(eq(tasksTbl.id, id)).get()
@@ -471,21 +487,71 @@ export class SqliteStore implements RoutineStore {
         suggestedActions: JSON.stringify(item.suggestedActions),
         readAt: item.readAt ?? null,
         dismissedAt: item.dismissedAt ?? null,
+        kind: item.kind ?? null,
+        threadId: item.threadId ?? null,
+        briefingCategory: item.briefingCategory ?? null,
+        sourceProvider: item.sourceProvider ?? null,
+        sourceAccountId: item.sourceAccountId ?? null,
+        sourceLink: item.sourceLink ?? null,
+        updatedAt: item.updatedAt ?? null,
         createdAt: item.createdAt
       })
       .run()
+  }
+  updateNeedToKnow(id: string, patch: Partial<NeedToKnow>): void {
+    // ADR 0029 — thread-merge: append a new email's sourceRef + bump the
+    // headline (title/summary) to the latest + touch updatedAt. Only the
+    // thread-merge-relevant fields are patchable.
+    const set: Record<string, unknown> = {}
+    if (patch.title !== undefined) set.title = patch.title
+    if (patch.summary !== undefined) set.summary = patch.summary
+    if (patch.sourceRefs !== undefined) set.sourceRefs = JSON.stringify(patch.sourceRefs)
+    if (patch.briefingCategory !== undefined) set.briefingCategory = patch.briefingCategory
+    set.updatedAt = new Date().toISOString()
+    if (Object.keys(set).length <= 1) return // only updatedAt — nothing to do
+    this.db.update(ntkTbl).set(set).where(eq(ntkTbl.id, id)).run()
   }
   dismissNeedToKnow(id: string): void {
     this.db.update(ntkTbl).set({ dismissedAt: new Date().toISOString() }).where(eq(ntkTbl.id, id)).run()
   }
   listNeedToKnow(): NeedToKnow[] {
+    // 必读 = email-driven NTKs only. Morning-brief NTKs (kind='morning_brief')
+    // moved to the Home 晨报 carousel in ADR 0026 — exclude them here so 必读
+    // stays "邮件驱动实时 urgent/high" and isn't cluttered by the daily brief.
     return this.db
       .select()
       .from(ntkTbl)
-      .where(isNull(ntkTbl.dismissedAt))
+      .where(and(isNull(ntkTbl.dismissedAt), or(isNull(ntkTbl.kind), ne(ntkTbl.kind, 'morning_brief'))))
       .orderBy(desc(ntkTbl.createdAt))
       .all()
       .map(rowToNtk)
+  }
+  listMorningBriefs(days: number): NeedToKnow[] {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString()
+    return this.db
+      .select()
+      .from(ntkTbl)
+      .where(and(eq(ntkTbl.kind, 'morning_brief'), gt(ntkTbl.createdAt, cutoff)))
+      .orderBy(desc(ntkTbl.createdAt))
+      .all()
+      .map(rowToNtk)
+  }
+  listAllNeedToKnow(): NeedToKnow[] {
+    // ADR 0028 purge — includes dismissed so mock-calendar stragglers a user
+    // dismissed before real providers connected can be cleared.
+    return this.db.select().from(ntkTbl).orderBy(desc(ntkTbl.createdAt)).all().map(rowToNtk)
+  }
+  deleteAllNeedToKnow(): void {
+    this.db.delete(ntkTbl).where(isNull(ntkTbl.dismissedAt)).run()
+  }
+  deleteNeedToKnowByTitle(title: string): void {
+    this.db
+      .delete(ntkTbl)
+      .where(and(eq(ntkTbl.title, title), isNull(ntkTbl.dismissedAt)))
+      .run()
+  }
+  deleteNeedToKnowById(id: string): void {
+    this.db.delete(ntkTbl).where(eq(ntkTbl.id, id)).run()
   }
 
   // ── Activity ───────────────────────────────────────────────────────────────

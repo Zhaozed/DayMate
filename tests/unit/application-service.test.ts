@@ -313,17 +313,22 @@ describe('application service — rich fields / soft delete / archive / maintena
 describe('application service — smart funnel grouping', () => {
   it('groups apps into urgent/active/stale/offered/ended/archived buckets', () => {
     const { svc } = makeService()
-    // active app
-    svc.create({ company: '进行中', position: 'p', appliedAt: '2026-08-09T00:00:00.000Z' })
+    // Relative dates — hardcoded 2026-08-xx drifted past STALE_DAYS (14) as
+    // real time advanced, flipping the "active" app to "stale" (date-rot).
+    const day = 86_400_000
+    const ago = (n: number): string => new Date(Date.now() - n * day).toISOString()
+    const ahead = (n: number): string => new Date(Date.now() + n * day).toISOString()
+    // active app (applied 5 days ago — within STALE_DAYS)
+    svc.create({ company: '进行中', position: 'p', appliedAt: ago(5) })
     // urgent app: stage deadline in 2 days
-    const urgent = svc.create({ company: '紧急', position: 'p', stageDeadline: '2026-08-12T00:00:00.000Z' })
+    const urgent = svc.create({ company: '紧急', position: 'p', stageDeadline: ahead(2) })
     void urgent
     // offered app
     const off = svc.create({ company: '录用', position: 'p' })
-    svc.addEvent({ applicationId: off.application.id, type: 'offer', eventAt: '2026-08-09T00:00:00.000Z' })
+    svc.addEvent({ applicationId: off.application.id, type: 'offer', eventAt: ago(5) })
     // ended app
     const rej = svc.create({ company: '拒了', position: 'p' })
-    svc.addEvent({ applicationId: rej.application.id, type: 'rejected', eventAt: '2026-08-09T00:00:00.000Z' })
+    svc.addEvent({ applicationId: rej.application.id, type: 'rejected', eventAt: ago(5) })
     // archived app
     const arc = svc.create({ company: '归档', position: 'p' })
     svc.archive(arc.application.id)

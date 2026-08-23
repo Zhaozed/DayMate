@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { routineTemplateSchema, routineDefinitionSchema } from '@shared/schemas'
 import { morningBriefTemplate } from '../../src/main/routines/templates/morning-brief'
-import { autoInboxTemplate } from '../../src/main/routines/templates/auto-inbox'
-import { draftReviewTemplate } from '../../src/main/routines/templates/draft-review'
+import { interviewPrepTemplate } from '../../src/main/routines/templates/interview-prep'
 import { nowIso } from '../../src/main/util/ids'
 
 describe('routine schema', () => {
@@ -17,7 +16,7 @@ describe('routine schema', () => {
   it('accepts every seeded preset (a malformed preset must fail loudly)', () => {
     // seedPresets parses each against this schema; guard the full set here so a
     // typo in any preset breaks CI at the schema layer (Spec §12, rule 5).
-    for (const template of [morningBriefTemplate, autoInboxTemplate, draftReviewTemplate]) {
+    for (const template of [morningBriefTemplate, interviewPrepTemplate]) {
       expect(() => routineTemplateSchema.parse(template)).not.toThrow()
     }
   })

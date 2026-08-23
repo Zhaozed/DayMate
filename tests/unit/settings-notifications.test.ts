@@ -14,7 +14,7 @@ describe('settings — notification prefs (§D2, non-secret)', () => {
       nativeEnabled: false,
       quietHours: { enabled: true, start: '22:00', end: '07:00' },
       categories: { routine: false },
-      routineOverrides: { auto_inbox: false }
+      routineOverrides: { interview_prep: false }
     })
     expect(written.nativeEnabled).toBe(false)
     expect(written.quietHours?.start).toBe('22:00')
@@ -22,7 +22,7 @@ describe('settings — notification prefs (§D2, non-secret)', () => {
     const read = await fresh.readNotifications()
     expect(read.nativeEnabled).toBe(false)
     expect(read.categories?.routine).toBe(false)
-    expect(read.routineOverrides?.auto_inbox).toBe(false)
+    expect(read.routineOverrides?.interview_prep).toBe(false)
     rmSync(dir, { recursive: true, force: true })
   })
 

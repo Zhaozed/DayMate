@@ -81,32 +81,6 @@ const CATALOG: CatalogEntry[] = [
     })
   },
   {
-    key: 'meeting_prep',
-    label: '生成会议准备',
-    hint: 'agent · generate_meeting_prep',
-    hasOutputKey: true,
-    build: (k) => ({
-      id: k || 'prep',
-      type: 'agent',
-      action: 'generate_meeting_prep',
-      inputs: { event: '{{event}}', emails: '{{emails}}', tasks: '{{tasks}}', memory: '{{memory}}' },
-      outputKey: k || 'prep'
-    })
-  },
-  {
-    key: 'work_summary',
-    label: '生成工作总结',
-    hint: 'agent · generate_work_summary',
-    hasOutputKey: true,
-    build: (k) => ({
-      id: k || 'summary',
-      type: 'agent',
-      action: 'generate_work_summary',
-      inputs: { emails: '{{emails}}', tasks: '{{tasks}}', events: '{{events}}' },
-      outputKey: k || 'summary'
-    })
-  },
-  {
     key: 'publish_ntk',
     label: '发布必读',
     hint: 'need_to_know · 来自某个 agent 输出',

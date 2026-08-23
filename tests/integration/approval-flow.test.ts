@@ -10,8 +10,9 @@ import { createDeterministicAgentRuntime } from '../../src/main/agent/agent-runt
 import { RoutineEngine, type EngineDeps } from '../../src/main/routines/engine'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
+import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { nowIso } from '../../src/main/util/ids'
-import type { RoutineDefinition } from '@shared/types'
+import type { RoutineDefinition, EmailProvider } from '@shared/types'
 
 function buildEngine() {
   const store = new InMemoryStore()
@@ -27,6 +28,7 @@ function buildEngine() {
     approvalService,
     emailProviders,
     calendarProvider: new MockCalendarProvider(),
+    bossProvider: new MockBossProvider(),
     agentRuntime: createDeterministicAgentRuntime(),
     memoryService: new MemoryService(store),
     notify: () => {}
@@ -34,33 +36,45 @@ function buildEngine() {
   return { engine: new RoutineEngine(deps), store, deps, emailProviders }
 }
 
-// A routine with an approval step that creates a draft (R3 → pauses). The
-// draft content (to/subject/body) is the hashed args; approve → draft is
-// created and the request is marked executed.
-function draftApprovalRoutine(id = 'draft_demo'): RoutineDefinition {
+// §15 gate mechanism, exercised via `email.send_draft` (still R3 / approval-
+// gated). `email.create_draft` was demoted to R1 (auto, no approval) per ADR
+// 0022 — drafts auto-save and the user sends manually — so it can no longer
+// drive an approval pause. `email.send_draft` (the actual external send) stays
+// R3 and is the correct tool to anchor the gate tests. Tests pre-create a real
+// draft via the (now R1, directly callable) `createDraft` so send_draft has a
+// draft to send on approve.
+async function seedDraft(
+  provider: EmailProvider,
+  subject = 'Re: roadmap'
+): Promise<string> {
+  const draft = await provider.createDraft({
+    accountId: 'mock-gmail-001',
+    to: [{ name: 'Alice', address: 'alice@example.com' }],
+    subject,
+    body: 'I will review and reply by Friday.'
+  })
+  return draft.id
+}
+
+function sendApprovalRoutine(id: string, draftId: string): RoutineDefinition {
   const now = nowIso()
   return {
     id,
-    name: 'Draft Demo',
-    description: 'approval-gated draft creation',
+    name: 'Send Demo',
+    description: 'approval-gated draft send',
     version: 1,
     enabled: true,
     trigger: { type: 'manual' },
     inputs: {},
     steps: [
       {
-        id: 'draft',
+        id: 'send',
         type: 'approval',
-        toolName: 'email.create_draft',
-        title: 'Create reply draft',
-        args: {
-          accountId: 'mock-gmail-001',
-          to: [{ name: 'Alice', address: 'alice@example.com' }],
-          subject: 'Re: roadmap',
-          body: 'I will review and reply by Friday.'
-        }
+        toolName: 'email.send_draft',
+        title: 'Send reply draft',
+        args: { accountId: 'mock-gmail-001', draftId }
       },
-      { id: 'after', type: 'create_task', title: 'Draft approved — follow up' }
+      { id: 'after', type: 'create_task', title: 'Draft sent — follow up' }
     ],
     approvalPolicy: 'writes_only',
     output: 'task',
@@ -70,16 +84,17 @@ function draftApprovalRoutine(id = 'draft_demo'): RoutineDefinition {
 }
 
 describe('approval flow', () => {
-  it('pauses before the gated action and approves → executes + marks executed', async () => {
-    const { engine, store, deps } = buildEngine()
-    store.saveRoutine(draftApprovalRoutine())
+  it('pauses before the gated send and approves → executes + marks executed', async () => {
+    const { engine, store, deps, emailProviders } = buildEngine()
+    const draftId = await seedDraft(emailProviders[0])
+    store.saveRoutine(sendApprovalRoutine('draft_demo', draftId))
     const run = await engine.run('draft_demo', { idempotencyKey: 'af-1' })
     expect(run.status).toBe('waiting_approval')
 
     const pending = deps.approvalService.list(true)
     expect(pending.length).toBe(1)
     const req = pending[0]
-    expect(req.toolName).toBe('email.create_draft')
+    expect(req.toolName).toBe('email.send_draft')
     expect(req.riskLevel).toBe('R3')
 
     deps.approvalService.approve(req.id)
@@ -88,12 +103,15 @@ describe('approval flow', () => {
     // The approval is now executed.
     expect(deps.approvalService.get(req.id)?.status).toBe('executed')
     // Later step ran.
-    expect(store.listTasks().map((t) => t.title)).toContain('Draft approved — follow up')
+    expect(store.listTasks().map((t) => t.title)).toContain('Draft sent — follow up')
+    // The draft was actually sent (consumed) — resending throws 未找到草稿.
+    await expect(emailProviders[0].sendDraft(draftId)).rejects.toThrow(/未找到草稿/)
   })
 
-  it('reject → run cancelled, the action NEVER executes (sends nothing)', async () => {
-    const { engine, store, deps } = buildEngine()
-    store.saveRoutine(draftApprovalRoutine('draft_reject'))
+  it('reject → run cancelled, the send NEVER executes (sends nothing)', async () => {
+    const { engine, store, deps, emailProviders } = buildEngine()
+    const draftId = await seedDraft(emailProviders[0])
+    store.saveRoutine(sendApprovalRoutine('draft_reject', draftId))
     const run = await engine.run('draft_reject', { idempotencyKey: 'af-reject' })
     expect(run.status).toBe('waiting_approval')
 
@@ -101,19 +119,16 @@ describe('approval flow', () => {
     deps.approvalService.reject(req.id)
     const cancelled = await engine.cancelPausedRun(run.id)
     expect(cancelled.status).toBe('cancelled')
-    // No draft was created (the gated action never ran).
-    const provider = deps.emailProviders[0]
-    // Sending the (nonexistent) draft throws — proving it was never created.
-    await expect(provider.sendDraft('no-such-draft')).rejects.toThrow(/未找到草稿/)
-    // And the follow-up task never ran.
+    // The gated send never ran — the later step never executed.
     expect(store.listTasks().length).toBe(0)
     // Approval stays rejected, not executed.
     expect(deps.approvalService.get(req.id)?.status).toBe('rejected')
   })
 
   it('content tamper between preview and execution → execution refused, run fails', async () => {
-    const { engine, store, deps } = buildEngine()
-    store.saveRoutine(draftApprovalRoutine('draft_tamper'))
+    const { engine, store, deps, emailProviders } = buildEngine()
+    const draftId = await seedDraft(emailProviders[0])
+    store.saveRoutine(sendApprovalRoutine('draft_tamper', draftId))
     const run = await engine.run('draft_tamper', { idempotencyKey: 'af-tamper' })
     const req = deps.approvalService.list(true)[0]
     const approved = deps.approvalService.approve(req.id)
@@ -126,14 +141,15 @@ describe('approval flow', () => {
     const resumed = await engine.resume(run.id, { approval: { requestId: req.id } })
     expect(resumed.status).toBe('failed')
     expect(resumed.error).toMatch(/内容.*变更/)
-    // The gated action never executed — no draft created.
-    const provider = deps.emailProviders[0]
-    await expect(provider.sendDraft('no-such-draft')).rejects.toThrow(/未找到草稿/)
+    // The gated send never executed — the approval stays approved, NOT
+    // executed (the content mismatch refused the action before it ran).
+    expect(deps.approvalService.get(req.id)?.status).not.toBe('executed')
   })
 
   it('a duplicate send run (same idempotency key) is a no-op — no duplicate send', async () => {
-    const { engine, store, deps } = buildEngine()
-    store.saveRoutine(draftApprovalRoutine('draft_dup'))
+    const { engine, store, deps, emailProviders } = buildEngine()
+    const draftId = await seedDraft(emailProviders[0])
+    store.saveRoutine(sendApprovalRoutine('draft_dup', draftId))
     const run1 = await engine.run('draft_dup', { idempotencyKey: 'af-dup' })
     expect(run1.status).toBe('waiting_approval')
     const req = deps.approvalService.list(true)[0]
@@ -142,7 +158,7 @@ describe('approval flow', () => {
     expect(deps.approvalService.get(req.id)?.status).toBe('executed')
 
     // Re-run with the SAME key → returns the existing completed run, executes
-    // nothing new, creates no second approval/draft/task.
+    // nothing new, creates no second approval/send/task.
     const run2 = await engine.run('draft_dup', { idempotencyKey: 'af-dup' })
     expect(run2.id).toBe(run1.id)
     expect(run2.status).toBe('completed')
@@ -151,18 +167,19 @@ describe('approval flow', () => {
   })
 
   // Regression: an approval step whose args are FIELD-TEMPLATED against an
-  // earlier step's output (e.g. `{{gmailEmails[0].from.address}}`) must hash
-  // identically at preview and resume. Earlier the resume path resolved args
-  // against EMPTY outputs → every token collapsed → hash mismatch → the
-  // approved action was refused ("content changed"). This is the shape the
-  // Draft Review preset (M4) relies on.
+  // earlier step's output must hash identically at preview and resume. The
+  // shape now: step 1 creates a draft via `email.create_draft` (R1, auto — no
+  // approval), step 2 gates `email.send_draft` (R3) on `{{draft.id}}`. Earlier
+  // the resume path resolved args against EMPTY outputs → every token
+  // collapsed → hash mismatch → the approved action was refused. This anchors
+  // content immutability for templated approval args.
   it('templated approval args hash-match at resume (content immutability holds)', async () => {
     const { engine, store, deps } = buildEngine()
     const now = nowIso()
     store.saveRoutine({
       id: 'draft_templated',
-      name: 'Draft Templated',
-      description: 'approval-gated draft with field-templated args',
+      name: 'Send Templated',
+      description: 'approval-gated send with field-templated draftId',
       version: 1,
       enabled: true,
       trigger: { type: 'manual' },
@@ -176,16 +193,28 @@ describe('approval flow', () => {
           outputKey: 'gmailEmails'
         },
         {
-          id: 'draft_reply',
-          type: 'approval',
-          toolName: 'email.create_draft',
-          title: 'Draft a reply to {{gmailEmails[0].from.name}}',
+          // R1 (auto, no approval) — creates a draft from the first unread
+          // fixture, exposing its id to the next step.
+          id: 'create_draft',
+          type: 'tool',
+          tool: 'email.create_draft',
           args: {
-            accountId: '{{gmailEmails[0].accountId}}',
+            accountId: 'mock-gmail-001',
             threadId: '{{gmailEmails[0].threadId}}',
             to: [{ address: '{{gmailEmails[0].from.address}}', name: '{{gmailEmails[0].from.name}}' }],
             subject: 'Re: {{gmailEmails[0].subject}}',
             body: 'Thanks — I will review and get back to you shortly.'
+          },
+          outputKey: 'draft'
+        },
+        {
+          id: 'send',
+          type: 'approval',
+          toolName: 'email.send_draft',
+          title: 'Send the drafted reply to {{gmailEmails[0].from.name}}',
+          args: {
+            accountId: 'mock-gmail-001',
+            draftId: '{{draft.id}}'
           }
         }
       ],
@@ -199,13 +228,10 @@ describe('approval flow', () => {
     expect(run.status).toBe('waiting_approval')
 
     const req = deps.approvalService.list(true)[0]
-    // The preview args were resolved with the real first-unread fixture.
-    expect(req.preview).toMatchObject({
-      accountId: 'mock-gmail-001',
-      threadId: 'mock-thread-001',
-      to: [{ address: 'alice@example.com', name: 'Alice Chen' }],
-      subject: 'Re: Q3 roadmap review — decision needed by Friday'
-    })
+    // The preview draftId was resolved from the create_draft step's output
+    // (a real generated draft id), NOT a literal token.
+    expect(typeof (req.preview as { draftId?: string }).draftId).toBe('string')
+    expect((req.preview as { draftId?: string }).draftId).not.toBe('{{draft.id}}')
 
     deps.approvalService.approve(req.id)
     const resumed = await engine.resume(run.id, { approval: { requestId: req.id } })

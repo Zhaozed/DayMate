@@ -54,6 +54,18 @@ export class MockCalendarProvider implements CalendarProvider {
   readonly provider = 'feishu' as const
   readonly accountId = ACCOUNT_ID
   private status: IntegrationStatus = 'connected'
+  /** ADR 0028 — when a real EMAIL provider is connected (the user is real,
+   *  not a fresh dev install), the mock calendar must NOT feed its canned
+   *  "Q3 roadmap review" / "1:1 with manager" fixtures into the morning_brief
+   *  routine — that generated fake morning-brief NTKs + a routine-extracted
+   *  ToDo ("Decide: Approval Center in P0 or defer for Q3 roadmap") the user
+   *  never asked about. In real mode listEvents returns [] so the calendar
+   *  step is honest (no calendar connected) rather than fake. */
+  private realMode = false
+
+  setRealMode(on: boolean): void {
+    this.realMode = on
+  }
 
   async connect(): Promise<IntegrationAccount> {
     this.status = 'connected'
@@ -78,6 +90,9 @@ export class MockCalendarProvider implements CalendarProvider {
   }
 
   async listEvents(range: DateRange): Promise<CalendarEvent[]> {
+    // Real mode: no canned fixtures (see setRealMode). A real user with no
+    // connected Feishu gets an empty calendar, not fake Q3-roadmap events.
+    if (this.realMode) return []
     const startMs = new Date(range.start).getTime()
     const endMs = new Date(range.end).getTime()
     return FIXTURES.filter((e) => {

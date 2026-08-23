@@ -22,27 +22,35 @@ describe('MemoryService', () => {
     expect(found[0].id).toBe(m.id)
   })
 
-  it('agent proposals land proposed (not active) — never searchable until confirmed', () => {
+  it('agent proposals auto-confirm and are immediately active (searchable) — no manual confirmation', () => {
     const { service } = svc()
     const m = service.save({ key: 'project', value: 'Project Aurora', source: 'agent' })
-    expect(m.confirmed).toBe(false)
-    // A proposed item must NOT be active — search returns nothing.
-    expect(service.search('Aurora').length).toBe(0)
-    service.confirm(m.id)
+    expect(m.confirmed).toBe(true)
+    // An auto-confirmed proposal IS active — search finds it immediately.
     expect(service.search('Aurora').length).toBe(1)
   })
 
-  it('confirming a proposed item demotes any prior confirmed value for the same key (one active per key)', () => {
+  it('an agent proposal does NOT overwrite a user-authored confirmed value (merge, not clobber)', () => {
     const { service } = svc()
-    const first = service.save({ key: 'working_hours', value: '9–18', source: 'user' })
-    const proposal = service.save({ key: 'working_hours', value: '10–19', source: 'agent' })
-    service.confirm(proposal.id)
+    const userItem = service.save({ key: 'working_hours', value: '9–18', source: 'user' })
+    // Agent tries to overwrite the user's explicit value — it must be protected.
+    const ret = service.save({ key: 'working_hours', value: '10–19', source: 'agent' })
+    expect(ret.value).toBe('9–18') // user truth wins
     const active = service.listConfirmed().filter((m) => m.key === 'working_hours')
     expect(active.length).toBe(1)
-    expect(active[0].value).toBe('10–19')
-    expect(active[0].id).toBe(proposal.id)
-    // The prior confirmed item is gone (not demoted-then-leaked).
-    expect(service.list().find((m) => m.id === first.id)).toBeUndefined()
+    expect(active[0].id).toBe(userItem.id)
+    expect(active[0].value).toBe('9–18')
+  })
+
+  it('an agent proposal UPDATES an agent-authored confirmed value in place (refine)', () => {
+    const { service } = svc()
+    const first = service.save({ key: 'persona', value: '旧画像', source: 'agent' })
+    const next = service.save({ key: 'persona', value: '更准确的画像', source: 'agent' })
+    // Same row, updated value — one active value per key, no duplicate.
+    expect(next.id).toBe(first.id)
+    expect(next.value).toBe('更准确的画像')
+    const active = service.listConfirmed().filter((m) => m.key === 'persona')
+    expect(active.length).toBe(1)
   })
 
   it('is idempotent: an identical agent proposal (key+value) does not create a duplicate', () => {
@@ -67,6 +75,73 @@ describe('MemoryService', () => {
     expect(service.search('NOTIFICATION').length).toBe(1)
     expect(service.search('QUIET').length).toBe(1)
     expect(service.search('noonexistent').length).toBe(0)
+  })
+
+  it('a NEW agent value for an existing agent-authored key UPDATES it in place (no pile-up)', () => {
+    const { service } = svc()
+    const a = service.save({ key: 'writing_style', value: '偏好简洁回复', source: 'agent' })
+    const b = service.save({ key: 'writing_style', value: '喜欢简洁友好的回复', source: 'agent' })
+    // Update in place — same row id, new value; one active value per key.
+    expect(b.id).toBe(a.id)
+    expect(b.value).toBe('喜欢简洁友好的回复')
+    const active = service.listConfirmed().filter((m) => m.key === 'writing_style')
+    expect(active.length).toBe(1)
+  })
+
+  it('a user-authored confirmed save demotes prior confirmed siblings of the same key', () => {
+    const { service } = svc()
+    service.save({ key: 'persona', value: '工程师', source: 'user' })
+    const next = service.save({ key: 'persona', value: 'AI 产品经理', source: 'user' })
+    const active = service.listConfirmed().filter((m) => m.key === 'persona')
+    expect(active.length).toBe(1)
+    expect(active[0].id).toBe(next.id)
+    expect(active[0].value).toBe('AI 产品经理')
+  })
+})
+
+describe('MemoryService — reconcile() boot cleanup (auto-confirm migration)', () => {
+  it('collapses duplicate confirmed rows per key to the newest', () => {
+    const { service, store } = svc()
+    // Simulate legacy state: two confirmed persona rows (the old confirm-
+    // via-update path left these because it bypassed service.confirm's demote).
+    store.createMemory({ id: 'mem-old', key: 'persona', value: '旧画像', source: 'user', confirmed: true, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' })
+    store.createMemory({ id: 'mem-new', key: 'persona', value: '新画像', source: 'user', confirmed: true, createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z' })
+    service.reconcile()
+    const active = service.listConfirmed().filter((m) => m.key === 'persona')
+    expect(active.length).toBe(1)
+    expect(active[0].id).toBe('mem-new')
+  })
+
+  it('promotes the newest pending row to confirmed when no confirmed exists for that key', () => {
+    const { service, store } = svc()
+    // Legacy pending rows from the old confirm-gate path — now auto-confirm.
+    store.createMemory({ id: 'p1', key: 'writing_style', value: '简洁', source: 'agent', confirmed: false, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' })
+    store.createMemory({ id: 'p2', key: 'writing_style', value: '简洁友好', source: 'agent', confirmed: false, createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z' })
+    service.reconcile()
+    // The newest pending (p2) is promoted to confirmed; p1 is dropped.
+    const rows = service.list().filter((m) => m.key === 'writing_style')
+    expect(rows.length).toBe(1)
+    expect(rows[0].id).toBe('p2')
+    expect(rows[0].confirmed).toBe(true)
+    expect(rows[0].value).toBe('简洁友好')
+  })
+
+  it('drops pending when a confirmed value for the same key already exists', () => {
+    const { service, store } = svc()
+    store.createMemory({ id: 'c1', key: 'persona', value: '已确认', source: 'user', confirmed: true, createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z' })
+    store.createMemory({ id: 'p1', key: 'persona', value: '待确认', source: 'agent', confirmed: false, createdAt: '2026-08-02T00:00:00.000Z', updatedAt: '2026-08-02T00:00:00.000Z' })
+    service.reconcile()
+    const rows = service.list().filter((m) => m.key === 'persona')
+    expect(rows.length).toBe(1)
+    expect(rows[0].id).toBe('c1') // confirmed wins; pending dropped
+  })
+
+  it('leaves unrelated keys untouched', () => {
+    const { service, store } = svc()
+    store.createMemory({ id: 'a', key: 'persona', value: 'X', source: 'user', confirmed: true, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' })
+    store.createMemory({ id: 'b', key: 'contact', value: 'Alice', source: 'user', confirmed: true, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' })
+    service.reconcile()
+    expect(service.listConfirmed().length).toBe(2)
   })
 })
 

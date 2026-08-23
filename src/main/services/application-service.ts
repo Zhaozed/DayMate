@@ -62,6 +62,7 @@ import type {
 } from '@shared/types'
 import { newId, nowIso } from '../util/ids'
 import { sha256 } from '../util/hash'
+import { shouldSkipFunnel, isSchoolSpam } from '../util/bulk-mail'
 import { writeZip } from '../util/zip-writer'
 import { APPLICATION_SOURCES, APPLICATION_EVENT_TYPES } from '@shared/constants'
 
@@ -151,6 +152,13 @@ export class ApplicationService {
   private campusSecurityIds = new Set<string>()
   /** Listener fired when the pending queue changes (container wires the IPC broadcast). */
   private onEmailMatchesChanged?: () => void
+  /** ADR 0026 — funnel-path ToDo extraction. Optional TaskService + broadcast;
+   *  wired by the container. Absent on test runtimes. */
+  private taskService?: import('./task-service').TaskService
+  private onTasksChanged?: () => void
+  /** ADR 0027 — school-spam subject tokens to skip in the funnel path too
+   *  (school broadcast spam never reaches classify_application_email). */
+  private skipTokens?: string[]
 
   constructor(
     private readonly store: RoutineStore,
@@ -164,6 +172,23 @@ export class ApplicationService {
   }
   private broadcastEmailMatches(): void {
     this.onEmailMatchesChanged?.()
+  }
+
+  /** Wire funnel-path ToDo extraction (ADR 0026). The service auto-creates a
+   *  ToDo when a recruiting email carries a concrete next step + date
+   *  (interview / written-test notice). Idempotent by sourceId. */
+  setTaskExtraction(
+    taskService: import('./task-service').TaskService,
+    onTasksChanged: () => void
+  ): void {
+    this.taskService = taskService
+    this.onTasksChanged = onTasksChanged
+  }
+
+  /** Wire school-spam skip tokens (ADR 0027). The funnel path also drops
+   *  subject-prefix school broadcast spam before any LLM classify pass. */
+  setSkipTokens(tokens: string[] | undefined): void {
+    this.skipTokens = tokens
   }
 
   /** List every application as a funnel view (application + computed state). */
@@ -196,6 +221,188 @@ export class ApplicationService {
     this.store.createApplication(app)
     this.seedAppliedEvent(app.id, 'manual', undefined, app.appliedAt)
     return this.toView(app)
+  }
+
+  /**
+   * Seed AI产品经理 demo applications (source:'email') when the funnel holds
+   * ONLY retired-BOSS rows (or is empty). BOSS is retired (ADR 0019 — UI
+   * hidden, backend dormant), so boss-source rows are obsolete test data;
+   * this is a one-time reset that wipes them and seeds a realistic
+   * email-driven funnel so the 投递 panel has data to show. Once real
+   * email/manual applications exist, `hasRealData` blocks the reset (non-
+   * destructive on subsequent boots — the demo apps themselves are source
+   * 'email', so after the first seed the guard holds). Events are email-
+   * detected (source:'email', locked:false) with unique `sourceRef`s.
+   */
+  seedDemoData(): void {
+    const all = this.list()
+    // "Real" = a non-boss application with a real company+position (not an
+    // empty / literal-"null" junk row left over from prior testing). BOSS is
+    // retired and junk rows are obsolete, so when no real data exists the
+    // seed wipes everything active and seeds a fresh demo funnel.
+    const isReal = (v: ApplicationView): boolean => {
+      const a = v.application
+      if (a.source === 'boss') return false
+      const company = (a.company ?? '').trim().toLowerCase()
+      const position = (a.position ?? '').trim().toLowerCase()
+      return company !== '' && company !== 'null' && position !== '' && position !== 'null'
+    }
+    if (all.some(isReal)) return
+    // Wipe obsolete rows (events/resumes/preps cascade via purge).
+    for (const v of all) this.store.purgeApplication(v.application.id)
+
+    const day = 86_400_000
+    const ago = (n: number): string => new Date(Date.now() - n * day).toISOString()
+    const ahead = (n: number): string => new Date(Date.now() + n * day).toISOString()
+
+    type DemoEvent = { type: ApplicationEventType; round?: number; eventAt: string; evidence: string }
+    type DemoApp = {
+      company: string
+      city: string
+      salary: string
+      jd: string
+      stageDeadline?: string
+      events: DemoEvent[]
+    }
+    const demos: DemoApp[] = [
+      {
+        company: '智谱AI', city: '北京', salary: '35-55K', stageDeadline: ahead(1),
+        jd: '负责GLM大模型应用层产品规划，对接算法团队，驱动B端智能体落地。',
+        events: [
+          { type: 'applied', eventAt: ago(5), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(4), evidence: '邮件：测评邀请' },
+          { type: 'interview', round: 1, eventAt: ago(2), evidence: '邮件：一面安排' }
+        ]
+      },
+      {
+        company: '月之暗面', city: '北京', salary: '40-65K',
+        jd: '负责Kimi产品0-1规划，关注用户增长与留存，深入调研大模型使用场景。',
+        events: [
+          { type: 'applied', eventAt: ago(3), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(2), evidence: '邮件：测评邀请' }
+        ]
+      },
+      {
+        company: '阶跃星辰', city: '上海', salary: '32-50K',
+        jd: '负责多模态AI产品定义，主导需求评审与迭代节奏，协同研发交付。',
+        events: [
+          { type: 'applied', eventAt: ago(4), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(3), evidence: '邮件：测评邀请' },
+          { type: 'interview', round: 1, eventAt: ago(1), evidence: '邮件：一面安排' }
+        ]
+      },
+      {
+        company: '商汤科技', city: '上海', salary: '28-42K',
+        jd: '负责日日新大模型toB产品线，撰写PRD，跟踪交付质量与客户反馈。',
+        events: [
+          { type: 'applied', eventAt: ago(12), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(11), evidence: '邮件：测评邀请' },
+          { type: 'written_test', eventAt: ago(9), evidence: '邮件：笔试通知' },
+          { type: 'interview', round: 1, eventAt: ago(7), evidence: '邮件：一面安排' },
+          { type: 'rejected', eventAt: ago(1), evidence: '邮件：感谢信' }
+        ]
+      },
+      {
+        company: '旷视科技', city: '北京', salary: '30-48K',
+        jd: '负责AI视觉产品商业化，定义场景方案，推动POC与标杆客户落地。',
+        events: [
+          { type: 'applied', eventAt: ago(8), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(7), evidence: '邮件：测评邀请' },
+          { type: 'interview', round: 1, eventAt: ago(5), evidence: '邮件：一面安排' },
+          { type: 'offer', eventAt: ago(0), evidence: '邮件：录用通知' }
+        ]
+      },
+      {
+        company: '百川智能', city: '北京', salary: '33-52K',
+        jd: '负责百川大模型C端产品，设计对话与助手场景，迭代留存与付费转化。',
+        events: [
+          { type: 'applied', eventAt: ago(6), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(5), evidence: '邮件：测评邀请' },
+          { type: 'interview', round: 1, eventAt: ago(3), evidence: '邮件：一面安排' },
+          { type: 'interview', round: 2, eventAt: ago(1), evidence: '邮件：二面安排' }
+        ]
+      },
+      {
+        company: 'MiniMax', city: '上海', salary: '30-50K',
+        jd: '负责海螺AI产品规划，关注多模态内容生成场景，主导增长实验。',
+        events: [
+          { type: 'applied', eventAt: ago(2), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(1), evidence: '邮件：测评邀请' }
+        ]
+      },
+      {
+        company: '科大讯飞', city: '合肥', salary: '25-40K',
+        jd: '负责星火大模型教育/办公场景产品，撰写PRD，跟踪交付与数据指标。',
+        events: [
+          { type: 'applied', eventAt: ago(20), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(18), evidence: '邮件：测评邀请' }
+        ]
+      },
+      {
+        company: '小红书', city: '上海', salary: '30-50K',
+        jd: '负责AI搜索/推荐产品，主导内容理解与分发策略，驱动社区增长。',
+        events: [
+          { type: 'applied', eventAt: ago(16), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(15), evidence: '邮件：测评邀请' },
+          { type: 'written_test', eventAt: ago(13), evidence: '邮件：笔试通知' }
+        ]
+      },
+      {
+        company: '腾讯', city: '深圳', salary: '28-45K',
+        jd: '负责混元大模型应用产品，定义智能体与C端场景，跨团队协同交付。',
+        events: [
+          { type: 'applied', eventAt: ago(25), evidence: '邮件：投递成功' },
+          { type: 'assessment', eventAt: ago(24), evidence: '邮件：测评邀请' },
+          { type: 'interview', round: 1, eventAt: ago(20), evidence: '邮件：一面安排' },
+          { type: 'withdrawn', eventAt: ago(18), evidence: '邮件：主动放弃' }
+        ]
+      }
+    ]
+
+    for (const d of demos) {
+      const now = nowIso()
+      const app: Application = {
+        id: newId('app'),
+        company: d.company,
+        position: 'AI产品经理',
+        source: 'email',
+        bossSecurityId: undefined,
+        appliedAt: d.events[0].eventAt,
+        city: d.city,
+        salaryRange: d.salary,
+        jdText: d.jd,
+        stage: undefined,
+        stageDeadline: d.stageDeadline,
+        interviewLink: undefined,
+        priority: 'normal',
+        createdAt: now,
+        updatedAt: now
+      }
+      // `app.id` is assigned above; link the emailRefId back to it.
+      app.emailRefId = `demo:${app.id}`
+      this.store.createApplication(app)
+      for (const ev of d.events) {
+        this.store.createApplicationEvent({
+          id: newId('appevt'),
+          applicationId: app.id,
+          type: ev.type,
+          round: ev.round,
+          role: undefined,
+          subState: undefined,
+          source: 'email',
+          sourceRef: `email:demo:${app.id}:${ev.type}`,
+          evidence: ev.evidence,
+          locked: false,
+          eventAt: ev.eventAt,
+          createdAt: now
+        })
+      }
+    }
+    this.activityService.record({
+      type: 'tool_completed',
+      summary: `已载入 AI产品经理 演示数据（${demos.length} 条）`,
+      metadata: { demo: true, count: demos.length }
+    })
   }
 
   /** Append a manual progress event. Manual events are locked by default. */
@@ -312,6 +519,10 @@ export class ApplicationService {
     pending: number
     message: string
     cursor: EmailSyncCursor
+    /** The deduped delta of new emails this round — fed to the email-briefing
+     *  path so important mail can surface in 必读 + auto-draft without a
+     *  second provider fetch. Empty on the no-new-mail / classify-fail paths. */
+    newEmails: NormalizedEmail[]
   }> {
     const byMessageId = new Map<string, NormalizedEmail>()
     // Per-provider incremental query: each provider gets its high-water-mark so
@@ -358,14 +569,38 @@ export class ApplicationService {
         cursor: {
           mail163LastUid: nextMail163Uid || undefined,
           gmailLastInternalDate: nextGmailInternalDate || undefined
-        }
+        },
+        newEmails: []
+      }
+    }
+
+    // Pre-LLM filter (ADR 0023): skip pure-marketing bulk (ads keywords) so the
+    // funnel never burns a classify pass on platform edm. 投递确认 / 面试通知 are
+    // bulk but NOT ads → kept (they ARE the funnel's feed). The full delta is
+    // still returned as `newEmails` for the briefing path to filter its own way.
+    // ADR 0027 — also drop school-wide broadcast spam ([student_ips]) here so it
+    // never reaches classify_application_email either.
+    const funnelEmails = [...byMessageId.values()].filter(
+      (e) => !shouldSkipFunnel(e) && !(this.skipTokens && isSchoolSpam(e, this.skipTokens))
+    )
+    if (funnelEmails.length === 0) {
+      return {
+        synced: 0,
+        created: 0,
+        pending: 0,
+        message: '邮件推断：无新邮件需分类（群发已预过滤）',
+        cursor: {
+          mail163LastUid: nextMail163Uid || undefined,
+          gmailLastInternalDate: nextGmailInternalDate || undefined
+        },
+        newEmails: [...byMessageId.values()]
       }
     }
 
     let output: ClassifyApplicationEmailOutput
     try {
       output = (await agentRuntime.runAgentStep('classify_application_email', {
-        emails: [...byMessageId.values()]
+        emails: funnelEmails
       })) as ClassifyApplicationEmailOutput
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -382,24 +617,63 @@ export class ApplicationService {
         cursor: {
           mail163LastUid: nextMail163Uid || undefined,
           gmailLastInternalDate: nextGmailInternalDate || undefined
-        }
+        },
+        newEmails: [...byMessageId.values()]
       }
     }
 
-    // Aggressive auto-create routing (user decision: "全部自动建"). For each
-    // non-untrusted result with company AND position: normalize-dedupe against
-    // existing applications — hit → append event; miss → create application +
-    // seed event. Missing company OR position → pending queue (no identity to
-    // dedupe/create on). Untrusted → skip entirely (§17).
+    // Auto-create routing. A non-untrusted result with company AND position
+    // AND confidence high/medium: normalize-dedupe against existing apps —
+    // hit → append event; miss → create application + seed event. Low
+    // confidence OR missing company/position → pending queue (no identity to
+    // dedupe/create on, or the signal is too weak to trust as a real
+    // application the user actually submitted). Untrusted → skip (§17).
+    //
+    // ADR 0027 fix — the old "aggressive: create even at low confidence"
+    // built fake 投递 from recruiting OUTREACH mail (a school announcing an
+    // open RA/PhD position, or a cold recruiter "we're hiring, apply here")
+    // that the LLM tagged low confidence: the candidate never applied, yet a
+    // 投递 row appeared. Low confidence now routes to the manual-confirm
+    // queue instead of auto-creating. Real application-progress events
+    // (applied-confirmation / interview / test invite / offer / rejection)
+    // return high/medium and still auto-create.
     const apps = this.store.listApplications()
     let synced = 0
     let created = 0
     let pending = 0
+    let tasksCreated = 0
     for (const r of output.results) {
       if (r.untrusted) continue // §17
       const email = byMessageId.get(r.messageId)
       if (!email) continue
-      if (!r.company || !r.position) {
+
+      // ADR 0026 — auto-extract a ToDo when the funnel classify found a
+      // concrete next step + date (interview / written-test notice). No new
+      // LLM call: rides on the classify_application_email pass already running
+      // on funnelEmails. Idempotent by sourceId (`email:<messageId>`).
+      if (r.todoTitle && this.taskService) {
+        const task = this.taskService.create({
+          title: r.todoTitle,
+          description: r.evidence || undefined,
+          priority: r.eventType === 'interview' || r.eventType === 'written_test' ? 'urgent' : 'high',
+          dueAt: r.dueDate,
+          sourceType: 'email',
+          sourceId: `email:${r.messageId}`,
+          sourceProvider: email.provider,
+          // ADR 0027 — funnel ToDos are always job domain; link back to the
+          // source mail (Gmail only; 163 has no web deep link).
+          category: r.category ?? 'job',
+          sourceLink: email.sourceUrl
+        })
+        if (task.updatedAt === task.createdAt) tasksCreated++
+      }
+
+      // ADR 0027 fix — low-confidence results are NOT applications the user
+      // actually submitted (recruiting outreach / job ads / solicitations the
+      // prompt is instructed to tag low). Route to the manual-confirm queue
+      // instead of auto-creating a fake 投递 row. Only high/medium confidence
+      // (real progress events) auto-create below.
+      if (r.confidence === 'low' || !r.company || !r.position) {
         this.pushPending(r, email, undefined)
         pending++
         continue
@@ -409,7 +683,7 @@ export class ApplicationService {
       if (match) {
         appId = match.id
       } else {
-        // Aggressive: company+position extracted → create even at low confidence.
+        // high/medium confidence + company + position → create application.
         const view = this.create({
           company: r.company,
           position: r.position,
@@ -429,10 +703,11 @@ export class ApplicationService {
       if (this.appendEmailEvent(appId, r, email)) synced++
     }
     this.broadcastEmailMatches()
+    if (tasksCreated > 0) this.onTasksChanged?.()
     this.activityService.record({
       type: 'tool_completed',
       summary: `邮件推断完成：${synced} 条事件、${created} 条新建、${pending} 条待确认`,
-      metadata: { synced, created, pending }
+      metadata: { synced, created, pending, tasksCreated }
     })
     return {
       synced,
@@ -442,7 +717,8 @@ export class ApplicationService {
       cursor: {
         mail163LastUid: nextMail163Uid || undefined,
         gmailLastInternalDate: nextGmailInternalDate || undefined
-      }
+      },
+      newEmails: [...byMessageId.values()]
     }
   }
 
