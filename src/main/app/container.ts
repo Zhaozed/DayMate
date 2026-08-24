@@ -745,19 +745,100 @@ export function initContainer(): Container {
     const tickTimeoutMs = Math.min(Math.max(intervalMs - 10_000, 60_000), 120_000)
     let inFlight = false
     let lastSettledAt = Date.now()
+    // Per-provider, per-session: a contaminated cursor (ADR 0025 leftover) is a
+    // one-time historical artifact, so at most ONE rewind per provider per boot.
+    // This caps any pathological re-rewind (a probe racing with a just-arrived
+    // mail returning a not-quite-newest value while cursor == true-newest) to a
+    // single re-process — never a 180s-loop of re-classifying the same batch.
+    const rewoundProviders = new Set<string>()
 
     const runTickBody = async (): Promise<void> => {
       const { enabled } = await settings.readEmailSyncConfig()
       if (!enabled) return
       const cursor = await settings.readEmailSyncCursor()
+      const realCount = emailProviders.filter((p) => !p.accountId.startsWith('mock')).length
       const result = await applicationService.syncFromEmails(
         emailProviders,
         agentRuntime,
         cursor
       )
-      // Persist the advanced high-water-mark (even on empty / partial rounds
-      // — the per-provider maxes already moved past the last-seen mail).
-      await settings.writeEmailSyncCursor(result.cursor)
+      // Diagnostic (ADR 0030): the loop is silent-by-design on empty delta
+      // (ADR 0024), so a stall looks identical to "no new mail". Log one line
+      // per tick to the dev console so we can tell them apart when debugging.
+      console.log(
+        `[email-sync] tick: providers=${emailProviders.length} real=${realCount} ` +
+          `newEmails=${result.newEmails.length} synced=${result.synced} ` +
+          `created=${result.created} cursor=${JSON.stringify(result.cursor)}`
+      )
+      // Cursor self-correction (ADR 0031). ADR 0030's hang self-heal can't fix a
+      // CONTAMINATED cursor: if the high-water-mark is ahead of the newest real
+      // mail (ADR 0025 leftover — the mock provider once pushed
+      // gmailLastInternalDate to a future-ish value, and after the mocks were
+      // removed the cursor stayed there), then every real mail is <= cursor →
+      // listMessages breaks immediately → returns [] → newEmails=0, which is
+      // indistinguishable from "no new mail" because the loop is silent-by-
+      // design on empty delta (ADR 0024). The user sees "I got mail but nothing
+      // surfaced" with no error, no timeout, no provider_unavail — a ghost stall.
+      // Fix: on an empty delta, cursor-free-probe each real provider's NEWEST
+      // mail (limit 1, R0 read-only). If the cursor is AHEAD of that newest real
+      // mail, rewind the cursor to just before it (newest ts - 1ms / newest uid)
+      // so the next tick re-evaluates from reality. The rewind re-processes at
+      // most the newest mail once (idempotent — dedupe + pre-LLM spam filter
+      // catch school-spam / ads, zero LLM), then the cursor advances normally.
+      let correctedCursor = { ...result.cursor }
+      let rewound = false
+      if (result.newEmails.length === 0) {
+        for (const p of emailProviders) {
+          if (p.accountId.startsWith('mock')) continue
+          if (rewoundProviders.has(p.provider)) continue // already rewound this session
+          try {
+            const probe = await p.listMessages({ limit: 1 })
+            if (probe.length === 0) continue
+            const newest = probe[0]
+            if (p.provider === 'gmail') {
+              const ts = new Date(newest.receivedAt).getTime()
+              const cur = correctedCursor.gmailLastInternalDate ?? 0
+              if (Number.isFinite(ts) && cur > ts) {
+                correctedCursor.gmailLastInternalDate = ts - 1
+                rewound = true
+                rewoundProviders.add(p.provider)
+                console.log(
+                  `[email-sync] cursor rewind gmail: ${cur} → ${ts - 1} ` +
+                    `(cursor was ahead of newest real mail ${newest.receivedAt}; ADR 0025 leftover)`
+                )
+              }
+            } else if (p.provider === 'mail163') {
+              // 163 uid is monotonic per mailbox; cursor > newest uid only
+              // happens under mock contamination. Rewind to the newest uid so
+              // the next tick re-evaluates it (uid > newest-1 → surfaced).
+              const uid = Number(newest.messageId)
+              const cur = correctedCursor.mail163LastUid ?? 0
+              if (Number.isFinite(uid) && cur > uid) {
+                correctedCursor.mail163LastUid = uid - 1
+                rewound = true
+                rewoundProviders.add(p.provider)
+                console.log(
+                  `[email-sync] cursor rewind mail163: ${cur} → ${uid - 1} (cursor was ahead of newest real uid)`
+                )
+              }
+            }
+          } catch (err) {
+            console.log(
+              `[email-sync] cursor probe ${p.provider} failed: ${err instanceof Error ? err.message : String(err)}`
+            )
+          }
+        }
+      }
+      // Persist the high-water-mark — the corrected one if we rewound, else
+      // the advanced one (per-provider maxes already moved past last-seen mail).
+      await settings.writeEmailSyncCursor(correctedCursor)
+      // If we just rewound a contaminated cursor, fire an immediate re-tick so
+      // the corrected high-water-mark takes effect now (not 180s later). The
+      // 3s delay lets the current tick's `finally` release `inFlight` first;
+      // the re-tick's `if (inFlight) return` is the backstop if it hasn't.
+      if (rewound) {
+        setTimeout(() => { void tick() }, 3_000)
+      }
       // Surface changes only when something actually happened (avoid
       // spamming the renderer with empty broadcasts every 180s).
       if (result.synced > 0 || result.created > 0 || result.pending > 0) {
