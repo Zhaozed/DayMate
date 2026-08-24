@@ -288,13 +288,17 @@ describe('application service — rich fields / soft delete / archive / maintena
     const svc = new ApplicationService(store, boss, activity)
 
     // a stale app: applied 20 days ago, no progress → should demote to 'back'
-    svc.create({ company: '旧', position: 'p', appliedAt: '2026-07-01T00:00:00.000Z' })
-    // a recent app → stays 'normal'
-    svc.create({ company: '新', position: 'p', appliedAt: '2026-08-10T00:00:00.000Z' })
+    // Use relative dates so the test isn't a date bomb that flips the day the
+    // "recent" seed crosses the 14d threshold.
+    const DAY = 86_400_000
+    const now = Date.now()
+    svc.create({ company: '旧', position: 'p', appliedAt: new Date(now - 20 * DAY).toISOString() })
+    // a recent app (2 days ago) → stays 'normal' (well under 14d)
+    svc.create({ company: '新', position: 'p', appliedAt: new Date(now - 2 * DAY).toISOString() })
     // a soft-deleted row, backdated 40 days → should be purged
-    const gone = svc.create({ company: '删', position: 'p', appliedAt: '2026-06-01T00:00:00.000Z' })
+    const gone = svc.create({ company: '删', position: 'p', appliedAt: new Date(now - 45 * DAY).toISOString() })
     svc.softDelete(gone.application.id)
-    store.softDeleteApplication(gone.application.id, '2026-06-20T00:00:00.000Z') // backdate
+    store.softDeleteApplication(gone.application.id, new Date(now - 40 * DAY).toISOString()) // backdate
 
     const res = svc.runMaintenance()
     expect(res.purged).toBe(1)

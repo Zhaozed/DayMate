@@ -6,7 +6,7 @@
 // criterion). better-sqlite3 must be rebuilt for Electron's ABI — see
 // `rebuild:native` script and ADR 0002.
 
-import { app, BrowserWindow, safeStorage, shell, net, Notification } from 'electron'
+import { app, BrowserWindow, safeStorage, shell, net, Notification, powerMonitor } from 'electron'
 import { join } from 'node:path'
 import { createDb } from '../db/client'
 import { SqliteStore } from '../db/sqlite-store'
@@ -721,41 +721,114 @@ export function initContainer(): Container {
   const startEmailSyncLoop = async (): Promise<void> => {
     const { intervalSec } = await settings.readEmailSyncConfig()
     const intervalMs = Math.max(60, intervalSec) * 1000
+    // Self-healing sync loop (ADR 0030). A provider call can HANG — half-open
+    // TCP / a TLS handshake stalled during a network flap / a wake from sleep —
+    // and never reject. The per-provider try/catch inside `syncFromEmails`
+    // only handles REJECTIONS, and the loop's outer `.catch(() => {})` only
+    // fires on rejection too, so a hung tick never settles: setInterval keeps
+    // stacking ticks that all hang on connect, no `provider_unavailable` is
+    // ever logged, and new mail stops surfacing ("今天收到邮件却没进必读").
+    // Three defenses, in order:
+    //   1. Per-tick hard timeout (Promise.race + deadline): a hung tick
+    //      rejects at the deadline → logs a timeout Activity → releases
+    //      inFlight so the next interval fires a fresh connection. Provider-
+    //      agnostic (covers Gmail net.fetch AND 163 IMAP without per-provider
+    //      changes; the abandoned hung connection just leaks one socket, the
+    //      next tick opens a fresh one).
+    //   2. inFlight overlap-skip: don't stack ticks while one is pending.
+    //   3. Watchdog + wake: track lastSettledAt; if no tick settled in 3×
+    //      interval, force a fresh one (interval stalled / a hang slipped past
+    //      the timeout). If still inFlight at 5× interval, the timeout
+    //      machinery itself failed → circuit-breaker resets inFlight and
+    //      forces a tick. powerMonitor 'resume' fires a tick on system wake
+    //      (setInterval is paused during sleep and doesn't catch up slots).
+    const tickTimeoutMs = Math.min(Math.max(intervalMs - 10_000, 60_000), 120_000)
+    let inFlight = false
+    let lastSettledAt = Date.now()
+
+    const runTickBody = async (): Promise<void> => {
+      const { enabled } = await settings.readEmailSyncConfig()
+      if (!enabled) return
+      const cursor = await settings.readEmailSyncCursor()
+      const result = await applicationService.syncFromEmails(
+        emailProviders,
+        agentRuntime,
+        cursor
+      )
+      // Persist the advanced high-water-mark (even on empty / partial rounds
+      // — the per-provider maxes already moved past the last-seen mail).
+      await settings.writeEmailSyncCursor(result.cursor)
+      // Surface changes only when something actually happened (avoid
+      // spamming the renderer with empty broadcasts every 180s).
+      if (result.synced > 0 || result.created > 0 || result.pending > 0) {
+        broadcastApplications()
+        broadcastEmailMatches()
+      }
+      // Brief the same delta into 必读 + (for reply-needed important mail)
+      // a draft. Runs after the funnel pass so the cursor is already advanced.
+      if (result.newEmails.length > 0) {
+        await emailBriefing.briefNewEmails(result.newEmails)
+      }
+    }
+
     const tick = async (): Promise<void> => {
+      if (inFlight) return // overlap: previous tick still pending → skip, don't stack
+      inFlight = true
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined
       try {
-        const { enabled } = await settings.readEmailSyncConfig()
-        if (!enabled) return
-        const cursor = await settings.readEmailSyncCursor()
-        const result = await applicationService.syncFromEmails(
-          emailProviders,
-          agentRuntime,
-          cursor
-        )
-        // Persist the advanced high-water-mark (even on empty / partial rounds
-        // — the per-provider maxes already moved past the last-seen mail).
-        await settings.writeEmailSyncCursor(result.cursor)
-        // Surface changes only when something actually happened (avoid
-        // spamming the renderer with empty broadcasts every 180s).
-        if (result.synced > 0 || result.created > 0 || result.pending > 0) {
-          broadcastApplications()
-          broadcastEmailMatches()
-        }
-        // Brief the same delta into 必读 + (for reply-needed important mail)
-        // a draft. Runs after the funnel pass so the cursor is already advanced.
-        if (result.newEmails.length > 0) {
-          await emailBriefing.briefNewEmails(result.newEmails)
-        }
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(
+            () => reject(new Error('邮件同步超时（疑似网络挂起，已自动跳过，等待下一轮重试）')),
+            tickTimeoutMs
+          )
+        })
+        await Promise.race([runTickBody(), timeout])
       } catch (err) {
         activityService.record({
           type: 'provider_unavailable',
           summary: `邮件同步轮询失败：${err instanceof Error ? err.message : String(err)}`,
           metadata: { error: err instanceof Error ? err.message : String(err) }
         })
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle)
+        inFlight = false
+        lastSettledAt = Date.now()
       }
     }
+
     // Fire once shortly after boot (don't block startup), then on the interval.
-    setTimeout(() => void tick().catch(() => {}), 10_000)
-    setInterval(() => void tick().catch(() => {}), intervalMs)
+    setTimeout(() => { void tick() }, 10_000)
+    setInterval(() => { void tick() }, intervalMs)
+    // Watchdog: if no tick has settled in 3× interval, the interval stalled
+    // (or a hang slipped past the per-tick timeout) — force a fresh tick. At
+    // 5× interval still inFlight, the timeout machinery itself failed →
+    // circuit-breaker: abandon the zombie tick and force a new one.
+    setInterval(() => {
+      const stalled = Date.now() - lastSettledAt
+      if (inFlight && stalled > intervalMs * 5) {
+        activityService.record({
+          type: 'provider_unavailable',
+          summary: '邮件同步看门狗：回路长时间停滞，强制重置并触发即时同步'
+        })
+        inFlight = false
+        void tick()
+      } else if (!inFlight && stalled > intervalMs * 3) {
+        activityService.record({
+          type: 'provider_unavailable',
+          summary: '邮件同步看门狗：检测到回路停滞，触发即时同步'
+        })
+        void tick()
+      }
+    }, intervalMs)
+    // System wake: setInterval is paused during sleep and doesn't catch up
+    // missed slots; fire immediately on resume so new mail surfaces without
+    // waiting up to intervalMs. Non-fatal if powerMonitor is unavailable
+    // (test/CI harness).
+    try {
+      powerMonitor.on('resume', () => { void tick() })
+    } catch {
+      // powerMonitor unavailable — non-fatal.
+    }
   }
   void startEmailSyncLoop()
 
