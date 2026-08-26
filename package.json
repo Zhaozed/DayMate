@@ -1,6 +1,6 @@
 {
   "name": "daymate",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Daymate — persistent desktop personal work agent (macOS-first)",
   "author": "Daymate",
   "main": "./out/main/index.js",

@@ -64,6 +64,15 @@ tests/           unit · integration · e2e
 docs/            decisions/ (ADRs) · evaluation/
 ```
 
+## Download & install (macOS)
+
+Prebuilt **universal** (Apple Silicon + Intel) releases are published on the
+[GitHub Releases page](https://github.com/Zhaozed/DayMate/releases) — download
+the `.dmg`, drag Daymate to Applications, and follow
+[`INSTALL.md`](./INSTALL.md) for the one-time Gatekeeper step (the app is
+unsigned for now) and first-run credential setup (LLM key, Gmail OAuth client,
+163 授权码 — all self-supplied, encrypted, local-only).
+
 ## Local setup
 
 Requirements: Node ≥ 20, pnpm, Python 3 (for `better-sqlite3` native rebuild).
