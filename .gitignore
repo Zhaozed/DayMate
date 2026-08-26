@@ -33,6 +33,10 @@ logs/
 # Claude Code local settings (machine-specific, not shared)
 .claude/settings.local.json
 
+# Eval scratch: pi-agent-core bundle cache + real-email extraction output (never committed)
+.agent-core-*/
+scripts/tmp-real-emails.json
+
 # Drizzle
 drizzle/meta/_journal.json.bak
 

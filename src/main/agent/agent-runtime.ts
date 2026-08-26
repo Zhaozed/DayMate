@@ -294,17 +294,25 @@ function detectTopic(subject: string, body: string): EmailTopic {
   const text = subject + ' ' + body
   // `receipt` is deliberately excluded — "please confirm receipt" (acknowledge)
   // is indistinguishable from a billing receipt by keyword alone, so we require
-  // stronger billing signals (invoice / 账单 / 付款 / …). `newsletter`/`edm` are
-  // excluded too — a passive digest is `information`, not an ad; ads need a
-  // promotional marker (退订 / 优惠 / discount / …).
-  if (/账单|发票|invoice|费用|billing|扣款|续费|订阅费|付款|payment|订单确认|order confirmation/i.test(text)) {
+  // stronger billing signals (invoice / 账单 / 付款 / …). `digest` is NOT
+  // classified here either — unsolicited digest/roundup mail is filed
+  // `ignore` + `general` by an earlier branch in classifyInbox (v2.1, ADR
+  // 0028/0029); here only `newsletter` / `订阅号` (subscription feeds) count as
+  // ads, together with promotional markers (退订 / 优惠 / discount / …).
+  if (/账单|发票|invoice|费用|billing|扣款|续费|订阅费|付款|payment|收据|回执|purchase receipt|payment receipt|到期|expire|expiring|expires/i.test(text)) {
     return 'fees_billing'
   }
-  if (/招聘|offer|面试|interview|猎头|recruit|recruiting|入职|背调|发offer/i.test(text)) {
-    return 'recruiting'
-  }
-  if (ADS_KEYWORD_RE.test(text)) {
+  if (ADS_KEYWORD_RE.test(text) || /newsletter|订阅号/i.test(text)) {
+    // ADR 0028/0029 — unsolicited newsletter / 订阅号 mail is ads (and therefore
+    // always ignored; never a task, draft, or 必读 item).
+    // v3 — ads 提前于 recruiting：英文裸 "offer" 是促销（limited time offer）与
+    // 招聘 offer 的关键词语义无法区分，而促销邮件几乎都带退订语（unsubscribe /
+    // 退订）——先命中 ads 把它们正确归 ignore；真招聘邮件无广告退订语，仍会
+    // 落到 recruiting（真实形态走查 cls-33 暴露）。
     return 'ads'
+  }
+  if (/招聘|offer|面试|interview|猎头|recruit|recruiting|入职|背调|发offer|application|投递/i.test(text)) {
+    return 'recruiting'
   }
   if (/会议|日程|meeting|agenda|邀请|invite|参会|出席|calendar/i.test(text)) {
     return 'meeting'
@@ -387,6 +395,28 @@ function classifyInbox(input: ClassifyInboxInput): ClassifyInboxOutput {
       continue
     }
 
+    // ADR 0028/0029 — unsolicited automated system notifications are ignored
+    // (the user did nothing to trigger them; no 必读 / ToDo / draft). Kept
+    // narrow so real personal mail is never caught.
+    if (/system status|all green|uptime|status update|service status|system notification|系统状态|服务状态|运行状态|系统通知/.test(subject + ' ' + body)) {
+      topicCounts.general++
+      results.push({
+        provider: email.provider,
+        accountId: email.accountId,
+        messageId: email.messageId,
+        classification: 'ignore',
+        topic: 'general',
+        untrusted: false,
+        reason: '自动化系统通知 — 已忽略'
+      })
+      counts.ignore++
+      continue
+    }
+
+    // v2.3 — digest 周报不再 ignore：宁 information 勿 ignore（ignore=丢弃、
+    // information=保留不打扰；digest 误放无害，所以走正常流程落 information）。
+    // （原 digest→ignore 分支已删，见 regression-set-spec v2.3。）
+
     const topic = detectTopic(subject, body)
     topicCounts[topic]++
     // Sender label — used to build readable Chinese reasons / titles so the
@@ -412,13 +442,13 @@ function classifyInbox(input: ClassifyInboxInput): ClassifyInboxOutput {
     }
 
     const wantsReply =
-      /reply|following up|follow up|confirmation|please (confirm|reply)|need your|decision needed/.test(subject) ||
-      /please reply|please confirm|following up|need your|confirmation|by (today|friday|monday|tomorrow)|asap/.test(body)
+      /reply|following up|follow up|confirmation|please (confirm|reply)|need your|decision needed|请回复|请确认|请您回复/.test(subject) ||
+      /please reply|please confirm|following up|need your|confirmation|by (today|friday|monday|tomorrow)|asap|请回复|请确认|请您回复|尽快回复|望回复|回复一下|麻烦回复/.test(body)
 
     if (wantsReply) {
       // follow_up only when the sender is explicitly chasing — a bare reply-cue
       // ("need your sign-off", "confirmation needed") is a reply, not a chase.
-      const isFollowUp = /following up|follow up/.test(subject + ' ' + body)
+      const isFollowUp = /following up|follow up|跟进|催促|请跟进/.test(subject + ' ' + body)
       const classification: EmailClassification = isFollowUp ? 'follow_up' : 'reply'
       // ADR 0026 — a reply/follow-up is a genuinely useful ToDo (the sender is
       // waiting). dueDate only when a concrete date is mentioned in the body.

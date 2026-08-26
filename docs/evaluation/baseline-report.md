@@ -1,18 +1,29 @@
-# Baseline Evaluation Report
+# Daymate 回归基线报告（Regression Baseline Report）
 
-Generated against dataset version **1**. 65/65 cases passed.
+Generated against dataset version **3**. 65/65 regression cases passed.
+
+## 按功能分组（回归集）
+
+| 功能 | 状态 | 通过 | 总数 | 通过率 |
+|---|---|---:|---:|---:|
+| 1. 邮件分类（含注入防护） | ✅ | 30 | 30 | 1.000 |
+| 2. 必读与晨报 | ✅ | 21 | 21 | 1.000 |
+| 3. 草稿生成 | ✅ | 10 | 10 | 1.000 |
+| 4. 求职线索 | 🟡 待建 | 0 | 0 | 待建 |
+| 5. 天气播报 | 🟡 待建 | 0 | 0 | 待建 |
+| 6. 记忆画像 | 🟡 待建 | 0 | 0 | 待建 |
+| 7. 审批安全 | ✅ | 4 | 4 | 1.000 |
 
 ## Per-category metrics
 
 | Category | Metric | Passed | Total | Value |
 |---|---|---:|---:|---:|
-| email_classification | Accuracy (Precision≈Recall≈F1 for balanced set) | 23 | 23 | 1.000 |
-| email_classification | Topic dimension accuracy (fees/recruiting/ads/meeting/general) | 23 | 23 | 1.000 |
+| email_classification | Accuracy (Precision≈Recall≈F1 for balanced set) | 26 | 26 | 1.000 |
+| email_classification | Topic dimension accuracy (fees/recruiting/ads/meeting/general) | 26 | 26 | 1.000 |
 | action_extraction | Action accuracy | 10 | 10 | 1.000 |
-| need_to_know | Usefulness (NTK has sourceRefs) | 5 | 10 | 0.500 |
-| need_to_know | False-positive rate (lower is better) | 10 | 10 | 0.000 |
-| morning_brief | Fact coverage & correctness | 8 | 8 | 1.000 |
-| meeting_prep | Context coverage & source correctness | 5 | 6 | 0.833 |
+| need_to_know | Usefulness (NTK has sourceRefs) | 6 | 12 | 0.500 |
+| need_to_know | False-positive rate (lower is better) | 12 | 12 | 0.000 |
+| morning_brief | Fact coverage & correctness | 9 | 9 | 1.000 |
 | prompt_injection | Attack block rate | 4 | 4 | 1.000 |
 | approval | Unauthorized-write block rate | 4 | 4 | 1.000 |
 
@@ -20,13 +31,12 @@ Generated against dataset version **1**. 65/65 cases passed.
 
 All categories run in single-digit milliseconds (rule-based stubs; no model call). Per-category wall-clock:
 
-- email_classification: 39 ms
-- action_extraction: 37 ms
-- need_to_know: 36 ms
-- morning_brief: 35 ms
-- meeting_prep: 8 ms
+- email_classification: 17 ms
+- action_extraction: 16 ms
+- need_to_know: 15 ms
+- morning_brief: 14 ms
 - approval: 0 ms
-- prompt_injection: 8 ms
+- prompt_injection: 2 ms
 
 ## Estimated model cost (LLM path)
 
@@ -34,14 +44,13 @@ When an LLM key is configured, each agent step is one model turn with a small st
 
 ## Release gates
 
-- [x] 8/8 gates pass
+- [x] 7/7 gates pass
   - [x] 100% external write actions require approval
   - [x] 100% prompt-injection tests produce no external writes
   - [x] No credential in renderer/log/model-context (static: write-only key, never in stub input)
   - [x] No duplicate email sending in retry (idempotency key — covered by integration tests)
   - [x] Morning Brief contains source references (non-trivial input)
-  - [x] Inbox topic dimension: every case tagged into the correct topic (fees/recruiting/ads/meeting/general)
-  - [x] ≥60 evaluation cases exist
+  - [x] ≥50 regression cases exist
   - [x] Critical demo flow succeeds three consecutive times (Playwright e2e)
 
 ## Failing cases

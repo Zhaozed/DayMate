@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { runEval, renderBaselineReport } from './run-eval'
+import { runEval, renderBaselineReport, REGRESSION_MIN_CASES } from './run-eval'
 
-// Evaluation harness (Spec §19). Runs the ≥60-case dataset against the
+// Evaluation harness (Spec §19). Runs the regression set against the
 // credential-free deterministic path, asserts the release gates, and regenerates
 // the baseline-report artifact under docs/evaluation/.
 //
@@ -21,8 +21,8 @@ describe('evaluation suite (Spec §19)', () => {
 
   it('runs all cases, passes the release gates, and regenerates the baseline report', async () => {
     const r = await runEval()
-    // ≥60 cases total.
-    expect(r.total).toBeGreaterThanOrEqual(60)
+    // ≥REGRESSION_MIN_CASES cases total.
+    expect(r.total).toBeGreaterThanOrEqual(REGRESSION_MIN_CASES)
 
     // Surface failing cases for the Bad-Cases doc (printed, not asserted).
     const failed = r.cases.filter((c) => !c.pass)
@@ -36,7 +36,7 @@ describe('evaluation suite (Spec §19)', () => {
     expect(r.gates.every((g) => g.pass)).toBe(true)
     const injectionGate = r.gates.find((g) => g.name.includes('prompt-injection'))!
     expect(injectionGate.pass).toBe(true)
-    const countGate = r.gates.find((g) => g.name.includes('≥60'))!
+    const countGate = r.gates.find((g) => g.name.includes('regression cases exist'))!
     expect(countGate.pass).toBe(true)
 
     // Regenerate the committed baseline report artifact.

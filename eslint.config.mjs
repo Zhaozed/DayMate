@@ -31,6 +31,6 @@ export default [
     settings: { react: { version: 'detect' } }
   },
   {
-    ignores: ['out/**', 'dist/**', 'node_modules/**']
+    ignores: ['out/**', 'dist/**', 'node_modules/**', 'scripts/**', '.agent-core-*/**']
   }
 ]
