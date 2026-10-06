@@ -67,6 +67,7 @@ const gateway = new ServerGateway({
   port: PORT,
   host: HOST,
   token: SERVER_TOKEN,
+  dataDir: DATA_DIR,
   container
 })
 gatewayRef = gateway

@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http'
+import { createWriteStream } from 'node:fs'
+import { resolve } from 'node:path'
 import { WebSocketServer, WebSocket } from 'ws'
 import type { Container } from '../main/app/container'
 import { dispatchBusinessAction } from './actions'
@@ -8,6 +10,7 @@ export interface ServerGatewayOptions {
   port: number
   host?: string
   token: string
+  dataDir?: string
   container: Container
 }
 
@@ -122,6 +125,52 @@ export class ServerGateway {
           res.end(JSON.stringify({ success: false, error: err instanceof Error ? err.message : String(err) }))
         }
       })
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/sync-file') {
+      const filename = req.headers['x-daymate-filename'] as string
+      if (!filename || (filename !== 'daymate.db' && filename !== 'settings.json' && filename !== 'base_resume.html' && filename !== 'secrets.json')) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Invalid or forbidden filename' }))
+        return
+      }
+
+      const targetDir = this.options.dataDir || './data'
+      const targetPath = resolve(targetDir, filename)
+      const tmpPath = `${targetPath}.tmp`
+      const ws = createWriteStream(tmpPath)
+      req.pipe(ws)
+
+      ws.on('finish', async () => {
+        try {
+          const { rename } = await import('node:fs/promises')
+          await rename(tmpPath, targetPath)
+          console.log(`[sync] Successfully received and saved: ${filename}`)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: true, filename }))
+        } catch (err) {
+          console.error('[sync] Error renaming file:', err)
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: String(err) }))
+        }
+      })
+
+      ws.on('error', (err) => {
+        console.error('[sync] Stream write error:', err)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: String(err) }))
+      })
+      return
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/sync-reload') {
+      console.log('[sync] Server reload requested after data migration. Exiting to allow PM2 restart...')
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ success: true, message: 'Server is restarting with new database' }))
+      setTimeout(() => {
+        process.exit(0)
+      }, 500)
       return
     }
 
