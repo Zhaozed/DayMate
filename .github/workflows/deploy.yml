@@ -62,7 +62,7 @@ jobs:
             mkdir -p /opt/daymate/data
             cd /opt/daymate
             npm install --omit=dev
-            pm2 reload server.js --update-env || pm2 start server.js --name daymate --time
+            pm2 restart daymate --update-env || pm2 start server.js --name daymate --time
             pm2 save
             sleep 3
             pm2 status
