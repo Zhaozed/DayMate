@@ -169,8 +169,29 @@ export class ServerGateway {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ success: true, message: 'Server is restarting with new database' }))
       setTimeout(() => {
-        process.exit(0)
-      }, 500)
+        process.exit(1)
+      }, 300)
+      return
+    }
+
+    if (url.pathname === '/api/debug') {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('node:fs')
+      const targetDir = this.options.dataDir || './data'
+      const dbPath = resolve(targetDir, 'daymate.db')
+      const size = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0
+      const apps = this.options.container.store.listApplications()
+      const tasks = this.options.container.store.listTasks()
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        targetDir,
+        dbPath,
+        dbSize: size,
+        appsCount: apps.length,
+        tasksCount: tasks.length,
+        pid: process.pid,
+        uptime: process.uptime()
+      }))
       return
     }
 
