@@ -102,11 +102,6 @@ export function Robot(): ReactElement {
     void window.daymate.openWindow('workbench')
   }, [])
 
-  const runMorningBrief = useCallback(() => {
-    setView('orb')
-    void window.daymate.runRoutine('morning_brief')
-  }, [])
-
   const openWorkbenchFromPanel = useCallback(() => {
     setView('orb')
     void window.daymate.openWindow('workbench')
@@ -146,7 +141,6 @@ export function Robot(): ReactElement {
               setView('orb')
               void window.daymate.openWorkbenchAt('Approvals')
             }}
-            onRunMorningBrief={runMorningBrief}
             onOpenWorkbench={openWorkbenchFromPanel}
             onClose={closePanel}
           />

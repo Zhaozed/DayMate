@@ -7,8 +7,10 @@ import {
   VERIFICATION_CODE_RE,
   SECURITY_ALERT_RE,
   shouldSkipBriefing,
-  shouldSkipFunnel
+  shouldSkipFunnel,
+  isRecruitingVip
 } from '../../src/main/util/bulk-mail'
+import { extractPositionFromText, extractJobCodeFromText } from '../../src/main/services/application-service'
 import type { NormalizedEmail } from '@shared/types'
 
 function email(overrides: Partial<NormalizedEmail> = {}): NormalizedEmail {
@@ -147,7 +149,146 @@ describe('shouldSkipFunnel (投递漏斗 path)', () => {
       shouldSkipFunnel(email({ bulk: true, from: { name: 'X', address: 'noreply@zhipuai.com' }, subject: '投递成功 — 后端工程师', textBody: '已收到您的简历' }))
     ).toBe(false)
   })
-  it('keeps all non-bulk mail', () => {
-    expect(shouldSkipFunnel(email({ subject: '面试通知', textBody: '请来面试' }))).toBe(false)
+  it('keeps recruiting portal verification codes in job funnel', () => {
+    expect(
+      shouldSkipFunnel(
+        email({
+          from: { name: '深信服科技', address: 'zhaopin@sangfor.com.cn' },
+          subject: '【深信服科技】招聘官网验证码获取',
+          textBody: '您的验证码是 829103，有效期 5 分钟。'
+        })
+      )
+    ).toBe(false)
+  })
+
+  it('skips generic verification codes from job funnel', () => {
+    expect(
+      shouldSkipFunnel(
+        email({
+          from: { name: 'Service', address: 'noreply@service.com' },
+          subject: '验证码通知',
+          textBody: '您的验证码是 829103，有效期 5 分钟。'
+        })
+      )
+    ).toBe(true)
+  })
+
+  it('skips CI / GitHub notifications from job funnel', () => {
+    expect(
+      shouldSkipFunnel(
+        email({
+          from: { name: 'GitHub', address: 'notifications@github.com' },
+          subject: '[Zhaozed/zzyCv_web] Run failed: ci - main (a1663c5)',
+          textBody: 'Workflow ci failed on main'
+        })
+      )
+    ).toBe(true)
+  })
+
+  it('skips Cloudflare domain notices from job funnel', () => {
+    expect(
+      shouldSkipFunnel(
+        email({
+          from: { name: 'Cloudflare', address: 'noreply@notify.cloudflare.com' },
+          subject: '[Confirmation] zhaozeyu-cv.top is active (Free plan)',
+          textBody: 'Your domain is now active on Cloudflare free plan.'
+        })
+      )
+    ).toBe(true)
+  })
+
+  it('skips Instagram / social recommendations and newsletters from job funnel', () => {
+    expect(
+      shouldSkipFunnel(
+        email({
+          from: { name: 'Instagram', address: 'follow-suggestions@mail.instagram.com' },
+          subject: '在动态中查看 hudsonfan 、xuezhiqian 和更多账户',
+          textBody: '根据你的兴趣为你推荐...'
+        })
+      )
+    ).toBe(true)
+    expect(
+      shouldSkipFunnel(
+        email({
+          from: { name: 'Font Awesome', address: 'hello@m.fontawesome.com' },
+          subject: 'Awesome News: Vellum Icons, Epic Flops & a Puzzle',
+          textBody: 'Check out the latest icons...'
+        })
+      )
+    ).toBe(true)
   })
 })
+
+describe('extractPositionFromText (ATS position extraction)', () => {
+  it('extracts 产品经理 from 优必选 ATS confirmation body', () => {
+    const text = '尊敬的候选人：您好！感谢您应聘深圳市优必选科技股份有限公司的产品经理岗位，您的简历已收到。'
+    expect(extractPositionFromText(text)).toBe('产品经理')
+  })
+
+  it('extracts position from 职位名称 or 应聘职位 pattern', () => {
+    expect(extractPositionFromText('感谢投递，职位名称：海外市场运营')).toBe('海外市场运营')
+    expect(extractPositionFromText('您申请的【Java后端开发工程师】已进入初筛')).toBe('Java后端开发工程师')
+  })
+})
+
+describe('extractJobCodeFromText (ATS job/position code extraction)', () => {
+  it('extracts job code from 职位编号 / 岗位编号 pattern', () => {
+    expect(extractJobCodeFromText('尊敬的候选人：您好！职位编号：P102938，岗位名称：产品经理')).toBe('P102938')
+    expect(extractJobCodeFromText('感谢您投递我司，岗位编号: 20240901-RD')).toBe('20240901-RD')
+  })
+
+  it('extracts job code from Job ID / Req ID / 需求编号 pattern', () => {
+    expect(extractJobCodeFromText('【美团招聘】您申请的职位（Job ID: MT-98721）已进入初筛')).toBe('MT-98721')
+    expect(extractJobCodeFromText('您的应聘信息已收到，Req ID: REQ_2026_001')).toBe('REQ_2026_001')
+    expect(extractJobCodeFromText('投递成功：需求编号: BZ-2024')).toBe('BZ-2024')
+    expect(extractJobCodeFromText('【职位编号: ABC-123】面试通知')).toBe('ABC-123')
+  })
+
+  it('returns undefined when no job code is present', () => {
+    expect(extractJobCodeFromText('感谢您的投递，请静候通知。')).toBeUndefined()
+  })
+})
+
+describe('isRecruitingVip (Recruiting VIP and Resume Update signals)', () => {
+  it('recognizes resume update and profile supplement emails as VIP', () => {
+    expect(
+      isRecruitingVip(
+        email({
+          subject: '【优必选】请完善您的个人简历与应聘信息',
+          textBody: '感谢您投递我司产品经理岗位，请在3日内完善简历附件。'
+        })
+      )
+    ).toBe(true)
+
+    expect(
+      isRecruitingVip(
+        email({
+          subject: '简历更新提醒',
+          textBody: '您的简历需要更新补充个人资料。'
+        })
+      )
+    ).toBe(true)
+
+    expect(
+      isRecruitingVip(
+        email({
+          subject: '应聘信息补充通知',
+          textBody: '请登录招聘系统补充您的个人信息与简历。'
+        })
+      )
+    ).toBe(true)
+  })
+
+  it('never skips recruiting VIP emails even if bulk or noreply', () => {
+    const updateMail = email({
+      from: { name: 'noreply-ats', address: 'noreply@beisen.com' },
+      bulk: true,
+      subject: '【腾讯】请完善您的应聘信息与简历',
+      textBody: '感谢关注腾讯招聘，请点击链接补充应聘信息。'
+    })
+    expect(shouldSkipBriefing(updateMail)).toBe(false)
+    expect(shouldSkipFunnel(updateMail)).toBe(false)
+  })
+})
+
+

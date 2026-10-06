@@ -76,7 +76,11 @@ export class Mail163Provider implements EmailProvider {
     // Validate the credentials by actually logging in to IMAP.
     const client = await this.getClient()
     const imap = await this.openImap(client)
-    await imap.logout()
+    try {
+      await imap.status('INBOX', { unseen: true })
+    } finally {
+      await safeCloseImap(imap)
+    }
     return this.account(client)
   }
 
@@ -145,7 +149,7 @@ export class Mail163Provider implements EmailProvider {
         lock.release()
       }
     } finally {
-      await imap.logout()
+      await safeCloseImap(imap)
     }
   }
 
@@ -173,7 +177,7 @@ export class Mail163Provider implements EmailProvider {
         lock.release()
       }
     } finally {
-      await imap.logout()
+      await safeCloseImap(imap)
     }
   }
 
@@ -217,11 +221,7 @@ export class Mail163Provider implements EmailProvider {
     } catch {
       return [] // best-effort — never surface a 163 IMAP error to the 必读 page
     } finally {
-      try {
-        await imap.logout()
-      } catch {
-        /* ignore */
-      }
+      await safeCloseImap(imap)
     }
   }
 
@@ -248,7 +248,7 @@ export class Mail163Provider implements EmailProvider {
         lock.release()
       }
     } finally {
-      await imap.logout()
+      await safeCloseImap(imap)
     }
   }
 
@@ -288,7 +288,7 @@ export class Mail163Provider implements EmailProvider {
         lock.release()
       }
     } finally {
-      await imap.logout()
+      await safeCloseImap(imap)
     }
   }
 
@@ -307,7 +307,7 @@ export class Mail163Provider implements EmailProvider {
       // If no Drafts mailbox found, we still return a draft object (the send
       // path is SMTP; the persisted draft is best-effort on 163).
     } finally {
-      await imap.logout()
+      await safeCloseImap(imap)
     }
     const draftId = newId('draft')
     this.drafts.set(draftId, {
@@ -372,7 +372,14 @@ export class Mail163Provider implements EmailProvider {
       port: IMAP_PORT,
       secure: true,
       auth: { user: client.email, pass: client.authCode },
-      logger: false
+      logger: false,
+      socketTimeout: 30_000,
+      connectionTimeout: 15_000
+    })
+    // Crucial: attach error listener so unhandled socket drops/timeouts (e.g. Socket timeout, ECONNRESET)
+    // are caught here instead of causing unhandled exceptions in the Node/Electron main process.
+    imap.on('error', (err: Error) => {
+      console.warn('[mail163] IMAP socket notice:', err?.message || String(err))
     })
     await imap.connect()
     return imap as unknown as ImapFlowLike
@@ -403,12 +410,27 @@ export class Mail163Provider implements EmailProvider {
   }
 }
 
+/** Safely disconnect and close an IMAP session without throwing unhandled socket reset errors. */
+async function safeCloseImap(imap: ImapFlowLike): Promise<void> {
+  try {
+    await imap.logout()
+  } catch {
+    try {
+      imap.close()
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 // ── minimal typed surface of imapflow / mailparser (kept loose to avoid
 //    importing the ESM/CJS shape at type-check time; we dynamic-import at run).
 
 interface ImapFlowLike {
   connect(): Promise<void>
   logout(): Promise<void>
+  close(): void
+  status(path: string, query: Record<string, unknown>): Promise<unknown>
   getMailboxLock(path: string): Promise<{ release: () => Promise<void> }>
   search(query: Record<string, unknown>, opts?: { uid?: boolean }): Promise<number[]>
   fetchOne(

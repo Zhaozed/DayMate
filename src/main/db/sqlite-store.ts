@@ -201,6 +201,7 @@ function rowToApplication(r: ApplicationRow): Application {
     channelRef: r.channelRef ?? undefined,
     notes: r.notes ?? undefined,
     city: r.city ?? undefined,
+    jobCode: r.jobCode ?? undefined,
     salaryRange: r.salaryRange ?? undefined,
     jdText: r.jdText ?? undefined,
     stage: r.stage ?? undefined,
@@ -672,6 +673,7 @@ export class SqliteStore implements RoutineStore {
         channelRef: app.channelRef ?? null,
         notes: app.notes ?? null,
         city: app.city ?? null,
+        jobCode: app.jobCode ?? null,
         salaryRange: app.salaryRange ?? null,
         jdText: app.jdText ?? null,
         stage: app.stage ?? null,
@@ -689,6 +691,7 @@ export class SqliteStore implements RoutineStore {
         set: {
           company: app.company,
           position: app.position,
+          jobCode: app.jobCode ?? null,
           source: app.source,
           bossSecurityId: app.bossSecurityId ?? null,
           appliedAt: app.appliedAt,
@@ -746,6 +749,7 @@ export class SqliteStore implements RoutineStore {
     const set: Record<string, unknown> = {}
     if (patch.company !== undefined) set.company = patch.company
     if (patch.position !== undefined) set.position = patch.position
+    if (patch.jobCode !== undefined) set.jobCode = patch.jobCode ?? null
     if (patch.source !== undefined) set.source = patch.source
     if (patch.bossSecurityId !== undefined) set.bossSecurityId = patch.bossSecurityId ?? null
     if (patch.appliedAt !== undefined) set.appliedAt = patch.appliedAt
@@ -831,6 +835,9 @@ export class SqliteStore implements RoutineStore {
       .orderBy(applicationEventsTbl.eventAt)
       .all()
       .map(rowToApplicationEvent)
+  }
+  deleteApplicationEvent(id: string): void {
+    this.db.delete(applicationEventsTbl).where(eq(applicationEventsTbl.id, id)).run()
   }
 
   // ── Resume versions (Milestone A) ──────────────────────────────────────────

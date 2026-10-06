@@ -68,13 +68,8 @@ export const TASK_SOURCE_TYPES = ['email', 'calendar', 'assistant', 'routine'] a
 // a topic-derived value.
 export const TASK_CATEGORIES = ['school', 'job', 'bill', 'meeting', 'other'] as const
 
-// 必读 (NeedToKnow) top-level briefing categories (ADR 0029 — 必读页重构). A
-// 4-value section tag that organizes the 必读 page into 学校 / 求职 / 日常 / 其他
-// sections. Distinct from the 5-value TASK_CATEGORIES (which tags Home ToDos):
-// 必读 collapses 账单+会议+日常事务 into 'daily' per the user's 4-section
-// layout. The model fills `briefingCategory` on every surfaced email; the stub
-// falls back to a topic-derived value.
-export const BRIEFING_CATEGORIES = ['school', 'job', 'daily', 'other'] as const
+// 邮件动态聚合 (NeedToKnow) 顶层分类：组织为 学校 / 求职 / 日常 3 分类
+export const BRIEFING_CATEGORIES = ['school', 'job', 'daily'] as const
 export type BriefingCategory = (typeof BRIEFING_CATEGORIES)[number]
 
 export const INTEGRATION_STATUSES = [
@@ -307,7 +302,6 @@ export const IPC = {
   MEMORY_CONFIRM: 'daymate:memory:confirm',
   MEMORY_DELETE: 'daymate:memory:delete',
   MEMORY_CHANGED: 'daymate:memory:changed',
-  MEMORY_GENERATE_PERSONA: 'daymate:memory:generate-persona',
   // LLM configuration (M3) — the key is write-only; GET never returns it.
   LLM_GET_CONFIG: 'daymate:llm:get-config',
   LLM_SET_CONFIG: 'daymate:llm:set-config',
@@ -332,25 +326,15 @@ export const IPC = {
   MAIL163_DISCONNECT: 'daymate:mail163:disconnect',
   MAIL163_GET_STATUS: 'daymate:mail163:get-status',
   MAIL163_TEST: 'daymate:mail163:test',
-  // Feishu Calendar integration (Spec §10). User-OAuth; app_id/app_secret +
-  // user refresh token are credentials in the SecretStore, never returned to
-  // the renderer. Only status crosses over.
-  FEISHU_SET_CLIENT: 'daymate:feishu:set-client',
-  FEISHU_HAS_CLIENT: 'daymate:feishu:has-client',
-  FEISHU_CONNECT: 'daymate:feishu:connect',
-  FEISHU_DISCONNECT: 'daymate:feishu:disconnect',
-  FEISHU_GET_STATUS: 'daymate:feishu:get-status',
-  FEISHU_TEST: 'daymate:feishu:test',
-  // Job applications (boss-cli integration). applications:* manage the
-  // cross-channel funnel panel (manual entries + boss sync + status events).
-  // boss:get-status reports the boss-cli login/cookie health (never a cookie).
+  // Job applications. applications:* manage the cross-channel funnel panel.
   APPLICATION_LIST: 'daymate:application:list',
   APPLICATION_CREATE: 'daymate:application:create',
   APPLICATION_ADD_EVENT: 'daymate:application:add-event',
-  APPLICATION_SYNC_BOSS: 'daymate:application:sync-boss',
   APPLICATION_CHANGED: 'daymate:application:changed',
   APPLICATION_SYNC_EMAIL: 'daymate:application:sync-email',
   APPLICATION_UPLOAD_RESUME: 'daymate:application:upload-resume',
+  APPLICATION_OPEN_PDF: 'daymate:application:open-pdf',
+  APPLICATION_SELECT_BASE_RESUME: 'daymate:application:select-base-resume',
   APPLICATION_GENERATE_PREP: 'daymate:application:generate-prep',
   APPLICATION_LIST_RESUMES: 'daymate:application:list-resumes',
   APPLICATION_LIST_PREP: 'daymate:application:list-prep',
@@ -366,18 +350,17 @@ export const IPC = {
   APPLICATION_GENERATE_FUNNEL_REVIEW: 'daymate:application:generate-funnel-review',
   APPLICATION_UPDATE_FIELDS: 'daymate:application:update-fields',
   APPLICATION_FETCH_JD: 'daymate:application:fetch-jd',
-  JOB_RECOMMENDATIONS_FETCH: 'daymate:job-recommendations:fetch',
-  JOB_CONVERT_TO_APPLICATION: 'daymate:job-recommendations:convert',
-  JOB_DETAIL_GET: 'daymate:job-recommendations:detail',
+  APPLICATION_UNDO_EVENT: 'daymate:application:undo-event',
+  APPLICATION_REBIND_EVENT: 'daymate:application:rebind-event',
+  APPLICATION_DELETE_EVENT: 'daymate:application:delete-event',
+  APPLICATION_UPDATE_STATUS: 'daymate:application:update-status',
+  APPLICATION_UPDATE_JD: 'daymate:application:update-jd',
   EMAIL_MATCHES_LIST: 'daymate:email-match:list',
   EMAIL_MATCH_CONFIRM: 'daymate:email-match:confirm',
   EMAIL_MATCH_IGNORE: 'daymate:email-match:ignore',
   EMAIL_MATCHES_CHANGED: 'daymate:email-match:changed',
   JOB_SEARCH_GET_CONFIG: 'daymate:job-search:get-config',
   JOB_SEARCH_SET_CONFIG: 'daymate:job-search:set-config',
-  BOSS_GET_STATUS: 'daymate:boss:get-status',
-  BOSS_LOGIN: 'daymate:boss:login',
-  BOSS_LOGOUT: 'daymate:boss:logout',
   // Milestone D — notification prefs + 投递 data export.
   NOTIFICATION_GET_PREFS: 'daymate:notifications:get-prefs',
   NOTIFICATION_SET_PREFS: 'daymate:notifications:set-prefs',
@@ -386,15 +369,11 @@ export const IPC = {
   BIRTH_DATA_GET: 'daymate:birth-data:get',
   BIRTH_DATA_SET: 'daymate:birth-data:set',
   BIRTH_DATA_CLEAR: 'daymate:birth-data:clear',
-  // ADR 0026 — Home 天气卡 (real weather via wttr.in + LLM-polished copy,
-  // cached in non-secret settings.json) + 晨报轮播 (morning-brief history, 7d)
-  // + 天气城市 config. WEATHER_GET returns the cache; WEATHER_REFRESH forces a
-  // fresh generate. MORNING_BRIEF_LIST returns the last 7 morning-brief NTKs.
+  // ADR 0026 — Home 天气卡
   WEATHER_GET: 'daymate:weather:get',
   WEATHER_REFRESH: 'daymate:weather:refresh',
   WEATHER_CITY_GET: 'daymate:weather:city-get',
   WEATHER_CITY_SET: 'daymate:weather:city-set',
-  MORNING_BRIEF_LIST: 'daymate:morning-brief:list',
   // ADR 0027 — ToDo overhaul: school-spam skip-token editor + cold-start
   // toggle + manual re-scan. All R1 local reads/writes (§15 — settings.json is
   // local config, no external side-effect). COLD_START clears one account's
@@ -417,7 +396,6 @@ export const ROUTINE_MAX_STEPS = 100
 // created-over or deleted (Spec §14). Shared so the renderer can hide the
 // Delete control on preset rows.
 export const PRESET_ROUTINE_IDS = [
-  'morning_brief',
   'interview_prep'
 ] as const
 export type PresetRoutineId = (typeof PRESET_ROUTINE_IDS)[number]

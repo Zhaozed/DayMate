@@ -12,7 +12,6 @@ import { TaskService } from '../../src/main/services/task-service'
 import { ApplicationService } from '../../src/main/services/application-service'
 import { ActivityService } from '../../src/main/services/activity-service'
 import { NeedToKnowService } from '../../src/main/services/need-to-know-service'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { purgeEmailOriginTasks } from '../../src/main/services/todo-purge'
 
 function setup(): {
@@ -23,11 +22,10 @@ function setup(): {
 } {
   const store = new InMemoryStore()
   const activity = new ActivityService(store)
-  const boss = new MockBossProvider()
   return {
     store,
     tasks: new TaskService(store),
-    app: new ApplicationService(store, boss, activity),
+    app: new ApplicationService(store, activity),
     ntk: new NeedToKnowService(store)
   }
 }

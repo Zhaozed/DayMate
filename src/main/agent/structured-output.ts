@@ -39,19 +39,10 @@ export interface TypeBuilder {
 
 /** The TypeBox output-tool parameter schemas, keyed by action. */
 export interface OutputSchemas {
-  submit_brief: TSchema
   submit_classifications: TSchema
-  submit_meeting_prep: TSchema
-  submit_work_summary: TSchema
-  submit_draft_reply: TSchema
-  submit_resume: TSchema
   submit_interview_transcript: TSchema
   submit_application_email_classifications: TSchema
   submit_funnel_review: TSchema
-  submit_score_job_matches: TSchema
-  submit_daily_fortune: TSchema
-  submit_daily_weather: TSchema
-  submit_persona: TSchema
 }
 
 /**
@@ -91,12 +82,6 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
     ]),
     value: Type.String()
   })
-  const taskPriority = Type.Union([
-    Type.Literal('low'),
-    Type.Literal('medium'),
-    Type.Literal('high'),
-    Type.Literal('urgent')
-  ])
   const briefPriority = Type.Union([
     Type.Literal('medium'),
     Type.Literal('high'),
@@ -115,24 +100,6 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
     Type.Literal('meeting'),
     Type.Literal('general')
   ])
-
-  const submit_brief = Type.Object({
-    title: Type.String(),
-    summary: Type.String(),
-    reason: Type.String(),
-    priority: briefPriority,
-    sourceRefs: Type.Array(sourceRef),
-    suggestedActions: Type.Array(suggestedAction),
-    taskToCreate: Type.Union([
-      Type.Object({
-        title: Type.String(),
-        sourceId: Type.String(),
-        priority: taskPriority
-      }),
-      Type.Null()
-    ]),
-    memoryProposals: Type.Optional(Type.Array(memoryProposal))
-  })
 
   const submit_classifications = Type.Object({
     results: Type.Array(
@@ -191,44 +158,6 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
     suggestedActions: Type.Array(suggestedAction)
   }
 
-  const submit_meeting_prep = Type.Object({
-    ...publishable,
-    objective: Type.String(),
-    context: Type.Array(Type.String()),
-    questions: Type.Array(Type.String()),
-    openActions: Type.Array(Type.String()),
-    memoryProposals: Type.Optional(Type.Array(memoryProposal))
-  })
-
-  const submit_work_summary = Type.Object({
-    ...publishable,
-    processedEmails: Type.Number(),
-    tasksCreated: Type.Number(),
-    tasksCompleted: Type.Number(),
-    meetingsAttended: Type.Number(),
-    waitingItems: Type.Array(Type.String()),
-    tomorrowHighlights: Type.Array(Type.String()),
-    memoryProposals: Type.Optional(Type.Array(memoryProposal))
-  })
-
-  const mailAddressT = Type.Object({
-    name: Type.Optional(Type.String()),
-    address: Type.String()
-  })
-  const submit_draft_reply = Type.Object({
-    to: Type.Array(mailAddressT),
-    subject: Type.String(),
-    body: Type.String(),
-    memoryProposals: Type.Optional(Type.Array(memoryProposal))
-  })
-
-  // ── Milestone A: resume / transcript / application-email classification ──────
-  const submit_resume = Type.Object({
-    html: Type.String(),
-    summary: Type.String(),
-    memoryProposals: Type.Optional(Type.Array(memoryProposal))
-  })
-
   const submit_interview_transcript = Type.Object({
     html: Type.String(),
     selfIntro: Type.String(),
@@ -273,6 +202,7 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
         eventType: applicationEventType,
         company: Type.Optional(Type.String()),
         position: Type.Optional(Type.String()),
+        jobCode: Type.Optional(Type.String()),
         jdExcerpt: Type.Optional(Type.String()),
         city: Type.Optional(Type.String()),
         salary: Type.Optional(Type.String()),
@@ -293,7 +223,14 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
             Type.Literal('meeting'),
             Type.Literal('other')
           ])
-        )
+        ),
+        round: Type.Optional(Type.String()),
+        isReschedule: Type.Optional(Type.Boolean()),
+        isCancelled: Type.Optional(Type.Boolean()),
+        meetingInfo: Type.Optional(Type.String()),
+        isAdjusted: Type.Optional(Type.Boolean()),
+        adjustedPosition: Type.Optional(Type.String()),
+        isJobRelated: Type.Optional(Type.Boolean())
       })
     ),
     matched: Type.Number(),
@@ -318,74 +255,11 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
   // ── Milestone C: score job matches ───────────────────────────────────────────
   // PublishableBrief shape + `results` (per-job score/reason). Publishable to
   // NTK via `need_to_know fromKey`; the renderer lists `results`.
-  const jobTier = Type.Union([
-    Type.Literal('high'),
-    Type.Literal('medium'),
-    Type.Literal('low'),
-    Type.Literal('skip')
-  ])
-  const submit_score_job_matches = Type.Object({
-    ...publishable,
-    results: Type.Array(
-      Type.Object({
-        securityId: Type.String(),
-        jobName: Type.String(),
-        companyName: Type.String(),
-        score: Type.Number(),
-        tier: jobTier,
-        reasons: Type.Array(Type.String()),
-        recommend: Type.Boolean(),
-        salary: Type.Optional(Type.String()),
-        city: Type.Optional(Type.String())
-      })
-    ),
-    memoryProposals: Type.Optional(Type.Array(memoryProposal))
-  })
-
-  // Milestone E — daily 运势 output (NOT a PublishableBrief; never NTK).
-  const submit_daily_fortune = Type.Object({
-    title: Type.String(),
-    summary: Type.String(),
-    tip: Type.String(),
-    mood: Type.Number()
-  })
-
-  // ADR 0026 — daily weather briefing output. The Home 今日天气 card payload
-  // (tempText header + Chinese summary + clothing + practical 宜/忌). NOT
-  // mystical — 宜/忌 are practical/weather-grounded; mystical 宜忌 stays in
-  // the separate 运势 bubble. Mirrors weatherBriefingSchema (Zod).
-  const submit_daily_weather = Type.Object({
-    tempText: Type.String(),
-    summary: Type.String(),
-    clothing: Type.String(),
-    yi: Type.Array(Type.String()),
-    ji: Type.Array(Type.String())
-  })
-
-  // ── Persona inference (§16 town-style profile) ────────────────────────────────
-  // The model proposes persona / writing_style / email_tone / working_hours
-  // memory items from the user's OWN sent mail (trusted, framed by
-  // frameSentReply — the opposite of §17 untrusted inbound). Proposals land
-  // confirmed:false. NOT a PublishableBrief (never published to NTK).
-  const submit_persona = Type.Object({
-    summary: Type.String(),
-    memoryProposals: Type.Optional(Type.Array(memoryProposal))
-  })
-
   return {
-    submit_brief,
     submit_classifications,
-    submit_meeting_prep,
-    submit_work_summary,
-    submit_draft_reply,
-    submit_resume,
     submit_interview_transcript,
     submit_application_email_classifications,
-    submit_funnel_review,
-    submit_score_job_matches,
-    submit_daily_fortune,
-    submit_daily_weather,
-    submit_persona
+    submit_funnel_review
   }
 }
 

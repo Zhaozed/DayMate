@@ -27,8 +27,15 @@ import {
 //     upstream). Priority is now just a small in-item badge.
 //
 // Source provider + deep link are shown on every item so the user can jump to
-// the original mail (Gmail = real per-message deep link; 163 = webmail root).
-export function NeedToKnowPage(): ReactElement {
+export interface NeedToKnowPageProps {
+  title?: string
+  subtitle?: string
+}
+
+export function NeedToKnowPage({
+  title = '首页',
+  subtitle = '邮件智能聚合与核心动态（Gmail & 163）。按线程聚合 · 学校 / 求职 / 日常'
+}: NeedToKnowPageProps = {}): ReactElement {
   const { data: items, loading, error, refetch } = useAsync(() => window.daymate.listNeedToKnow())
 
   // NTK has no dedicated push channel; an Activity change means a routine ran
@@ -54,28 +61,28 @@ export function NeedToKnowPage(): ReactElement {
   // show. A refetch (dismiss / live push) keeps the existing list mounted so
   // the scroll position and open threads survive — the full-screen Loading
   // unmount would otherwise snap the viewport back to the top every time.
-  if (loading && list.length === 0) return <Loading label="正在加载必读…" />
+  if (loading && list.length === 0) return <Loading label={`正在加载${title}…`} />
   if (error && list.length === 0) return <ErrorState message={error.message} onRetry={refetch} />
   if (list.length === 0) {
     return (
       <div>
-        <Header />
+        <Header title={title} subtitle={subtitle} />
         <EmptyState
-          title="暂无必读"
-          hint="各来源的重要邮件（招聘 / 账单 / 导师 / 会议 / 投递确认 等）会在到达后自动汇总到这里。"
+          title={`暂无${title === '首页' ? '邮件动态' : title}`}
+          hint="各来源的重要邮件（学校 / 求职 / 日常）会在到达后自动汇总到这里。"
         />
       </div>
     )
   }
 
-  // Group by 4-value briefingCategory (学校/求职/日常/其他); legacy items without
-  // a category fall into 其他. Within a section, newest-updated first so a
+  // Group by 3-value briefingCategory (学校/求职/日常); legacy items without
+  // a category fall into daily. Within a section, newest-updated first so a
   // thread that just got a new reply bubbles to the top.
   const groups = groupByBriefingCategory(list)
 
   return (
     <div>
-      <Header />
+      <Header title={title} subtitle={subtitle} />
       <div className="mt-6 space-y-8">
         {BRIEFING_CATEGORY_ORDER.map((cat) => {
           const group = groups.get(cat)
@@ -100,8 +107,9 @@ function groupByBriefingCategory(list: NeedToKnow[]): Map<BriefingCategory, Need
   const map = new Map<BriefingCategory, NeedToKnow[]>()
   for (const cat of BRIEFING_CATEGORY_ORDER) map.set(cat, [])
   for (const n of list) {
-    const cat: BriefingCategory = n.briefingCategory ?? 'other'
-    const bucket = map.get(cat) ?? map.get('other')!
+    const cat: BriefingCategory =
+      n.briefingCategory === 'school' || n.briefingCategory === 'job' ? n.briefingCategory : 'daily'
+    const bucket = map.get(cat) ?? map.get('daily')!
     bucket.push(n)
   }
   // Sort each bucket newest-updated first (updatedAt falls back to createdAt).
@@ -381,8 +389,8 @@ function ThreadExpansion({
 
   if (loading) return <p className="mt-1 text-xs text-white/40">正在拉取线程…</p>
   if (!thread || thread.length === 0) {
-    // Fallback: show the surfaced 必读 emails only.
-    return <p className="mt-1 text-xs text-white/40">无法拉取完整线程（仅显示已必读邮件）。</p>
+    // Fallback: show the surfaced emails only.
+    return <p className="mt-1 text-xs text-white/40">无法拉取完整线程（仅显示已同步邮件）。</p>
   }
 
   return (
@@ -408,11 +416,11 @@ function ThreadExpansion({
   )
 }
 
-function Header(): ReactElement {
+function Header({ title, subtitle }: { title: string; subtitle: string }): ReactElement {
   return (
     <div>
-      <h1 className="text-xl font-semibold text-white">必读</h1>
-      <p className="mt-1 text-sm text-white/45">各来源信息汇总 · 按线程聚合 · 学校 / 求职 / 日常 / 其他</p>
+      <h1 className="text-xl font-semibold text-white">{title}</h1>
+      <p className="mt-1 text-sm text-white/45">{subtitle}</p>
     </div>
   )
 }

@@ -8,7 +8,6 @@ import { MemoryService } from '../../src/main/services/memory-service'
 import { ApplicationService } from '../../src/main/services/application-service'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 
 function buildContext(overrides: Partial<ToolContext> = {}): ToolContext {
   const store = new InMemoryStore()
@@ -18,12 +17,11 @@ function buildContext(overrides: Partial<ToolContext> = {}): ToolContext {
     routineRunId: 'run-test',
     emailProviders: [new MockEmailProvider()],
     calendarProvider: new MockCalendarProvider(),
-    bossProvider: new MockBossProvider(),
     taskService: new TaskService(store),
     needToKnowService: new NeedToKnowService(store),
     activityService,
     memoryService: new MemoryService(store),
-    applicationService: new ApplicationService(store, new MockBossProvider(), activityService),
+    applicationService: new ApplicationService(store, activityService),
     notify: () => {},
     ...overrides
   }
@@ -190,24 +188,5 @@ describe('tool registry', () => {
 
     const found = await registry.execute('interview_notes.search', { query: 'dp' }, ctx)
     expect((found as { data: { content: string }[] }).data.some((n) => n.content.includes('dp'))).toBe(true)
-  })
-
-  it('job_search.get_intent: reads jobIntent from settings (R0)', async () => {
-    const fakeSettings = {
-      readJobSearch: async () => ({ jobIntent: { keyword: 'Go 后端', cities: ['北京'], salaryMin: 25, salaryMax: 35 } })
-    }
-    const ctx = buildContext({ settings: fakeSettings as never })
-    const res = await registry.execute('job_search.get_intent', {}, ctx)
-    expect(res.status).toBe('ok')
-    const data = (res as { status: 'ok'; data: { keyword: string } | null }).data
-    expect(data?.keyword).toBe('Go 后端')
-  })
-
-  it('job_search.get_intent: returns null when no settings / no intent', async () => {
-    // No settings wired (the default test context).
-    const ctx = buildContext()
-    const res = await registry.execute('job_search.get_intent', {}, ctx)
-    expect(res.status).toBe('ok')
-    expect((res as { status: 'ok'; data: null }).data).toBeNull()
   })
 })

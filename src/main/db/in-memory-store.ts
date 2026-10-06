@@ -335,6 +335,9 @@ export class InMemoryStore implements RoutineStore {
       .sort((a, b) => (a.eventAt < b.eventAt ? -1 : 1))
       .map((e) => ({ ...e }))
   }
+  deleteApplicationEvent(id: string): void {
+    this.applicationEvents.delete(id)
+  }
 
   // ── Resume versions (Milestone A) ──────────────────────────────────────────
   createResumeVersion(v: ResumeVersion): void {

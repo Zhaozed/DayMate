@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  daymate:
+    build: .
+    container_name: daymate-server
+    restart: always
+    ports:
+      - "3210:3210"
+    environment:
+      - PORT=3210
+      - HOST=0.0.0.0
+      - DAYMATE_DATA_DIR=/app/data
+      - DAYMATE_SECRET_KEY=${DAYMATE_SECRET_KEY:-daymate-super-secret-key-at-least-32-chars}
+      - DAYMATE_SERVER_TOKEN=${DAYMATE_SERVER_TOKEN:-daymate-token-secret}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+    volumes:
+      - ./data:/app/data

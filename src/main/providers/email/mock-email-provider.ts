@@ -105,6 +105,21 @@ const FIXTURES: NormalizedEmail[] = [
     labels: ['INBOX'],
     sourceUrl: 'https://mail.google.com/mail/u/0/#inbox/mock-msg-005',
     bulk: true
+  },
+  {
+    provider: 'gmail',
+    accountId: ACCOUNT_ID,
+    messageId: 'mock-msg-006',
+    threadId: 'mock-thread-006',
+    from: { name: '字节跳动招聘', address: 'hr@bytedance.com' },
+    to: [{ name: 'Me', address: 'me@example.com' }],
+    cc: [],
+    subject: '【字节跳动】后端开发工程师 面试通知',
+    textBody: '您好，我们诚挚邀请您参加字节跳动后端开发工程师职位的视频面试。',
+    receivedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+    unread: true,
+    labels: ['INBOX'],
+    sourceUrl: 'https://mail.google.com/mail/u/0/#inbox/mock-msg-006'
   }
 ]
 

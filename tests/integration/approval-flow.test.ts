@@ -10,7 +10,6 @@ import { createDeterministicAgentRuntime } from '../../src/main/agent/agent-runt
 import { RoutineEngine, type EngineDeps } from '../../src/main/routines/engine'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { nowIso } from '../../src/main/util/ids'
 import type { RoutineDefinition, EmailProvider } from '@shared/types'
 
@@ -28,7 +27,6 @@ function buildEngine() {
     approvalService,
     emailProviders,
     calendarProvider: new MockCalendarProvider(),
-    bossProvider: new MockBossProvider(),
     agentRuntime: createDeterministicAgentRuntime(),
     memoryService: new MemoryService(store),
     notify: () => {}

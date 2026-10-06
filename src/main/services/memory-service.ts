@@ -24,11 +24,8 @@ import type {
   MemoryItem,
   MemoryKey,
   MemorySaveInput,
-  MemoryUpdate,
-  PersonaOutput
+  MemoryUpdate
 } from '@shared/types'
-import type { EmailProvider } from '../providers/email/email-provider'
-import type { AgentRuntime } from '../agent/agent-runtime'
 import { newId, nowIso } from '../util/ids'
 
 // §16 forbidden-content markers. A value matching any of these is rejected.
@@ -227,68 +224,5 @@ export class MemoryService {
   /** Backward-compatible alias for {@link reconcile}. */
   dedupe(): void {
     this.reconcile()
-  }
-
-  /**
-   * On-demand persona inference (§16 town-style profile). Reads the user's OWN
-   * sent mail from every connected email provider (`listSent`, last 30 days,
-   * capped at 100 per provider), runs the `generate_persona` agent step, and
-   * saves each proposal — proposals now auto-confirm and merge/update the
-   * existing confirmed value for that key in place (no manual confirmation;
-   * user-authored values are protected from agent overwrite). Sent mail is the
-   * user's trusted voice (framed by `frameSentReply`, the opposite of
-   * §17-untrusted inbound). Provider failures are graceful — a down provider
-   * contributes no sent mail, the run still completes with the others (mirrors
-   * email provider partial-failure handling).
-   *
-   * NOT via the routine engine — on-demand manual AI, mirroring
-   * `applicationService.generateResume` (single step, no orchestration).
-   * Returns the persona summary + the proposals that landed (for a toast).
-   */
-  async generatePersona(
-    emailProviders: EmailProvider[],
-    agentRuntime: AgentRuntime
-  ): Promise<PersonaOutput> {
-    // Gather the user's own sent mail across all connected providers. A provider
-    // that throws (down / not connected) contributes nothing — do not kill the
-    // run (partial-failure parity).
-    const sentEmails = []
-    for (const p of emailProviders) {
-      try {
-        const sent = await p.listSent({ sinceHours: 24 * 30, limit: 100 })
-        sentEmails.push(...sent)
-      } catch {
-        // provider unavailable — skip, the others still contribute
-      }
-    }
-
-    const memory = this.listConfirmed()
-    const output = (await agentRuntime.runAgentStep('generate_persona', {
-      sentEmails,
-      memory
-    })) as PersonaOutput
-
-    // Save each proposal — `save()` now auto-confirms and merges/updates the
-    // existing confirmed value for that key in place (no manual confirmation).
-    // User-authored values are protected from agent overwrite (merge, not
-    // clobber). `validateMemoryContent` re-checks before persisting
-    // (enforceTrust already filtered, but the service is the last word §12).
-    // A rejected proposal (full email body / token / forbidden trait) becomes
-    // a no-op skip, never throws — the user still gets the summary + the valid
-    // updates.
-    const proposals = output.memoryProposals ?? []
-    for (const proposal of proposals) {
-      try {
-        this.save({
-          key: proposal.key,
-          value: proposal.value,
-          source: 'agent'
-        })
-      } catch {
-        // rejected by validateMemoryContent — skip, do not fail the run
-      }
-    }
-
-    return output
   }
 }

@@ -2,18 +2,14 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ReactElement, InputHTMLAttributes } from 'react'
 import type {
   ApplicationView,
+  ApplicationEvent,
   ApplicationCreateInput,
   ApplicationSource,
   ApplicationEventType,
   EmailMatchProposal,
   SmartFunnelGroup,
   ApplicationFunnelStats,
-  FunnelReviewOutput,
-  JobIntent,
-  JobSearchSettings,
-  JobRecommendations,
-  JobBucket,
-  BossJob
+  FunnelReviewOutput
 } from '@shared/types'
 import { useAsync } from '../hooks/useAsync'
 import { Loading, EmptyState, ErrorState } from '../components/states'
@@ -22,9 +18,6 @@ import {
   APPLICATION_EVENT_LABEL,
   APPLICATION_PRIORITY_LABEL,
   SMART_FUNNEL_GROUP_LABEL,
-  JOB_TIER_LABEL,
-  JOB_TIER_COLOR,
-  JOB_BUCKET_LABEL,
   statusLabel
 } from '../labels'
 import { ApplicationDetail } from './ApplicationDetail'
@@ -56,18 +49,6 @@ const URGENT_WINDOW_MS = 3 * 86_400_000
 // Smart-funnel group order (mirrors backend SmartFunnelGroup order).
 const GROUP_ORDER: SmartFunnelGroup[] = ['urgent', 'active', 'stale', 'offered', 'ended']
 
-const CONFIDENCE_LABEL: Record<EmailMatchProposal['confidence'], string> = {
-  high: '高',
-  medium: '中',
-  low: '低'
-}
-
-const CONFIDENCE_COLOR: Record<EmailMatchProposal['confidence'], string> = {
-  high: '#86efac',
-  medium: '#fcd34d',
-  low: '#fca5a5'
-}
-
 export function ApplicationsPage(): ReactElement {
   const { data: apps, loading, error, setData, refetch } = useAsync(
     () => window.daymate.listApplications()
@@ -75,6 +56,7 @@ export function ApplicationsPage(): ReactElement {
   const [syncing, setSyncing] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
   const [showReview, setShowReview] = useState(false)
+  const [showEmailQueue, setShowEmailQueue] = useState(true)
   const [showRecycle, setShowRecycle] = useState(false)
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
 
@@ -115,17 +97,39 @@ export function ApplicationsPage(): ReactElement {
           setSyncing(true)
           try {
             await window.daymate.syncEmailApplications()
+            refetch()
           } catch (e) {
             console.error(e)
           } finally {
             setSyncing(false)
           }
         }}
+        totalCount={list.length}
+        activeCount={list.filter((v) => !v.isTerminal).length}
       />
 
       <ReviewSection
         open={showReview}
         onToggle={() => setShowReview((v) => !v)}
+        onChanged={refetch}
+      />
+
+      <EmailQueueSection
+        open={showEmailQueue}
+        onToggle={() => setShowEmailQueue((v) => !v)}
+        emailSyncing={syncing}
+        existingApps={list}
+        onSyncEmail={async () => {
+          setSyncing(true)
+          try {
+            await window.daymate.syncEmailApplications()
+            refetch()
+          } catch (e) {
+            console.error(e)
+          } finally {
+            setSyncing(false)
+          }
+        }}
         onChanged={refetch}
       />
 
@@ -143,7 +147,7 @@ export function ApplicationsPage(): ReactElement {
       {list.length === 0 ? (
         <EmptyState
           title="暂无投递记录"
-          hint="点击「同步邮件」从 163 邮箱拉取招聘邮件自动汇总，或「新增投递」手动添加。"
+          hint="点击「同步邮箱」从 Gmail 与 163 邮箱拉取招聘邮件自动汇总，或「新增投递」手动添加。"
         />
       ) : (
         <FunnelList
@@ -188,7 +192,7 @@ const SOURCE_COLORS: Record<ApplicationSource, string> = {
   other: '#94a3b8'
 }
 
-const SOURCES_ORDER: ApplicationSource[] = ['boss', 'web', 'referral', 'email', 'manual', 'other']
+const SOURCES_ORDER: ApplicationSource[] = ['email', 'web', 'referral', 'manual', 'other']
 
 function ReviewSection({
   open,
@@ -447,589 +451,6 @@ function SourceDonut({ stats }: { stats: ApplicationFunnelStats }): ReactElement
   )
 }
 
-// ── Job recommendation (DORMANT — BOSS search retired for anti-bot; UI
-// unmounted in favor of email-driven funnel. Real component kept below for
-// one-line re-mount if BOSS search is ever revived.) ──────────────────────
-
-// Top-12 hot cities (boss-cli CITY_CODES) for the checkbox grid; the rest sit
-// behind a 「更多」 expand so the grid stays compact. Wire values are Chinese
-// city names — boss-cli maps them via CITY_CODES (mirrors how `JobIntent.cities`
-// is a string[] of display names, kept Chinese per localization convention).
-const POPULAR_CITIES = [
-  '北京', '上海', '广州', '深圳', '杭州', '成都',
-  '南京', '武汉', '西安', '苏州', '长沙', '天津'
-]
-const MORE_CITIES = [
-  '重庆', '郑州', '东莞', '佛山', '合肥', '青岛',
-  '宁波', '沈阳', '昆明', '大连', '厦门', '珠海',
-  '无锡', '福州', '济南', '哈尔滨', '长春', '南昌',
-  '贵阳', '南宁', '石家庄', '太原', '兰州', '海口',
-  '常州', '温州', '嘉兴', '徐州', '香港'
-]
-// Degree dropdown options (boss-cli DEGREE_CODES). 校招生 realistically only
-// need 大专/本科/硕士/博士; 「不限」 lets the user opt out of the filter.
-const DEGREE_OPTIONS = ['不限', '大专', '本科', '硕士', '博士']
-
-// DORMANT — BOSS search retired for anti-bot. Kept exported (not deleted) so
-// re-mounting is a one-line change if BOSS search is ever revived.
-export function JobRecommendationSection({
-  open,
-  onToggle,
-  onConverted
-}: {
-  open: boolean
-  onToggle: () => void
-  onConverted: () => void
-}): ReactElement {
-  // Load the current jobSearch config (holds jobIntent).
-  const { data: jobConfig, loading, error, refetch } = useAsync<JobSearchSettings | null>(
-    () => window.daymate.getJobSearchConfig()
-  )
-  const intent: JobIntent | undefined = jobConfig?.jobIntent
-
-  const [results, setResults] = useState<JobRecommendations | null>(null)
-  const [fetching, setFetching] = useState(false)
-  const [fetchingMore, setFetchingMore] = useState<{ intern: boolean; campus: boolean }>({
-    intern: false,
-    campus: false
-  })
-  const [fetchError, setFetchError] = useState<string | null>(null)
-  const [relogging, setRelogging] = useState(false)
-  const [convertingId, setConvertingId] = useState<string | null>(null)
-  const [tab, setTab] = useState<JobBucket>('intern')
-
-  // Inline jobIntent form state (seeded from loaded config). `experience` is
-  // intentionally NOT exposed — the bucket encodes it (校招桶=在校/应届, 实习桶=无).
-  const [editing, setEditing] = useState(false)
-  const [showMoreCities, setShowMoreCities] = useState(false)
-  const [form, setForm] = useState<JobIntent>({
-    keyword: '',
-    cities: [],
-    salaryMin: undefined,
-    salaryMax: undefined,
-    experience: undefined,
-    degree: undefined
-  })
-  const [saving, setSaving] = useState(false)
-
-  // Seed the form when config arrives.
-  useEffect(() => {
-    if (jobConfig?.jobIntent) setForm({ ...form, ...jobConfig.jobIntent })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobConfig])
-
-  const fetchJobs = async (): Promise<void> => {
-    setFetching(true)
-    setFetchError(null)
-    try {
-      // Anti-bot: fetch ONLY the current tab's bucket per click (N city calls,
-      // not 2N). The user switches tabs + clicks 抓取 again for the other bucket.
-      const out = await window.daymate.fetchJobRecommendations({ bucket: tab })
-      setResults(out)
-    } catch (e) {
-      setFetchError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setFetching(false)
-    }
-  }
-
-  const loadMore = async (bucket: JobBucket): Promise<void> => {
-    setFetchingMore((s) => ({ ...s, [bucket]: true }))
-    setFetchError(null)
-    try {
-      const out = await window.daymate.fetchJobRecommendations({ bucket, append: true })
-      setResults(out)
-    } catch (e) {
-      setFetchError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setFetchingMore((s) => ({ ...s, [bucket]: false }))
-    }
-  }
-
-  // stoken 过期时就地重新登录（不用切去集成页）：调用 loginBoss() 在系统
-  // 预览弹二维码，扫完自动重抓当前桶。camoufox 自动刷新对 search 无效（BOSS
-  // 反爬拒认 camoufox token），所以 search 报 stoken 过期时必须扫码补真实 token。
-  const reloginAndFetch = async (): Promise<void> => {
-    setRelogging(true)
-    setFetchError(null)
-    try {
-      const r = await window.daymate.loginBoss()
-      if (r.status === 'connected') {
-        // re-fetch the current bucket after a fresh login
-        const out = await window.daymate.fetchJobRecommendations({ bucket: tab })
-        setResults(out)
-      } else {
-        setFetchError(r.message || '登录未完成，请重试')
-      }
-    } catch (e) {
-      setFetchError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setRelogging(false)
-    }
-  }
-
-  const convert = async (securityId: string): Promise<void> => {
-    setConvertingId(securityId)
-    try {
-      await window.daymate.convertJobToApplication(securityId)
-      onConverted()
-    } catch (e) {
-      setFetchError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setConvertingId(null)
-    }
-  }
-
-  // Job detail modal. The JD body (jobDescription) is untrusted boss data —
-  // rendered as text via React (which escapes), never as HTML (§17.12/§17.13).
-  const [detailJob, setDetailJob] = useState<BossJob | null>(null)
-  const [detailSid, setDetailSid] = useState<string | null>(null)
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<string | null>(null)
-
-  const openDetail = async (securityId: string): Promise<void> => {
-    setDetailSid(securityId)
-    setDetailLoading(true)
-    setDetailError(null)
-    setDetailJob(null)
-    try {
-      const job = await window.daymate.getJobDetail(securityId)
-      setDetailJob(job)
-    } catch (e) {
-      setDetailError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setDetailLoading(false)
-    }
-  }
-  const closeDetail = (): void => {
-    setDetailJob(null)
-    setDetailSid(null)
-    setDetailError(null)
-    setDetailLoading(false)
-  }
-
-  const saveIntent = async (): Promise<void> => {
-    setSaving(true)
-    try {
-      const current = jobConfig ?? {}
-      await window.daymate.setJobSearchConfig({
-        ...current,
-        jobIntent: {
-          keyword: form.keyword.trim(),
-          cities: form.cities ?? [],
-          salaryMin: form.salaryMin ? Number(form.salaryMin) : undefined,
-          salaryMax: form.salaryMax ? Number(form.salaryMax) : undefined,
-          // experience is bucket-derived, not user-set; clear any stale value.
-          experience: undefined,
-          degree: form.degree && form.degree !== '不限' ? form.degree : undefined
-        }
-      })
-      setEditing(false)
-      refetch()
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const toggleCity = (city: string): void => {
-    const set = new Set(form.cities ?? [])
-    if (set.has(city)) set.delete(city)
-    else set.add(city)
-    setForm({ ...form, cities: Array.from(set) })
-  }
-
-  const intentConfigured = !!intent?.keyword?.trim()
-  const bucketList = results ? results[tab] : []
-  const bucketHasMore = results ? results[tab === 'intern' ? 'internHasMore' : 'campusHasMore'] : false
-  const bucketLoadingMore = fetchingMore[tab]
-
-  return (
-    <div className="mt-4 rounded-lg border border-white/5" style={{ background: 'var(--dm-panel)' }}>
-      <button
-        onClick={onToggle}
-        className="flex w-full items-center justify-between px-4 py-2.5 text-left"
-      >
-        <span className="text-sm font-semibold text-white/80">
-          岗位推荐
-          {intentConfigured && (
-            <span className="ml-1.5 text-white/40">
-              · {intent!.keyword}
-              {intent!.cities && intent!.cities.length > 0 ? ` / ${intent!.cities.join('/')}` : ''}
-            </span>
-          )}
-        </span>
-        <span className="text-xs text-white/40">{open ? '收起' : '展开'}</span>
-      </button>
-      {open && (
-        <div className="space-y-4 border-t border-white/5 px-4 py-3">
-          {loading ? (
-            <Loading label="正在加载意向配置…" />
-          ) : error ? (
-            <ErrorState message={error.message} onRetry={refetch} />
-          ) : (
-            <>
-              {/* jobIntent config (inline, collapsible) */}
-              {editing ? (
-                <div className="space-y-3 rounded-lg border border-white/5 p-3" style={{ background: 'var(--dm-bg)' }}>
-                  <div className="text-sm font-semibold text-white/80">求职意向</div>
-                  <input
-                    value={form.keyword}
-                    onChange={(e) => setForm({ ...form, keyword: e.target.value })}
-                    placeholder="目标岗位关键词（如 Go 后端）"
-                    className="w-full rounded bg-white/5 px-2 py-1.5 text-sm text-white/90 outline-none"
-                  />
-                  {/* City checkbox grid (top-12 + 更多 expand) */}
-                  <div>
-                    <div className="mb-1 text-xs text-white/50">意向城市（可多选）</div>
-                    <div className="grid grid-cols-4 gap-1.5">
-                      {POPULAR_CITIES.map((c) => (
-                        <label
-                          key={c}
-                          className="flex cursor-pointer items-center gap-1 rounded bg-white/5 px-1.5 py-1 text-xs text-white/80"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={(form.cities ?? []).includes(c)}
-                            onChange={() => toggleCity(c)}
-                            className="accent-blue-500"
-                          />
-                          {c}
-                        </label>
-                      ))}
-                      {showMoreCities &&
-                        MORE_CITIES.map((c) => (
-                          <label
-                            key={c}
-                            className="flex cursor-pointer items-center gap-1 rounded bg-white/5 px-1.5 py-1 text-xs text-white/80"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={(form.cities ?? []).includes(c)}
-                              onChange={() => toggleCity(c)}
-                              className="accent-blue-500"
-                            />
-                            {c}
-                          </label>
-                        ))}
-                    </div>
-                    <button
-                      onClick={() => setShowMoreCities((s) => !s)}
-                      className="mt-1 text-xs text-blue-400/80 hover:text-blue-300"
-                    >
-                      {showMoreCities ? '收起更多城市' : '更多城市…'}
-                    </button>
-                  </div>
-                  {/* Salary + degree */}
-                  <div className="grid grid-cols-3 gap-2">
-                    <input
-                      value={form.salaryMin ?? ''}
-                      onChange={(e) =>
-                        setForm({ ...form, salaryMin: e.target.value ? Number(e.target.value) : undefined })
-                      }
-                      placeholder="最低 K"
-                      type="number"
-                      className="rounded bg-white/5 px-2 py-1.5 text-sm text-white/90 outline-none"
-                    />
-                    <input
-                      value={form.salaryMax ?? ''}
-                      onChange={(e) =>
-                        setForm({ ...form, salaryMax: e.target.value ? Number(e.target.value) : undefined })
-                      }
-                      placeholder="最高 K"
-                      type="number"
-                      className="rounded bg-white/5 px-2 py-1.5 text-sm text-white/90 outline-none"
-                    />
-                    <select
-                      value={form.degree ?? '不限'}
-                      onChange={(e) => setForm({ ...form, degree: e.target.value })}
-                      className="rounded bg-white/5 px-2 py-1.5 text-sm text-white/90 outline-none"
-                    >
-                      {DEGREE_OPTIONS.map((d) => (
-                        <option key={d} value={d} className="bg-[var(--dm-bg)]">
-                          {d}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="text-xs text-white/40">
-                    实习与秋招正职分桶抓取：实习桶仅筛实习岗；秋招正职桶筛应届全职岗。无需手填经验。
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={saveIntent}
-                      disabled={saving || !form.keyword.trim()}
-                      className="rounded bg-blue-500/80 px-3 py-1 text-xs text-white disabled:opacity-40"
-                    >
-                      {saving ? '保存中…' : '保存意向'}
-                    </button>
-                    <button
-                      onClick={() => {
-                        setEditing(false)
-                        if (intent) setForm({ ...form, ...intent })
-                      }}
-                      className="rounded bg-white/5 px-3 py-1 text-xs text-white/70"
-                    >
-                      取消
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-white/50">
-                    {intentConfigured
-                      ? `意向：${intent!.keyword}${intent!.cities?.length ? ' · ' + intent!.cities.join('/') : ''}${intent!.salaryMin ? ' · ' + intent!.salaryMin + '-' + (intent!.salaryMax ?? '') + 'K' : ''}${intent!.degree ? ' · ' + intent!.degree : ''}`
-                      : '尚未配置求职意向 — 请先设置关键词与城市。'}
-                  </span>
-                  <button
-                    onClick={() => setEditing(true)}
-                    className="rounded bg-white/5 px-2 py-1 text-xs text-white/70"
-                  >
-                    {intentConfigured ? '修改意向' : '设置意向'}
-                  </button>
-                </div>
-              )}
-
-              {/* 抓取 button */}
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={fetchJobs}
-                  disabled={fetching || !intentConfigured}
-                  className="rounded bg-blue-500/80 px-3 py-1.5 text-xs text-white disabled:opacity-40"
-                >
-                  {fetching ? '抓取中…（顺序抓取，稍候）' : '抓取岗位'}
-                </button>
-                {results && !fetching && (
-                  <span className="text-xs text-white/50">{results.summary}</span>
-                )}
-              </div>
-
-              {fetchError && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <ErrorState message={fetchError} onRetry={fetchJobs} />
-                  <button
-                    onClick={reloginAndFetch}
-                    disabled={relogging}
-                    className="rounded bg-amber-600/80 px-3 py-1 text-xs text-white disabled:opacity-50"
-                  >
-                    {relogging ? '登录中… 请扫码' : '重新登录 BOSS（扫码）'}
-                  </button>
-                </div>
-              )}
-
-              {results?.error && (
-                <div className="flex flex-wrap items-center gap-2 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300/90">
-                  <span>{results.error}</span>
-                  <button
-                    onClick={reloginAndFetch}
-                    disabled={relogging}
-                    className="rounded bg-amber-600/80 px-2 py-0.5 text-xs text-white disabled:opacity-50"
-                  >
-                    {relogging ? '登录中… 请扫码' : '重新登录 BOSS'}
-                  </button>
-                </div>
-              )}
-
-              {/* Bucket tabs */}
-              {results && (
-                <div className="flex items-center gap-1 border-b border-white/5">
-                  {(['intern', 'campus'] as JobBucket[]).map((b) => (
-                    <button
-                      key={b}
-                      onClick={() => setTab(b)}
-                      className={`border-b-2 px-3 py-1.5 text-sm transition ${
-                        tab === b
-                          ? 'border-blue-400 text-white/90'
-                          : 'border-transparent text-white/50 hover:text-white/70'
-                      }`}
-                    >
-                      {JOB_BUCKET_LABEL[b]}（{results[b].length}）
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* Scored job list (current bucket) — click a card for full detail */}
-              {results && bucketList.length > 0 && (
-                <div className="space-y-1.5">
-                  {bucketList.map((r) => {
-                    const lowMatch = r.tier === 'low' || r.tier === 'skip'
-                    return (
-                      <div
-                        key={r.securityId}
-                        onClick={() => openDetail(r.securityId)}
-                        className="flex cursor-pointer items-center justify-between rounded border border-white/5 px-3 py-2 transition hover:border-white/15"
-                        style={{ background: 'var(--dm-bg)' }}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="truncate text-sm text-white/90">
-                              {r.companyName} · {r.jobName}
-                            </span>
-                            <span
-                              className="shrink-0 rounded px-1.5 py-0.5 text-[10px]"
-                              style={{
-                                background: JOB_TIER_COLOR[r.tier] + '33',
-                                color: JOB_TIER_COLOR[r.tier]
-                              }}
-                            >
-                              {JOB_TIER_LABEL[r.tier]} {r.score}
-                            </span>
-                          </div>
-                          <div className="mt-0.5 truncate text-xs text-white/40">
-                            {[r.salary, r.city].filter(Boolean).join(' · ')}
-                            {r.reasons.length > 0 && ` · ${r.reasons.join('；')}`}
-                          </div>
-                        </div>
-                        <div className="ml-2 flex shrink-0 items-center gap-2">
-                          {lowMatch && <span className="text-[10px] text-white/30">低匹配</span>}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              convert(r.securityId)
-                            }}
-                            disabled={convertingId === r.securityId}
-                            className="rounded bg-emerald-500/80 px-2 py-1 text-xs text-white disabled:opacity-40"
-                          >
-                            {convertingId === r.securityId ? '转投中…' : '转投递'}
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  })}
-                  {bucketHasMore && (
-                    <button
-                      onClick={() => loadMore(tab)}
-                      disabled={bucketLoadingMore}
-                      className="w-full rounded border border-white/5 bg-white/5 py-1.5 text-xs text-white/70 disabled:opacity-40"
-                    >
-                      {bucketLoadingMore ? '加载中…' : '加载更多'}
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {results && bucketList.length === 0 && !fetching && (
-                <EmptyState
-                  title={
-                    results[tab === 'intern' ? 'internFetched' : 'campusFetched']
-                      ? `${JOB_BUCKET_LABEL[tab]}暂无匹配岗位`
-                      : `${JOB_BUCKET_LABEL[tab]}尚未抓取`
-                  }
-                  hint={
-                    results[tab === 'intern' ? 'internFetched' : 'campusFetched']
-                      ? '可放宽城市/学历条件后重试，或切换另一桶。'
-                      : '点击上方「抓取岗位」获取本桶岗位。'
-                  }
-                />
-              )}
-
-              {/* Job detail modal. JD body (jobDescription) is untrusted boss
-                  data — rendered as text (React escapes), never HTML (§17). */}
-              {(detailLoading || detailJob || detailError) && (
-                <div
-                  className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-                  onClick={closeDetail}
-                >
-                  <div
-                    className="max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-lg border border-white/10 p-4"
-                    style={{ background: 'var(--dm-panel)' }}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    {detailLoading && <Loading label="正在加载职位详情…" />}
-                    {detailError && (
-                      <ErrorState
-                        message={detailError}
-                        onRetry={() => detailSid && openDetail(detailSid)}
-                      />
-                    )}
-                    {detailJob && (
-                      <div className="space-y-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="text-base font-semibold text-white/90">
-                              {detailJob.jobName}
-                            </div>
-                            <div className="mt-0.5 text-sm text-white/60">
-                              {detailJob.companyName}
-                              {detailJob.brandName && detailJob.brandName !== detailJob.companyName
-                                ? ` · ${detailJob.brandName}`
-                                : ''}
-                            </div>
-                          </div>
-                          <button
-                            onClick={closeDetail}
-                            className="shrink-0 rounded bg-white/5 px-2 py-1 text-xs text-white/60"
-                          >
-                            关闭
-                          </button>
-                        </div>
-                        <div className="flex flex-wrap gap-2 text-xs text-white/60">
-                          {detailJob.salary && <span>💰 {detailJob.salary}</span>}
-                          {detailJob.city && <span>📍 {detailJob.city}</span>}
-                          {detailJob.experience && <span>经验：{detailJob.experience}</span>}
-                          {detailJob.degree && <span>学历：{detailJob.degree}</span>}
-                        </div>
-                        {(detailJob.industry || detailJob.scale || detailJob.stage) && (
-                          <div className="flex flex-wrap gap-2 text-xs text-white/50">
-                            {detailJob.industry && <span>行业：{detailJob.industry}</span>}
-                            {detailJob.scale && <span>规模：{detailJob.scale}</span>}
-                            {detailJob.stage && <span>阶段：{detailJob.stage}</span>}
-                          </div>
-                        )}
-                        {detailJob.jobLabels && detailJob.jobLabels.length > 0 && (
-                          <div className="flex flex-wrap gap-1">
-                            {detailJob.jobLabels.map((t) => (
-                              <span
-                                key={t}
-                                className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-white/60"
-                              >
-                                {t}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {detailJob.hrName && (
-                          <div className="text-xs text-white/50">
-                            招聘者：{detailJob.hrName}
-                            {detailJob.hrTitle ? `（${detailJob.hrTitle}）` : ''}
-                          </div>
-                        )}
-                        {detailJob.jobDescription && (
-                          <div>
-                            <div className="mb-1 text-xs font-semibold text-white/70">
-                              职位描述
-                            </div>
-                            {/* §17: JD body is untrusted boss data — text only,
-                                never dangerouslySetInnerHTML. React escapes. */}
-                            <div className="whitespace-pre-wrap break-words text-xs leading-relaxed text-white/70">
-                              {detailJob.jobDescription}
-                            </div>
-                          </div>
-                        )}
-                        <div className="flex justify-end gap-2 border-t border-white/5 pt-2">
-                          <button
-                            onClick={() => {
-                              convert(detailJob.securityId)
-                            }}
-                            disabled={convertingId === detailJob.securityId}
-                            className="rounded bg-emerald-500/80 px-3 py-1.5 text-xs text-white disabled:opacity-40"
-                          >
-                            {convertingId === detailJob.securityId ? '转投中…' : '转投递'}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
 // ── Smart-funnel grouping (mirrors backend smartSortedViews) ──────────────
 
 function nextInterviewTime(view: ApplicationView): string | undefined {
@@ -1124,17 +545,17 @@ function FunnelList({
 // surface is decided.) ─────────────────────────────────────────────────────
 
 export function EmailQueueSection({
-  open,
-  onToggle,
-  emailSyncing,
-  onSyncEmail
+  existingApps = [],
+  onChanged
 }: {
-  open: boolean
-  onToggle: () => void
-  emailSyncing: boolean
-  onSyncEmail: () => Promise<void>
-}): ReactElement {
-  const { data, loading, error, setData, refetch } = useAsync<EmailMatchProposal[]>(
+  open?: boolean
+  onToggle?: () => void
+  emailSyncing?: boolean
+  existingApps?: ApplicationView[]
+  onSyncEmail?: () => Promise<void>
+  onChanged?: () => void
+}): ReactElement | null {
+  const { data, setData, refetch } = useAsync<EmailMatchProposal[]>(
     () => window.daymate.listPendingEmailMatches()
   )
 
@@ -1145,10 +566,15 @@ export function EmailQueueSection({
 
   const proposals = data ?? []
 
-  const confirm = async (messageId: string): Promise<void> => {
+  const confirm = async (
+    messageId: string,
+    chosenApplicationId?: string,
+    options?: { company?: string; position?: string; eventType?: ApplicationEventType }
+  ): Promise<void> => {
     try {
-      await window.daymate.confirmEmailMatch(messageId)
+      await window.daymate.confirmEmailMatch(messageId, chosenApplicationId, options)
       refetch()
+      onChanged?.()
     } catch (e) {
       console.error(e)
     }
@@ -1158,124 +584,332 @@ export function EmailQueueSection({
     try {
       await window.daymate.ignoreEmailMatch(messageId)
       refetch()
+      onChanged?.()
     } catch (e) {
       console.error(e)
     }
   }
 
-  const sync = async (): Promise<void> => {
-    await onSyncEmail()
-    refetch()
+  const ignoreAll = async (): Promise<void> => {
+    try {
+      for (const p of proposals) {
+        await window.daymate.ignoreEmailMatch(p.messageId)
+      }
+      refetch()
+      onChanged?.()
+    } catch (e) {
+      console.error(e)
+    }
   }
 
+  if (proposals.length === 0) return null
+
   return (
-    <div className="mt-4 rounded-lg border border-white/5" style={{ background: 'var(--dm-panel)' }}>
-      <button
-        onClick={onToggle}
-        className="flex w-full items-center justify-between px-4 py-2.5 text-left"
-      >
-        <span className="text-sm font-semibold text-white/80">
-          邮件待确认{proposals.length > 0 && (
-            <span className="ml-1.5 text-amber-300/70">· {proposals.length}</span>
-          )}
-        </span>
-        <span className="flex items-center gap-2">
-          <span
-            role="button"
-            tabIndex={0}
-            onClick={(e) => {
-              e.stopPropagation()
-              void sync()
-            }}
-            className="rounded bg-white/5 px-2 py-1 text-xs text-white/70 hover:bg-white/10"
-          >
-            {emailSyncing ? '同步中…' : '同步邮件'}
+    <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-4 shadow-lg shadow-black/20">
+      <div className="flex items-center justify-between pb-3 border-b border-amber-500/20">
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-amber-500/20 text-amber-300 text-xs">
+            ⚠️
           </span>
-          <span className="text-xs text-white/40">{open ? '收起' : '展开'}</span>
-        </span>
-      </button>
-      {open && (
-        <div className="border-t border-white/5 px-4 py-3">
-          {loading ? (
-            <Loading label="正在加载邮件匹配…" />
-          ) : error ? (
-            <ErrorState message={error.message} onRetry={refetch} />
-          ) : proposals.length === 0 ? (
-            <p className="text-sm text-white/40">无待确认邮件。点击「同步邮件」扫描收件箱。</p>
-          ) : (
-            <div className="space-y-2">
-              {proposals.map((p) => (
-                <EmailMatchCard
-                  key={p.id}
-                  proposal={p}
-                  onConfirm={() => confirm(p.messageId)}
-                  onIgnore={() => ignore(p.messageId)}
-                />
-              ))}
-            </div>
-          )}
+          <div>
+            <span className="text-sm font-semibold text-white/95">
+              待人工归并
+            </span>
+            <span className="ml-2 rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-semibold text-amber-300">
+              {proposals.length} 封邮件存在多岗位歧义
+            </span>
+          </div>
         </div>
-      )}
+        <button
+          onClick={() => void ignoreAll()}
+          className="rounded-lg bg-white/5 hover:bg-rose-500/20 border border-white/10 px-2.5 py-1 text-xs text-white/60 hover:text-rose-300 transition-colors"
+        >
+          全部忽略
+        </button>
+      </div>
+      <div className="mt-3 space-y-3">
+        {proposals.map((p) => (
+          <EmailMatchCard
+            key={p.id}
+            proposal={p}
+            existingApps={existingApps}
+            onConfirm={(chosenId, options) => confirm(p.messageId, chosenId, options)}
+            onIgnore={() => ignore(p.messageId)}
+          />
+        ))}
+      </div>
     </div>
   )
 }
 
 function EmailMatchCard({
   proposal,
+  existingApps = [],
   onConfirm,
   onIgnore
 }: {
   proposal: EmailMatchProposal
-  onConfirm: () => void
+  existingApps?: ApplicationView[]
+  onConfirm: (
+    chosenApplicationId?: string,
+    options?: { company?: string; position?: string; jobCode?: string; eventType?: ApplicationEventType }
+  ) => void
   onIgnore: () => void
 }): ReactElement {
+  const hasCandidates = proposal.candidateApplications && proposal.candidateApplications.length > 0
+
+  // Matching options state: user can choose whether to merge into existing or create new
+  const [mode, setMode] = useState<'existing' | 'new'>(
+    existingApps.length > 0 ? 'existing' : 'new'
+  )
+  const [selectedAppId, setSelectedAppId] = useState<string>(() => {
+    // 1. Match by jobCode first (100% deterministic ATS requisition match)
+    if (proposal.jobCode) {
+      const codeMatch = existingApps.find(
+        (a) => a.application.jobCode && a.application.jobCode.toLowerCase() === proposal.jobCode!.toLowerCase()
+      )
+      if (codeMatch) return codeMatch.application.id
+    }
+    if (proposal.applicationId && existingApps.some((a) => a.application.id === proposal.applicationId)) {
+      return proposal.applicationId
+    }
+    if (hasCandidates && proposal.candidateApplications![0]) {
+      return proposal.candidateApplications![0].id
+    }
+    // Match by company name
+    const match = existingApps.find(
+      (a) =>
+        proposal.company &&
+        a.application.company.toLowerCase().includes(proposal.company.toLowerCase())
+    )
+    if (match) return match.application.id
+    return existingApps[0]?.application.id ?? ''
+  })
+
+  const [companyInput, setCompanyInput] = useState(
+    proposal.company ?? proposal.applicationCompany ?? ''
+  )
+  const [positionInput, setPositionInput] = useState(
+    proposal.position ?? proposal.applicationPosition ?? ''
+  )
+  const [jobCodeInput, setJobCodeInput] = useState(
+    proposal.jobCode ?? ''
+  )
+  const [eventTypeInput, setEventTypeInput] = useState<ApplicationEventType>(proposal.eventType)
+
+  const handleConfirmExisting = (): void => {
+    if (!selectedAppId) return
+    onConfirm(selectedAppId, {
+      position: positionInput.trim() || undefined,
+      jobCode: (proposal.jobCode || jobCodeInput).trim() || undefined,
+      eventType: eventTypeInput
+    })
+  }
+
+  const handleConfirmNew = (): void => {
+    onConfirm(undefined, {
+      company: companyInput.trim() || '未知公司',
+      position: positionInput.trim() || '未知岗位',
+      jobCode: jobCodeInput.trim() || proposal.jobCode || undefined,
+      eventType: eventTypeInput
+    })
+  }
+
   return (
-    <div className="rounded bg-white/5 p-2.5">
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex-1">
-          <div className="text-sm text-white/90">{proposal.subject}</div>
+    <div className="rounded border border-white/10 bg-white/5 p-3.5 space-y-3">
+      {/* 头部信息 */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-white/95">{proposal.subject}</span>
+            {proposal.jobCode && (
+              <span className="rounded border border-indigo-400/40 bg-indigo-500/20 px-2 py-0.5 text-xs font-mono font-medium text-indigo-200">
+                🔖 岗位编号: {proposal.jobCode}
+              </span>
+            )}
+            {proposal.isReschedule && (
+              <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-xs font-medium text-amber-300">
+                改期通知
+              </span>
+            )}
+            {proposal.isCancelled && (
+              <span className="rounded bg-rose-500/20 px-1.5 py-0.5 text-xs font-medium text-rose-300">
+                已取消
+              </span>
+            )}
+          </div>
+
           {proposal.from && (
-            <div className="mt-0.5 text-xs text-white/40">来自 {proposal.from}</div>
+            <div className="text-xs text-white/40">发件人：{proposal.from}</div>
           )}
+
           {(proposal.company || proposal.position || proposal.applicationCompany) && (
-            <div className="mt-0.5 flex items-center gap-1.5 text-xs text-white/55">
-              <span>{statusLabel(APPLICATION_EVENT_LABEL, proposal.eventType)}</span>
-              <span>·</span>
-              <span>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-sky-200">
+                推断阶段：{statusLabel(APPLICATION_EVENT_LABEL, proposal.eventType)}
+              </span>
+              <span className="font-medium text-white/80">
                 {proposal.company ?? proposal.applicationCompany}
                 {proposal.position ? ` / ${proposal.position}` : proposal.applicationPosition ? ` / ${proposal.applicationPosition}` : ''}
               </span>
             </div>
           )}
+
+          {proposal.meetingInfo && (
+            <div className="mt-1 rounded bg-black/25 p-2 text-xs text-sky-200/90">
+              📅 会议/面试信息：{proposal.meetingInfo}
+            </div>
+          )}
+
           {proposal.evidence && (
-            <div className="mt-0.5 text-xs text-white/35">{proposal.evidence}</div>
+            <div className="text-xs text-white/40">依据：{proposal.evidence}</div>
           )}
         </div>
-        <div className="flex shrink-0 flex-col items-end gap-1.5">
-          <span
-            className="rounded px-1.5 py-0.5 text-xs"
-            style={{
-              background: `${CONFIDENCE_COLOR[proposal.confidence]}1f`,
-              color: CONFIDENCE_COLOR[proposal.confidence]
-            }}
+
+        <div className="flex shrink-0 flex-col items-end gap-2">
+          <button
+            onClick={onIgnore}
+            className="rounded-lg bg-white/[0.06] hover:bg-white/[0.12] px-3 py-1.5 text-xs text-white/50 hover:text-white/80 transition-colors"
           >
-            置信度 {CONFIDENCE_LABEL[proposal.confidence]}
-          </span>
-          <div className="flex gap-1.5">
+            忽略此邮件
+          </button>
+        </div>
+      </div>
+
+      {/* 同公司多岗位防串岗快捷选项 */}
+      {hasCandidates && (
+        <div className="rounded border border-amber-500/25 bg-amber-500/10 p-2 text-xs space-y-1.5">
+          <div className="font-semibold text-amber-200">
+            ⚠️ 快捷选项：同公司存在多个岗位，可直接点击一键归并：
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {proposal.candidateApplications!.map((cand) => (
+              <button
+                key={cand.id}
+                onClick={() => onConfirm(cand.id, { eventType: proposal.eventType, jobCode: cand.jobCode || proposal.jobCode })}
+                className="rounded border border-white/15 bg-white/10 px-2.5 py-1 text-xs font-medium text-white hover:bg-white/20 transition-colors"
+              >
+                归并至：{cand.company} · {cand.position} {cand.jobCode ? `[#${cand.jobCode}]` : ''}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 归并目标选择区 */}
+      <div className="rounded border border-white/5 bg-black/20 p-3 space-y-2.5">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-semibold text-white/75">
+            请选择归并目标与方式：
+          </div>
+          <div className="flex rounded border border-white/10 p-0.5 text-xs">
+            {existingApps.length > 0 && (
+              <button
+                onClick={() => setMode('existing')}
+                className={`rounded px-2.5 py-0.5 transition-colors ${
+                  mode === 'existing'
+                    ? 'bg-white/15 text-white font-medium'
+                    : 'text-white/40 hover:text-white/70'
+                }`}
+              >
+                归并到已有投递
+              </button>
+            )}
             <button
-              onClick={onConfirm}
-              className="rounded bg-white/10 px-2 py-1 text-xs text-white/90 hover:bg-white/20"
+              onClick={() => setMode('new')}
+              className={`rounded px-2.5 py-0.5 transition-colors ${
+                mode === 'new'
+                  ? 'bg-white/15 text-white font-medium'
+                  : 'text-white/40 hover:text-white/70'
+              }`}
             >
-              确认
-            </button>
-            <button
-              onClick={onIgnore}
-              className="rounded bg-white/5 px-2 py-1 text-xs text-white/55 hover:bg-white/10"
-            >
-              忽略
+              作为新投递创建
             </button>
           </div>
         </div>
+
+        {mode === 'existing' && existingApps.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <select
+              value={selectedAppId}
+              onChange={(e) => setSelectedAppId(e.target.value)}
+              className="flex-1 min-w-[200px] rounded border border-white/10 bg-zinc-900 px-2.5 py-1.5 text-white outline-none focus:border-white/30"
+            >
+              <option value="" disabled>
+                -- 请选择归并到的投递目标 --
+              </option>
+              {existingApps.map((a) => (
+                <option key={a.application.id} value={a.application.id} className="bg-zinc-900">
+                  {a.application.company} · {a.application.position} {a.application.jobCode ? `[#${a.application.jobCode}]` : ''}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={eventTypeInput}
+              onChange={(e) => setEventTypeInput(e.target.value as ApplicationEventType)}
+              className="rounded border border-white/10 bg-zinc-900 px-2 py-1.5 text-white outline-none focus:border-white/30"
+            >
+              {(['applied', 'communicated', 'assessment', 'written_test', 'interview', 'offer', 'rejected'] as ApplicationEventType[]).map(
+                (et) => (
+                  <option key={et} value={et} className="bg-zinc-900">
+                    阶段：{statusLabel(APPLICATION_EVENT_LABEL, et)}
+                  </option>
+                )
+              )}
+            </select>
+
+            <button
+              onClick={handleConfirmExisting}
+              disabled={!selectedAppId}
+              className="rounded bg-sky-600/80 hover:bg-sky-500 px-3 py-1.5 font-medium text-white transition-colors disabled:opacity-40"
+            >
+              确认归并至该投递
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <input
+              placeholder="公司名称"
+              value={companyInput}
+              onChange={(e) => setCompanyInput(e.target.value)}
+              className="w-28 rounded border border-white/10 bg-black/30 px-2 py-1.5 text-white outline-none focus:border-white/30 placeholder:text-white/30"
+            />
+            <input
+              placeholder="岗位名称（如：产品经理）"
+              value={positionInput}
+              onChange={(e) => setPositionInput(e.target.value)}
+              className="flex-1 min-w-[130px] rounded border border-white/10 bg-black/30 px-2 py-1.5 text-white outline-none focus:border-white/30 placeholder:text-white/30"
+            />
+            <input
+              placeholder="岗位编号 (选填)"
+              value={jobCodeInput}
+              onChange={(e) => setJobCodeInput(e.target.value)}
+              className="w-28 rounded border border-white/10 bg-black/30 px-2 py-1.5 text-white outline-none focus:border-white/30 placeholder:text-white/30 font-mono"
+            />
+            <select
+              value={eventTypeInput}
+              onChange={(e) => setEventTypeInput(e.target.value as ApplicationEventType)}
+              className="rounded border border-white/10 bg-zinc-900 px-2 py-1.5 text-white outline-none focus:border-white/30"
+            >
+              {(['applied', 'communicated', 'assessment', 'written_test', 'interview', 'offer', 'rejected'] as ApplicationEventType[]).map(
+                (et) => (
+                  <option key={et} value={et} className="bg-zinc-900">
+                    阶段：{statusLabel(APPLICATION_EVENT_LABEL, et)}
+                  </option>
+                )
+              )}
+            </select>
+
+            <button
+              onClick={handleConfirmNew}
+              className="rounded px-3 py-1.5 font-medium text-white transition-opacity hover:opacity-90"
+              style={{ background: 'var(--dm-accent)' }}
+            >
+              + 建立新投递并归并
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1498,6 +1132,155 @@ function AddApplicationForm({
   )
 }
 
+// ── Application pipeline stepper (流水线) ──────────────────────────────────
+
+function ApplicationPipelineFlow({
+  events,
+  trailingAction
+}: {
+  events: ApplicationEvent[]
+  trailingAction?: React.ReactNode
+}): ReactElement {
+  // Deduplicate consecutive identical events and map to sequential pipeline stages
+  const steps: {
+    key: string
+    label: string
+    date?: string
+    isCurrent: boolean
+    isTerminal?: boolean
+    type: ApplicationEventType
+    evidence?: string
+  }[] = []
+
+  const rawEvents: (Partial<ApplicationEvent> & { type: ApplicationEventType })[] =
+    events.length > 0
+      ? events
+      : [{ id: 'init', type: 'applied', eventAt: '', locked: false }]
+
+  // Campus hiring pipeline only displays genuine hiring milestones (applied -> assessment -> written_test -> interview -> offer/rejected).
+  // Verification codes, non-job notices, and legacy 'communicated' events are filtered out.
+  const sourceEvents = rawEvents.filter(
+    (e) => e.type !== 'communicated' && !/非求职|非招聘|验证码|verification/i.test(e.evidence || '')
+  )
+  const effectiveEvents = sourceEvents.length > 0
+    ? sourceEvents
+    : [{ id: 'init', type: 'applied' as ApplicationEventType, eventAt: '', locked: false }]
+
+  for (let i = 0; i < effectiveEvents.length; i++) {
+    const ev = effectiveEvents[i]
+    let label = statusLabel(APPLICATION_EVENT_LABEL, ev.type)
+    if (ev.type === 'interview' && ev.round) {
+      label = `${ev.round}面`
+    } else if (ev.type === 'written_test') {
+      label = '专业笔试'
+    } else if (ev.type === 'assessment') {
+      label = '在线测评'
+    } else if (ev.type === 'applied') {
+      label = '简历投递'
+    } else if (ev.type === 'rejected') {
+      if (/感谢信/i.test(ev.evidence || '')) {
+        label = '感谢信'
+      } else if (/未通过|不匹配|遗憾|未录用|未能录用/i.test(ev.evidence || '')) {
+        label = '未通过'
+      } else {
+        label = '感谢信'
+      }
+    } else if (ev.type === 'withdrawn') {
+      label = '已撤回'
+    }
+
+    // Deduplicate identical consecutive event types (e.g. multiple 'applied' become 1)
+    const prev = steps[steps.length - 1]
+    if (prev && prev.type === ev.type && prev.label === label) {
+      if (ev.eventAt && !prev.date) {
+        prev.date = new Date(ev.eventAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+      }
+      continue
+    }
+
+    const isTerminal = ev.type === 'rejected' || ev.type === 'withdrawn'
+
+    steps.push({
+      key: ev.id || `${ev.type}-${i}`,
+      label,
+      date: ev.eventAt
+        ? new Date(ev.eventAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+        : undefined,
+      isCurrent: false,
+      isTerminal,
+      type: ev.type,
+      evidence: ev.evidence
+    })
+  }
+
+  // Ensure last item is marked as current active step
+  if (steps.length > 0) {
+    steps[steps.length - 1].isCurrent = true
+  }
+
+  return (
+    <div className="mt-3 flex items-center justify-between flex-wrap gap-2 pt-2.5 border-t border-white/[0.04]">
+      <div className="flex items-center flex-wrap gap-1.5">
+        <span className="text-[11px] font-medium text-white/35 select-none shrink-0 flex items-center gap-1">
+          <span>流水线</span>
+          <span>:</span>
+        </span>
+        <div className="flex items-center flex-wrap gap-1.5">
+          {steps.map((step, idx) => (
+            <div key={step.key} className="flex items-center gap-1.5">
+              <span
+                className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all ${
+                  step.type === 'rejected'
+                    ? 'bg-rose-500/20 border border-rose-500/40 text-rose-300 shadow-sm shadow-rose-500/10'
+                    : step.type === 'withdrawn'
+                    ? 'bg-amber-500/15 border border-amber-500/30 text-amber-300'
+                    : step.type === 'offer'
+                    ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 shadow-sm shadow-emerald-500/10'
+                    : step.isCurrent
+                    ? 'bg-sky-500/15 border border-sky-400/30 text-sky-200 shadow-sm shadow-sky-500/10'
+                    : 'bg-white/[0.04] border border-white/[0.08] text-white/70 hover:bg-white/[0.08]'
+                }`}
+                title={step.evidence}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    step.type === 'rejected'
+                      ? 'bg-rose-400 ring-2 ring-rose-500/30'
+                      : step.type === 'withdrawn'
+                      ? 'bg-amber-400'
+                      : step.type === 'offer'
+                      ? 'bg-emerald-400 animate-pulse'
+                      : step.isCurrent
+                      ? 'bg-sky-400'
+                      : 'bg-white/30'
+                  }`}
+                />
+                <span>{step.label}</span>
+                {step.date && (
+                  <span className="text-[10px] text-white/35 font-mono">({step.date})</span>
+                )}
+              </span>
+
+              {/* Stepper Arrow to next node */}
+              {idx < steps.length - 1 && (
+                <span className="text-white/25 text-xs font-semibold select-none px-0.5">
+                  →
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {trailingAction && (
+        <div className="shrink-0 ml-auto flex items-center">
+          {trailingAction}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Application card (funnel row) ─────────────────────────────────────────
 
 function ApplicationCard({
@@ -1535,97 +1318,159 @@ function ApplicationCard({
     }
   }
 
+  // Consistent company monogram avatar gradient
+  const companyName = view.application.company || '企'
+  const companyChar = companyName.slice(0, 1)
+  const GRADIENTS = [
+    'from-sky-500 to-blue-600',
+    'from-violet-500 to-indigo-600',
+    'from-emerald-500 to-teal-600',
+    'from-amber-500 to-orange-600',
+    'from-rose-500 to-pink-600',
+    'from-cyan-500 to-sky-600'
+  ]
+  const hash = companyName.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0)
+  const grad = GRADIENTS[hash % GRADIENTS.length]
+
   return (
-    <div className="rounded-lg border border-white/5 p-3" style={{ background: 'var(--dm-panel)' }}>
-      <div className="flex items-start gap-3">
-        <button
-          onClick={onSelect}
-          className="flex-1 text-left"
-        >
-          <div className="flex items-center gap-2">
-            {/* Position first — the user may apply to several positions at one
-             * company; position is the primary identity. */}
-            <span className="text-sm font-medium text-white/90">{view.application.position}</span>
-            <span className="text-xs text-white/40">·</span>
-            <span className="text-xs text-white/55">{view.application.company}</span>
-            {view.application.city && (
-              <>
-                <span className="text-xs text-white/40">·</span>
-                <span className="text-xs text-white/55">{view.application.city}</span>
-              </>
-            )}
-            {view.application.salaryRange && (
-              <>
-                <span className="text-xs text-white/40">·</span>
-                <span className="text-xs text-white/55">薪资 {view.application.salaryRange}</span>
-              </>
-            )}
-            {view.application.priority === 'back' && (
-              <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-white/40">
-                {statusLabel(APPLICATION_PRIORITY_LABEL, view.application.priority ?? 'normal')}
+    <div className="group rounded-xl border border-white/[0.07] bg-[#12151c]/80 hover:bg-[#151922] p-4 transition-all duration-200 hover:border-white/[0.18] hover:shadow-lg hover:shadow-black/30">
+      <div className="flex items-start justify-between gap-4">
+        {/* Left: Avatar + Details */}
+        <div className="flex items-start gap-3.5 flex-1 min-w-0 cursor-pointer" onClick={onSelect}>
+          {/* Company Avatar Monogram */}
+          <div
+            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${grad} text-sm font-bold text-white shadow-sm ring-1 ring-white/20 select-none`}
+          >
+            {companyChar}
+          </div>
+
+          <div className="min-w-0 flex-1">
+            {/* Row 1: Position Title, Job Code, Company, Stage Badge */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold text-white tracking-tight group-hover:text-sky-300 transition-colors">
+                {view.application.position}
               </span>
-            )}
-          </div>
-          {/* JD snippet — truncated; click the card to see the full JD in the
-           * detail view (where 搜索 JD can enrich it). */}
-          {view.application.jdText && (
-            <div className="mt-0.5 line-clamp-1 text-xs text-white/40">
-              {view.application.jdText}
+              {view.application.jobCode && (
+                <span className="rounded-md border border-sky-400/30 bg-sky-500/10 px-2 py-0.5 font-mono text-[11px] font-medium text-sky-300">
+                  #{view.application.jobCode}
+                </span>
+              )}
+              <span className="text-xs text-white/30">·</span>
+              <span className="text-xs font-medium text-white/80">{view.application.company}</span>
+              {view.application.city && (
+                <>
+                  <span className="text-xs text-white/30">·</span>
+                  <span className="text-xs text-white/55">{view.application.city}</span>
+                </>
+              )}
+              {view.application.salaryRange && (
+                <>
+                  <span className="text-xs text-white/30">·</span>
+                  <span className="text-xs text-emerald-400/90 font-medium">{view.application.salaryRange}</span>
+                </>
+              )}
+              {view.application.priority === 'back' && (
+                <span className="rounded bg-white/5 border border-white/10 px-1.5 py-0.5 text-[10px] text-white/40">
+                  {statusLabel(APPLICATION_PRIORITY_LABEL, view.application.priority)}
+                </span>
+              )}
             </div>
-          )}
-          <div className="mt-0.5 flex items-center gap-2 text-xs text-white/35">
-            <span>{statusLabel(APPLICATION_SOURCE_LABEL, view.application.source)}</span>
-            <span>·</span>
-            <span>投递于 {new Date(view.application.appliedAt).toLocaleDateString('zh-CN')}</span>
-            {view.application.stage && (
-              <>
-                <span>·</span>
-                <span className="text-white/50">{view.application.stage}</span>
-              </>
+
+            {/* Row 2: JD snippet */}
+            {view.application.jdText && (
+              <p className="mt-1.5 line-clamp-1 text-xs text-white/45 leading-relaxed">
+                {view.application.jdText}
+              </p>
             )}
-            {view.daysSinceLastEvent !== undefined && view.daysSinceLastEvent >= 3 && !view.isTerminal && view.currentStatus !== 'offer' && (
-              <>
-                <span>·</span>
-                <span className="text-amber-300/70">{view.daysSinceLastEvent} 天无进展</span>
-              </>
-            )}
+
+            {/* Row 3: Meta & Timing */}
+            <div className="mt-2.5 flex flex-wrap items-center gap-2 text-xs text-white/40">
+              <span className="rounded bg-white/[0.04] px-1.5 py-0.5 text-[11px] text-white/60 border border-white/[0.06]">
+                {statusLabel(APPLICATION_SOURCE_LABEL, view.application.source)}
+              </span>
+              <span>·</span>
+              <span>投递于 {new Date(view.application.appliedAt).toLocaleDateString('zh-CN')}</span>
+              {view.application.stage && (
+                <>
+                  <span>·</span>
+                  <span className="rounded bg-sky-500/15 border border-sky-400/20 px-2 py-0.5 text-[11px] text-sky-200 font-medium">
+                    {view.application.stage}
+                  </span>
+                </>
+              )}
+              {view.currentStatus === 'rejected' && (
+                <>
+                  <span>·</span>
+                  <span className="rounded bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] text-rose-300 font-medium">
+                    {view.events.some((e) => /感谢信/i.test(e.evidence || '')) ? '感谢信' : '已淘汰'}
+                  </span>
+                </>
+              )}
+              {view.daysSinceLastEvent !== undefined && view.daysSinceLastEvent >= 3 && !view.isTerminal && view.currentStatus !== 'offer' && (
+                <>
+                  <span>·</span>
+                  <span className="rounded bg-amber-500/15 border border-amber-500/25 px-2 py-0.5 text-[11px] text-amber-300 font-medium flex items-center gap-1">
+                    <span>⏱</span>
+                    <span>{view.daysSinceLastEvent} 天无进展</span>
+                  </span>
+                </>
+              )}
+            </div>
           </div>
-        </button>
-        <button
-          onClick={() => setShowEvent((v) => !v)}
-          className="rounded bg-white/5 px-2 py-1 text-xs text-white/70 hover:bg-white/10"
-        >
-          追加进展
-        </button>
+        </div>
+
+        {/* Right: Actions */}
+        <div className="flex shrink-0 items-center gap-2 pt-0.5">
+          <button
+            onClick={() => setShowEvent((v) => !v)}
+            className="rounded-lg border border-white/10 bg-white/[0.05] hover:bg-white/[0.1] px-3 py-1.5 text-xs font-medium text-white/80 hover:text-white transition-all shadow-sm"
+          >
+            + 进展
+          </button>
+          <button
+            onClick={onSelect}
+            className="rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/30 px-3 py-1.5 text-xs font-medium text-sky-300 hover:text-sky-200 transition-all shadow-sm"
+          >
+            详情 →
+          </button>
+        </div>
       </div>
 
-      {/* Timeline chips */}
-      {view.events.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {view.events.map((e) => (
-            <span
-              key={e.id}
-              className="rounded px-1.5 py-0.5 text-xs"
-              style={{
-                background: e.locked ? 'rgba(250,204,21,0.12)' : 'rgba(255,255,255,0.05)',
-                color: e.locked ? '#fcd34d' : 'rgba(255,255,255,0.6)'
+      {/* Pipeline Flow Stepper */}
+      <ApplicationPipelineFlow
+        events={view.events}
+        trailingAction={
+          view.currentStatus !== 'rejected' && (
+            <button
+              onClick={async (e) => {
+                e.stopPropagation()
+                if (window.confirm(`确定将「${view.application.company} · ${view.application.position}」标记为收到感谢信/已淘汰？`)) {
+                  await window.daymate.updateApplicationStatus(view.application.id, 'rejected', { evidence: '收到感谢信' })
+                  onChanged()
+                }
               }}
-              title={e.evidence}
+              className="rounded-lg border border-rose-500/20 bg-rose-500/5 hover:bg-rose-500/15 px-2.5 py-1 text-[11px] font-medium text-rose-300/70 hover:text-rose-200 transition-all select-none shadow-sm"
+              title="一键标记为收到感谢信/淘汰"
             >
-              {statusLabel(APPLICATION_EVENT_LABEL, e.type)}
-              {e.type === 'interview' && e.round ? ` ${e.round}面` : ''}
-              {e.locked ? ' 🔒' : ''}
-            </span>
-          ))}
-        </div>
-      )}
+              标为感谢信
+            </button>
+          )
+        }
+      />
 
       {showEvent && (
-        <div className="mt-2 grid grid-cols-4 gap-2 border-t border-white/5 pt-2">
+        <div className="mt-3 grid grid-cols-4 gap-2 border-t border-white/[0.08] pt-3">
           <select
             value={ev.type}
-            onChange={(e) => setEv({ ...ev, type: e.target.value as ApplicationEventType })}
-            className="rounded bg-white/5 px-2 py-1 text-xs text-white/90 outline-none"
+            onChange={(e) => {
+              const newType = e.target.value as ApplicationEventType
+              setEv({
+                ...ev,
+                type: newType,
+                evidence: newType === 'rejected' && !ev.evidence ? '收到感谢信' : ev.evidence
+              })
+            }}
+            className="rounded-lg border border-white/10 bg-zinc-900 px-2.5 py-1.5 text-xs text-white/90 outline-none"
           >
             {EVENT_TYPES.map((t) => (
               <option key={t} value={t} className="bg-zinc-800">
@@ -1640,24 +1485,24 @@ function ApplicationCard({
               placeholder="第几轮"
               type="number"
               min={1}
-              className="rounded bg-white/5 px-2 py-1 text-xs text-white/90 outline-none"
+              className="rounded-lg border border-white/10 bg-zinc-900 px-2.5 py-1.5 text-xs text-white/90 outline-none"
             />
           )}
           <input
             type="date"
             value={ev.eventAt}
             onChange={(e) => setEv({ ...ev, eventAt: e.target.value })}
-            className="rounded bg-white/5 px-2 py-1 text-xs text-white/90 outline-none"
+            className="rounded-lg border border-white/10 bg-zinc-900 px-2.5 py-1.5 text-xs text-white/90 outline-none"
           />
           <input
             value={ev.evidence}
             onChange={(e) => setEv({ ...ev, evidence: e.target.value })}
-            placeholder="备注"
-            className="rounded bg-white/5 px-2 py-1 text-xs text-white/90 outline-none"
+            placeholder={ev.type === 'rejected' ? '备注（如：收到感谢信）' : '备注'}
+            className="rounded-lg border border-white/10 bg-zinc-900 px-2.5 py-1.5 text-xs text-white/90 outline-none"
           />
           <button
             onClick={submitEvent}
-            className="col-span-4 rounded bg-white/10 px-2 py-1 text-xs text-white/90 hover:bg-white/20"
+            className="col-span-4 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/30 py-1.5 text-xs font-semibold text-sky-200 transition-colors"
           >
             保存进展
           </button>
@@ -1670,31 +1515,44 @@ function ApplicationCard({
 function Header({
   onAdd,
   syncing,
-  onSyncEmail
+  onSyncEmail,
+  totalCount,
+  activeCount
 }: {
   onAdd: () => void
   syncing: boolean
   onSyncEmail: () => Promise<void>
+  totalCount: number
+  activeCount: number
 }): ReactElement {
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.06] pb-6 mb-6">
       <div>
-        <h1 className="text-xl font-semibold text-white">投递</h1>
-        <p className="mt-1 text-sm text-white/45">邮件自动汇总 + 手动录入（官网/内推/线下）。</p>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold tracking-tight text-white">求职投递</h1>
+          <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-0.5 text-xs font-medium text-sky-300">
+            共 {totalCount} 个投递 · {activeCount} 进行中
+          </span>
+        </div>
+        <p className="mt-1 text-xs text-white/50">
+          全自动双邮箱（Gmail & 163）增量解析 · JD 联网与智库补全 · 智能规避歧义与串岗
+        </p>
       </div>
-      <div className="flex gap-2">
+      <div className="flex items-center gap-2.5">
         <button
           onClick={() => void onSyncEmail()}
           disabled={syncing}
-          className="rounded bg-white/5 px-3 py-1.5 text-sm text-white/80 hover:bg-white/10 disabled:opacity-50"
+          className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.05] hover:bg-white/[0.1] px-4 py-2 text-xs font-medium text-white/90 transition-all disabled:opacity-50 shadow-sm"
         >
-          {syncing ? '同步中…' : '同步邮件'}
+          <span className={syncing ? 'animate-spin' : ''}>⟳</span>
+          <span>{syncing ? '正在拉取新邮件…' : '同步邮箱'}</span>
         </button>
         <button
           onClick={onAdd}
-          className="rounded bg-white/10 px-3 py-1.5 text-sm text-white/90 hover:bg-white/20"
+          className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-500 hover:from-sky-400 hover:to-indigo-400 px-4 py-2 text-xs font-semibold text-white shadow-md shadow-sky-500/20 transition-all hover:scale-[1.02]"
         >
-          新增投递
+          <span>+</span>
+          <span>新增投递</span>
         </button>
       </div>
     </div>

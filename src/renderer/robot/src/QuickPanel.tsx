@@ -31,7 +31,6 @@ export interface QuickPanelProps {
   latestNtk: NeedToKnow | null
   pendingApprovalCount: number
   onReview: () => void
-  onRunMorningBrief: () => void
   onOpenWorkbench: () => void
   onClose: () => void
 }
@@ -41,7 +40,6 @@ export function QuickPanel({
   latestNtk,
   pendingApprovalCount,
   onReview,
-  onRunMorningBrief,
   onOpenWorkbench,
   onClose
 }: QuickPanelProps): ReactElement {
@@ -70,14 +68,14 @@ export function QuickPanel({
 
       {/* Latest Need to Know */}
       <div className="mt-2 px-3">
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-white/35">必读</div>
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-white/35">最新动态</div>
         {latestNtk ? (
           <div className="mt-1">
             <div className="text-[12px] font-medium text-white/85">{latestNtk.title}</div>
             <div className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-white/50">{latestNtk.summary}</div>
           </div>
         ) : (
-          <div className="mt-1 text-[11px] text-white/35">暂无事。</div>
+          <div className="mt-1 text-[11px] text-white/35">暂无最新动态。</div>
         )}
       </div>
 
@@ -104,16 +102,9 @@ export function QuickPanel({
       {/* Actions */}
       <div className="mt-auto flex flex-col gap-2 p-3">
         <button
-          onClick={onRunMorningBrief}
-          className="w-full rounded-md px-2 py-2 text-[12px] font-semibold"
-          style={{ background: 'var(--dm-accent)', color: '#fff' }}
-        >
-          运行晨报
-        </button>
-        <button
           onClick={onOpenWorkbench}
-          className="w-full rounded-md px-2 py-2 text-[12px] text-white/80"
-          style={{ background: '#ffffff0d', border: '1px solid #ffffff14' }}
+          className="w-full rounded-md px-2 py-2 text-[12px] font-semibold text-white"
+          style={{ background: 'var(--dm-accent)' }}
         >
           打开工作台
         </button>

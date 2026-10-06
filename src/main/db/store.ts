@@ -119,6 +119,7 @@ export interface RoutineStore {
   createApplicationEvent(event: ApplicationEvent): void
   getApplicationEventBySourceRef(applicationId: string, sourceRef: string): ApplicationEvent | undefined
   listApplicationEvents(applicationId: string): ApplicationEvent[]
+  deleteApplicationEvent(id: string): void
 
   // Resume versions (Milestone A §4.2). Latest version = active.
   createResumeVersion(v: ResumeVersion): void

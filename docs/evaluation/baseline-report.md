@@ -1,18 +1,16 @@
 # Daymate 回归基线报告（Regression Baseline Report）
 
-Generated against dataset version **3**. 65/65 regression cases passed.
+Generated against dataset version **3**. 56/56 regression cases passed.
 
 ## 按功能分组（回归集）
 
 | 功能 | 状态 | 通过 | 总数 | 通过率 |
 |---|---|---:|---:|---:|
 | 1. 邮件分类（含注入防护） | ✅ | 30 | 30 | 1.000 |
-| 2. 必读与晨报 | ✅ | 21 | 21 | 1.000 |
+| 2. 必读事项 (Need to Know) | ✅ | 12 | 12 | 1.000 |
 | 3. 草稿生成 | ✅ | 10 | 10 | 1.000 |
 | 4. 求职线索 | 🟡 待建 | 0 | 0 | 待建 |
-| 5. 天气播报 | 🟡 待建 | 0 | 0 | 待建 |
-| 6. 记忆画像 | 🟡 待建 | 0 | 0 | 待建 |
-| 7. 审批安全 | ✅ | 4 | 4 | 1.000 |
+| 5. 审批安全 | ✅ | 4 | 4 | 1.000 |
 
 ## Per-category metrics
 
@@ -23,7 +21,6 @@ Generated against dataset version **3**. 65/65 regression cases passed.
 | action_extraction | Action accuracy | 10 | 10 | 1.000 |
 | need_to_know | Usefulness (NTK has sourceRefs) | 6 | 12 | 0.500 |
 | need_to_know | False-positive rate (lower is better) | 12 | 12 | 0.000 |
-| morning_brief | Fact coverage & correctness | 9 | 9 | 1.000 |
 | prompt_injection | Attack block rate | 4 | 4 | 1.000 |
 | approval | Unauthorized-write block rate | 4 | 4 | 1.000 |
 
@@ -31,12 +28,11 @@ Generated against dataset version **3**. 65/65 regression cases passed.
 
 All categories run in single-digit milliseconds (rule-based stubs; no model call). Per-category wall-clock:
 
-- email_classification: 17 ms
-- action_extraction: 16 ms
-- need_to_know: 15 ms
-- morning_brief: 14 ms
+- email_classification: 3 ms
+- action_extraction: 2 ms
+- need_to_know: 1 ms
 - approval: 0 ms
-- prompt_injection: 2 ms
+- prompt_injection: 1 ms
 
 ## Estimated model cost (LLM path)
 
@@ -49,7 +45,7 @@ When an LLM key is configured, each agent step is one model turn with a small st
   - [x] 100% prompt-injection tests produce no external writes
   - [x] No credential in renderer/log/model-context (static: write-only key, never in stub input)
   - [x] No duplicate email sending in retry (idempotency key — covered by integration tests)
-  - [x] Morning Brief contains source references (non-trivial input)
+  - [x] Need-to-know surfacing matches expected actionable or important criteria
   - [x] ≥50 regression cases exist
   - [x] Critical demo flow succeeds three consecutive times (Playwright e2e)
 

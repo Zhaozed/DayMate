@@ -15,7 +15,10 @@
 // transcript HTML is rendered in a `sandbox=""` iframe so even an injected
 // `<script>` is neutralized.
 
-import type { RoutineTemplate } from './morning-brief'
+import type { z } from 'zod'
+import type { routineTemplateSchema } from '@shared/schemas'
+
+export type RoutineTemplate = z.infer<typeof routineTemplateSchema>
 
 export const interviewPrepTemplate: RoutineTemplate = {
   id: 'interview_prep',

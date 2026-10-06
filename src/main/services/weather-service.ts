@@ -13,13 +13,23 @@
 // LLM) so the card always renders something.
 
 import type { Settings } from '../util/settings'
-import type { AgentRuntime } from '../agent/agent-runtime'
 import type { ActivityService } from './activity-service'
 import type { WeatherData, WeatherBriefing } from '@shared/types'
 
+function weatherDescZh(code: number, fallback: string): string {
+  if ([113].includes(code)) return '晴'
+  if ([116, 119, 122].includes(code)) return '多云'
+  if ([143, 248, 260, 263].includes(code)) return '有雾'
+  if ([176, 200, 386, 389].includes(code)) return '阵雨'
+  if ([185, 266, 293, 296, 299, 302, 305, 308, 311, 314, 317, 392, 395].includes(code)) return '有雨'
+  if ([230, 320, 323, 326, 329, 332, 335, 338, 350, 353, 356, 359, 362, 365, 368, 371, 374, 377].includes(code)) return '有雪'
+  if (code >= 200 && code < 400) return '降水'
+  return fallback || '天气'
+}
+
 export interface WeatherServiceDeps {
   settings: Settings
-  agentRuntime: AgentRuntime
+  agentRuntime?: unknown
   activityService: ActivityService
   /** Proxy-aware fetch (Electron `net.fetch`). Injected so tests can mock. */
   fetch: typeof fetch
@@ -59,9 +69,7 @@ export class WeatherService {
     }
   }
 
-  /** Fetch real weather + generate (LLM or stub) the polished briefing, cache
-   *  it, and return it. Returns undefined on a fetch/generation failure (the
-   *  Home card then shows the empty state). */
+  /** Fetch real weather + generate the briefing, cache it, and return it. */
   async refresh(): Promise<WeatherBriefing | undefined> {
     const city = await this.deps.settings.readWeatherCity()
     let weather: WeatherData
@@ -76,28 +84,16 @@ export class WeatherService {
       })
       return undefined
     }
-    let briefing: WeatherBriefing
-    try {
-      const out = (await this.deps.agentRuntime.runAgentStep('generate_daily_weather', {
-        weather
-      })) as { tempText: string; summary: string; clothing: string; yi: string[]; ji: string[] }
-      briefing = {
-        date: new Date().toISOString().slice(0, 10),
-        city,
-        tempText: out.tempText,
-        summary: out.summary,
-        clothing: out.clothing,
-        yi: out.yi,
-        ji: out.ji
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      this.deps.activityService.record({
-        type: 'agent_failed',
-        summary: `天气简报生成失败：${message}`,
-        metadata: { error: message, city }
-      })
-      return undefined
+    const desc = weatherDescZh(weather.weatherCode, weather.desc)
+    const tempText = `${weather.tempC}°C ${desc} · 体感${weather.feelsLikeC}°`
+    const briefing: WeatherBriefing = {
+      date: new Date().toISOString().slice(0, 10),
+      city,
+      tempText,
+      summary: `今日${desc}，最高${weather.maxTempC}°最低${weather.minTempC}°。`,
+      clothing: '适度添减衣物',
+      yi: ['宜按计划推进工作'],
+      ji: ['忌拖延搁置的重要事项']
     }
     await this.deps.settings.writeWeatherCache(briefing)
     return briefing

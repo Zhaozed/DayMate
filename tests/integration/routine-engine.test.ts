@@ -33,73 +33,7 @@ function buildEngine(): { engine: RoutineEngine; store: InMemoryStore; deps: Eng
   return { engine: new RoutineEngine(deps), store, deps }
 }
 
-describe('routine engine — Morning Brief end to end', () => {
-  it('runs the mock Morning Brief to completion and records every step', async () => {
-    const { engine, store } = buildEngine()
-    seedPresets(store)
 
-    const run = await engine.run('morning_brief', { manual: true, idempotencyKey: 'k1' })
-    expect(run.status).toBe('completed')
-
-    const activity = store.listActivity(run.id)
-    // routine_started, 5× (tool_requested+tool_completed: email.list, calendar.list,
-    // task.list, memory.search, memory.save_proposals), agent_started, create_task
-    // completed, need_to_know completed, notify completed, routine_completed.
-    const types = activity.map((e) => e.type)
-    expect(types).toContain('routine_started')
-    expect(types).toContain('routine_completed')
-    expect(types.filter((t) => t === 'tool_requested').length).toBe(5)
-    expect(types.filter((t) => t === 'tool_completed').length).toBeGreaterThanOrEqual(6)
-    expect(types).toContain('agent_started')
-
-    // A Task was created from the brief's suggested action.
-    const tasks = store.listTasks()
-    expect(tasks.length).toBe(1)
-    expect(tasks[0].sourceId).toBe('mock-msg-001')
-    expect(tasks[0].routineRunId).toBe(run.id)
-
-    // A Need to Know was published. ADR 0026 — the morning brief is tagged
-    // kind='morning_brief', so it is filtered OUT of listNeedToKnow() (必读) and
-    // surfaces in listMorningBriefs() (the Home 晨报 carousel) instead.
-    const ntk = store.listMorningBriefs(7)
-    expect(ntk.length).toBe(1)
-    expect(ntk[0].sourceRefs.length).toBeGreaterThan(0)
-    expect(ntk[0].kind).toBe('morning_brief')
-    // And it does NOT leak into 必读.
-    expect(store.listNeedToKnow().length).toBe(0)
-
-    // A passive memory proposal landed from the brief (§16) and auto-confirmed
-    // (no manual confirmation gate — user preference): the priority sender
-    // became an active `contact` entry.
-    const memory = store.listMemory()
-    expect(memory.length).toBeGreaterThan(0)
-    expect(memory.every((m) => m.confirmed)).toBe(true)
-    expect(memory.some((m) => m.key === 'contact' && m.value.includes('alice@example.com'))).toBe(true)
-  })
-
-  it('is idempotent: a second run with the same key is a no-op and does not duplicate Tasks', async () => {
-    const { engine, store } = buildEngine()
-    seedPresets(store)
-
-    const first = await engine.run('morning_brief', { idempotencyKey: 'dup-key' })
-    const second = await engine.run('morning_brief', { idempotencyKey: 'dup-key' })
-    expect(second.id).toBe(first.id)
-    // Only one run record and one task — no duplicate external writes.
-    expect(store.listRuns().length).toBe(1)
-    expect(store.listTasks().length).toBe(1)
-  })
-
-  it('never acts on the prompt-injection fixture (no task/ntk from it)', async () => {
-    const { engine, store } = buildEngine()
-    seedPresets(store)
-
-    await engine.run('morning_brief', { idempotencyKey: 'inj' })
-    // The only task created references the trusted roadmap email (mock-msg-001),
-    // never the injection email (mock-msg-003).
-    const tasks = store.listTasks()
-    expect(tasks.every((t) => t.sourceId !== 'mock-msg-003')).toBe(true)
-  })
-})
 
 describe('routine engine — pause and resume after approval', () => {
   it('pauses on an R3 tool and resumes after approval, running later steps', async () => {

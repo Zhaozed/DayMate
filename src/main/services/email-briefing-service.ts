@@ -24,11 +24,10 @@ import type {
   EmailClassificationResult,
   EmailClassification,
   EmailTopic,
-  MemoryItem,
   TaskPriority,
   BriefingCategory
 } from '@shared/types'
-import type { AgentRuntime, ClassifyInboxOutput, DraftReplyOutput } from '../agent/agent-runtime'
+import type { AgentRuntime, ClassifyInboxOutput } from '../agent/agent-runtime'
 import type { NeedToKnowService } from './need-to-know-service'
 import type { TaskService } from './task-service'
 import type { ToolRegistry, ToolContext } from '../agent/tool-registry'
@@ -39,13 +38,13 @@ import { isSchoolSpam, shouldSkipBriefing } from '../util/bulk-mail'
 
 const IMPORTANT_TOPICS = new Set(['recruiting', 'fees_billing', 'meeting'])
 
-/** Deterministic fallback for the 4-value 必读 section tag when the model /
- *  stub omits `briefingCategory` (ADR 0029). 账单/会议/动态 collapse into
- *  'daily'; recruiting → 'job'; ads → 'other'. */
+/** Deterministic fallback for the 3-value section tag when the model /
+ *  stub omits `briefingCategory` (学校/求职/日常). 账单/会议/动态 collapse into
+ *  'daily'; recruiting → 'job'. */
 const TOPIC_TO_BRIEFING: Record<EmailTopic, BriefingCategory> = {
   fees_billing: 'daily',
   recruiting: 'job',
-  ads: 'other',
+  ads: 'daily',
   meeting: 'daily',
   general: 'daily'
 }
@@ -108,8 +107,7 @@ export class EmailBriefingService {
    *  Non-bulk (real-person) mail → classify_inbox (LLM) → urgent/high +
    *  auto-draft for reply-needed important mail. */
   async briefNewEmails(
-    newEmails: NormalizedEmail[],
-    opts: { skipDrafts?: boolean } = {}
+    newEmails: NormalizedEmail[]
   ): Promise<{ surfaced: number; drafted: number; tasksCreated: number }> {
     if (newEmails.length === 0) return { surfaced: 0, drafted: 0, tasksCreated: 0 }
 
@@ -220,7 +218,7 @@ export class EmailBriefingService {
         const sourceRefId = `email:${r.messageId}`
         if (seen.has(sourceRefId)) continue
         const priority = r.topic === 'recruiting' || r.topic === 'fees_billing' ? 'urgent' : 'high'
-        const briefingCat = r.briefingCategory ?? TOPIC_TO_BRIEFING[r.topic] ?? 'other'
+        const briefingCat = r.briefingCategory ?? TOPIC_TO_BRIEFING[r.topic] ?? 'daily'
 
         // ADR 0029 — thread merge: collapse same-thread emails into ONE 必读
         // item. If an active NTK exists for this threadId (+provider+account),
@@ -263,14 +261,6 @@ export class EmailBriefingService {
         }
         seen.add(sourceRefId)
         surfaced++
-
-        // Auto-draft a reply for reply-needed IMPORTANT mail only (not every
-        // actionable email — drafts are for the categories the user named).
-        // Skipped during cold-start backfill (cost control — drafts would burn
-        // a generate_draft_reply LLM call each; the user can draft on demand).
-        if (!opts.skipDrafts && r.classification === 'reply' && important) {
-          if (await this.autoDraftReply(email, sourceRefId, seen)) drafted++
-        }
       }
     }
 
@@ -325,7 +315,7 @@ export class EmailBriefingService {
     let tasksCreated = 0
     for (let i = 0; i < emails.length; i += batchSize) {
       const batch = emails.slice(i, i + batchSize)
-      const r = await this.briefNewEmails(batch, { skipDrafts: true })
+      const r = await this.briefNewEmails(batch)
       surfaced += r.surfaced
       tasksCreated += r.tasksCreated
     }
@@ -336,100 +326,5 @@ export class EmailBriefingService {
     })
     if (tasksCreated > 0) this.deps.onTasksChanged?.()
     return { scanned: emails.length, surfaced, tasksCreated, capped: false }
-  }
-
-  /** Generate a tone-mirrored reply draft and save it to the Drafts folder
-   *  (R1, no approval — §15 exception, ADR 0022). Best-effort: prior-replies
-   *  fetch + draft generation failures are logged and never kill the loop. */
-  private async autoDraftReply(
-    email: NormalizedEmail,
-    sourceRefId: string,
-    seen: Set<string>
-  ): Promise<boolean> {
-    const provider =
-      this.deps.emailProviders.find((p) => p.accountId === email.accountId) ??
-      this.deps.emailProviders[0]
-    let priorReplies: NormalizedEmail[] = []
-    if (provider) {
-      try {
-        priorReplies = await provider.listSent({
-          toAddress: email.from.address,
-          sinceHours: 720,
-          limit: 5
-        })
-      } catch {
-        // Degrade to a generic (non-tone-mirrored) draft — don't block.
-      }
-    }
-    let memory: MemoryItem[] = []
-    try {
-      memory = this.deps.memoryService.list()
-    } catch {
-      // no profile → generic draft
-    }
-
-    let draft: DraftReplyOutput
-    try {
-      draft = (await this.deps.agentRuntime.runAgentStep('generate_draft_reply', {
-        email,
-        priorReplies,
-        memory
-      })) as DraftReplyOutput
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      this.deps.activityService.record({
-        type: 'agent_failed',
-        summary: `草稿生成失败（${email.subject}）：${message}`,
-        metadata: { error: message, messageId: email.messageId }
-      })
-      return false
-    }
-
-    let result
-    try {
-      result = await this.deps.toolRegistry.execute(
-        'email.create_draft',
-        {
-          accountId: email.accountId,
-          threadId: email.threadId,
-          to: draft.to,
-          subject: draft.subject,
-          body: draft.body
-        },
-        this.deps.toolContext
-      )
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      this.deps.activityService.record({
-        type: 'tool_failed',
-        summary: `草稿保存失败（${email.subject}）：${message}`,
-        metadata: { error: message, messageId: email.messageId }
-      })
-      return false
-    }
-    if (result.status !== 'ok') {
-      const message = result.status === 'error' ? result.error : result.status
-      this.deps.activityService.record({
-        type: 'tool_failed',
-        summary: `草稿保存失败（${email.subject}）：${message}`,
-        metadata: { messageId: email.messageId }
-      })
-      return false
-    }
-
-    // Surface a 必读 item so the user knows a draft is waiting in their
-    // Drafts folder — they review + send manually from the mail client.
-    const draftNtkId = `${sourceRefId}:draft`
-    if (!seen.has(draftNtkId)) {
-      this.deps.needToKnowService.create({
-        title: `已草拟回复：${email.subject}`,
-        summary: snippet(draft.body, 160),
-        reason: '系统已为你生成回复草稿并存入草稿箱 —— 请到邮件客户端审阅后发送。',
-        priority: 'high',
-        sourceRefs: [{ type: 'email', id: draftNtkId, label: email.subject }]
-      })
-      seen.add(draftNtkId)
-    }
-    return true
   }
 }

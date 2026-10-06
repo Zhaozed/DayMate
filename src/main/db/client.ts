@@ -51,6 +51,7 @@ function applyGuardedAlters(sqlite: Database.Database) {
   addColumnIfMissing(sqlite, 'memory_items', 'routine_run_id', 'TEXT')
   // Milestone A: rich fields on applications for pre-existing dev DBs.
   addColumnIfMissing(sqlite, 'applications', 'city', 'TEXT')
+  addColumnIfMissing(sqlite, 'applications', 'job_code', 'TEXT')
   addColumnIfMissing(sqlite, 'applications', 'salary_range', 'TEXT')
   addColumnIfMissing(sqlite, 'applications', 'jd_text', 'TEXT')
   addColumnIfMissing(sqlite, 'applications', 'stage', 'TEXT')

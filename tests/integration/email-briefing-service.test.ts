@@ -10,7 +10,6 @@ import { createDeterministicAgentRuntime } from '../../src/main/agent/agent-runt
 import type { AgentRuntime } from '../../src/main/agent/agent-runtime'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { EmailBriefingService } from '../../src/main/services/email-briefing-service'
 import type { NormalizedEmail, EmailDraft, EmailDraftInput, EmailProvider } from '@shared/types'
 
@@ -46,7 +45,7 @@ function build() {
   const taskService = new TaskService(store)
   const needToKnowService = new NeedToKnowService(store)
   const memoryService = new MemoryService(store)
-  const applicationService = new ApplicationService(store, new MockBossProvider(), activityService)
+  const applicationService = new ApplicationService(store, activityService)
   const realProvider = new MockEmailProvider()
   const { proxy, drafts } = withDraftSpy(realProvider)
   const emailProviders: EmailProvider[] = [proxy]
@@ -55,7 +54,6 @@ function build() {
   const toolContext: ToolContext = {
     emailProviders,
     calendarProvider: new MockCalendarProvider(),
-    bossProvider: new MockBossProvider(),
     taskService,
     needToKnowService,
     activityService,
@@ -154,17 +152,14 @@ function generalEmail(): NormalizedEmail {
 }
 
 describe('EmailBriefingService — 邮件驱动必读 + 草稿免审批', () => {
-  it('surfaces a recruiting reply email as an urgent 必读 + auto-drafts a tone-mirrored reply (R1, no approval)', async () => {
-    const { briefing, needToKnowService, drafts } = build()
+  it('surfaces a recruiting reply email as an urgent 必读', async () => {
+    const { briefing, needToKnowService } = build()
     const out = await briefing.briefNewEmails([recruitingReplyEmail()])
     expect(out.surfaced).toBe(1)
-    expect(out.drafted).toBe(1)
 
     const items = needToKnowService.list()
     // ADR 0029 fix — the headline (title) is now the model/stub Chinese
-    // summary (r.reason), NOT the raw subject. The stub builds `${who} 期待
-    // 你回复` for a reply. The raw subject lives on as a subtitle via
-    // sourceRefs[].label. Find the recruiting NTK by its threadId.
+    // summary (r.reason), NOT the raw subject. The stub builds `${who}：来信待回复` for a reply.
     const recruit = items.find((n) => n.threadId === 'recruit-thread-001')
     expect(recruit).toBeDefined()
     expect(recruit?.title).toBe('Alice Chen：来信待回复')
@@ -176,19 +171,6 @@ describe('EmailBriefingService — 邮件驱动必读 + 草稿免审批', () => 
     expect(recruit?.briefingCategory).toBe('job')
     expect(recruit?.sourceProvider).toBe('gmail')
     expect(recruit?.sourceAccountId).toBe(ACCOUNT_ID)
-    const draftNtk = items.find((n) => n.title.startsWith('已草拟回复'))
-    expect(draftNtk).toBeDefined()
-    expect(draftNtk?.priority).toBe('high')
-
-    // The draft was saved via the create_draft tool (R1, no approval gate —
-    // the briefing calls toolRegistry.execute directly, no engine pause).
-    expect(drafts.length).toBe(1)
-    expect(drafts[0].subject).toContain('面试通知')
-    // Tone-mirrored: the stub mirrors the user's prior-reply voice (SENT
-    // fixture to Alice → "Hi Alice," greeting + "Thanks for the heads up."
-    // sign-off), NOT the canned ack alone.
-    expect(drafts[0].body).toContain('Hi Alice,')
-    expect(drafts[0].body).toContain('Thanks for the heads up.')
   })
 
   it('is idempotent — a retried tick with the same email never double-writes', async () => {
@@ -266,7 +248,7 @@ function buildWithSpy() {
   const taskService = new TaskService(store)
   const needToKnowService = new NeedToKnowService(store)
   const memoryService = new MemoryService(store)
-  const applicationService = new ApplicationService(store, new MockBossProvider(), activityService)
+  const applicationService = new ApplicationService(store, activityService)
   const realProvider = new MockEmailProvider()
   const { proxy, drafts } = withDraftSpy(realProvider)
   const emailProviders: EmailProvider[] = [proxy]
@@ -275,7 +257,6 @@ function buildWithSpy() {
   const toolContext: ToolContext = {
     emailProviders,
     calendarProvider: new MockCalendarProvider(),
-    bossProvider: new MockBossProvider(),
     taskService,
     needToKnowService,
     activityService,
@@ -497,7 +478,7 @@ function buildOpTriggeredRuntime(): EmailBriefingService {
   const taskService = new TaskService(store)
   const needToKnowService = new NeedToKnowService(store)
   const memoryService = new MemoryService(store)
-  const applicationService = new ApplicationService(store, new MockBossProvider(), activityService)
+  const applicationService = new ApplicationService(store, activityService)
   const realProvider = new MockEmailProvider()
   const { proxy } = withDraftSpy(realProvider)
   const emailProviders: EmailProvider[] = [proxy]
@@ -523,7 +504,6 @@ function buildOpTriggeredRuntime(): EmailBriefingService {
   const toolContext: ToolContext = {
     emailProviders,
     calendarProvider: new MockCalendarProvider(),
-    bossProvider: new MockBossProvider(),
     taskService,
     needToKnowService,
     activityService,
@@ -598,7 +578,7 @@ describe('EmailBriefingService — operation-triggered bulk surfaces (ADR 0029)'
           topic: 'general',
           reason: 'promo',
           untrusted: false,
-          briefingCategory: 'other'
+          briefingCategory: 'daily'
         }
       ],
       counts: { reply: 0, follow_up: 0, information: 1, ignore: 0 },
@@ -643,7 +623,7 @@ describe('EmailBriefingService — operation-triggered bulk surfaces (ADR 0029)'
           topic: 'general',
           reason: 'unsolicited marketing',
           untrusted: false,
-          briefingCategory: 'other'
+          briefingCategory: 'daily'
         }
       ],
       counts: { reply: 0, follow_up: 0, information: 0, ignore: 1 },
@@ -680,7 +660,7 @@ function buildThreadRuntime(): EmailBriefingService {
   const taskService = new TaskService(store)
   const needToKnowService = new NeedToKnowService(store)
   const memoryService = new MemoryService(store)
-  const applicationService = new ApplicationService(store, new MockBossProvider(), activityService)
+  const applicationService = new ApplicationService(store, activityService)
   const realProvider = new MockEmailProvider()
   const { proxy } = withDraftSpy(realProvider)
   const emailProviders: EmailProvider[] = [proxy]
@@ -704,7 +684,6 @@ function buildThreadRuntime(): EmailBriefingService {
   const toolContext: ToolContext = {
     emailProviders,
     calendarProvider: new MockCalendarProvider(),
-    bossProvider: new MockBossProvider(),
     taskService,
     needToKnowService,
     activityService,
@@ -776,7 +755,7 @@ describe('必读 surface respects LLM ignore (ADR 0027 fix)', () => {
     const taskService = new TaskService(store)
     const needToKnowService = new NeedToKnowService(store)
     const memoryService = new MemoryService(store)
-    const applicationService = new ApplicationService(store, new MockBossProvider(), activityService)
+    const applicationService = new ApplicationService(store, activityService)
     const realProvider = new MockEmailProvider()
     const { proxy } = withDraftSpy(realProvider)
     const emailProviders: EmailProvider[] = [proxy]
@@ -802,8 +781,7 @@ describe('必读 surface respects LLM ignore (ADR 0027 fix)', () => {
     const toolContext: ToolContext = {
       emailProviders,
       calendarProvider: new MockCalendarProvider(),
-      bossProvider: new MockBossProvider(),
-      taskService,
+        taskService,
       needToKnowService,
       activityService,
       memoryService,

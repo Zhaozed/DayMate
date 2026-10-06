@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ApplicationService } from '../../src/main/services/application-service'
 import { ActivityService } from '../../src/main/services/activity-service'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import type { EmailProvider, EmailQuery, NormalizedEmail } from '@shared/types'
 
@@ -63,7 +62,7 @@ describe('partial failure — one provider down (sync loop)', () => {
   it('records provider_unavailable, still builds 投递 from the surviving provider', async () => {
     const store = new InMemoryStore()
     const activity = new ActivityService(store)
-    const svc = new ApplicationService(store, new MockBossProvider(), activity)
+    const svc = new ApplicationService(store, activity)
     const { rt } = countingRuntime()
     // Gmail works; 163 throws.
     const providers: EmailProvider[] = [

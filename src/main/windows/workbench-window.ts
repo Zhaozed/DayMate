@@ -23,12 +23,14 @@ export function openWorkbench(): BrowserWindow {
     // Title bar hidden so we can render a custom traffic-light-aware header;
     // buttons overlay the renderer. macOS only for MVP.
     titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 18, y: 18 },
     backgroundColor: '#0f1115',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      plugins: true
     }
   })
 

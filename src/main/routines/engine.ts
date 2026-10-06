@@ -23,7 +23,6 @@ import type { ApprovalService } from '../services/approval-service'
 import type { MemoryService } from '../services/memory-service'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
-import type { BossProvider } from '../providers/boss/boss-provider'
 import type { ApplicationService } from '../services/application-service'
 import type { Settings } from '../util/settings'
 import type {
@@ -41,16 +40,10 @@ import { PRESET_IDS } from './presets'
 
 /** The only agent actions a custom Routine may reference (Spec §14). */
 const KNOWN_AGENT_ACTIONS = new Set([
-  'generate_morning_brief',
   'classify_inbox',
-  'generate_meeting_prep',
-  'generate_work_summary',
-  'generate_resume',
-  'generate_interview_transcript',
   'classify_application_email',
-  'generate_funnel_review',
-  'score_job_matches',
-  'generate_daily_fortune'
+  'generate_interview_transcript',
+  'generate_funnel_review'
 ])
 
 export interface RunOptions {
@@ -74,8 +67,6 @@ export interface EngineDeps {
   approvalService: ApprovalService
   emailProviders: EmailProvider[]
   calendarProvider: CalendarProvider
-  /** BOSS 直聘 provider (boss-cli); single account. */
-  bossProvider: BossProvider
   /**
    * The agent runtime that executes `agent` steps (Spec §12: agent reasoning
    * only inside explicit agent steps). Key-gated: no LLM key → deterministic
@@ -404,7 +395,6 @@ export class RoutineEngine {
       routineRunId: run.id,
       emailProviders: this.deps.emailProviders,
       calendarProvider: this.deps.calendarProvider,
-      bossProvider: this.deps.bossProvider,
       taskService: this.deps.taskService,
       needToKnowService: this.deps.needToKnowService,
       activityService: this.deps.activityService,

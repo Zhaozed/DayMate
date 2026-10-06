@@ -17,7 +17,6 @@ import { z } from 'zod'
 import type { RiskLevel, MemoryKey, NormalizedEmail } from '@shared/types'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
-import type { BossProvider } from '../providers/boss/boss-provider'
 import type { TaskService } from '../services/task-service'
 import type { NeedToKnowService } from '../services/need-to-know-service'
 import type { ActivityService } from '../services/activity-service'
@@ -55,22 +54,22 @@ export type WebFetch = (input: string) => Promise<string>
  */
 export function extractSnippets(html: string, max = 5): string[] {
   const out: string[] = []
-  // Match `<a class="result__snippet"...>…</a>` blocks (DDG HTML). Non-greedy,
-  // tolerant of attribute order. Fall back to a generic <p>/<li> text sweep if
-  // DDG's markup shifts (best-effort — web quality is inconsistent by design).
-  const re = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi
+  const isSpam = (t: string): boolean =>
+    /(boss直聘|zhipin\.com|和boss开聊|下载boss|58同城|看准网|赶集网|猎聘为您提供|智联招聘为您提供|boss直聘为您提供)/i.test(t)
+
+  // Match `<a class="result__snippet"...>…</a>` or `<td class="result-snippet">` blocks (DDG HTML / Lite).
+  const re = /<(?:a|td|div)[^>]*class="[^"]*(?:result__snippet|result-snippet)[^"]*"[^>]*>([\s\S]*?)<\/(?:a|td|div)>/gi
   let m: RegExpExecArray | null
   while ((m = re.exec(html)) !== null && out.length < max) {
     const text = stripTags(m[1]).trim()
-    if (text.length > 0) out.push(text)
+    if (text.length > 0 && !out.includes(text) && !isSpam(text)) out.push(text)
   }
   if (out.length === 0) {
-    // Fallback: grab text from the first few <p>/<li> blocks. Crude but keeps
-    // the tool useful when DDG changes its markup or blocks the /html/ endpoint.
+    // Fallback: grab text from the first few <p>/<li> blocks.
     const fallback = /<(?:p|li)[^>]*>([\s\S]*?)<\/(?:p|li)>/gi
     while ((m = fallback.exec(html)) !== null && out.length < max) {
       const text = stripTags(m[1]).trim()
-      if (text.length > 0) out.push(text)
+      if (text.length > 0 && !out.includes(text) && !isSpam(text)) out.push(text)
     }
   }
   return out
@@ -95,8 +94,6 @@ export interface ToolContext {
   /** All connected email providers; email tools select by `accountId` (Spec §9). */
   emailProviders: EmailProvider[]
   calendarProvider: CalendarProvider
-  /** BOSS 直聘 provider (boss-cli); single account, no accountId selection. */
-  bossProvider: BossProvider
   taskService: TaskService
   needToKnowService: NeedToKnowService
   activityService: ActivityService
@@ -653,112 +650,6 @@ export function createToolRegistry(): ToolRegistry {
     }
   })
 
-  // ── BOSS 直聘 (boss-cli) — all reads R0 (Spec §11). Boss data is untrusted
-  // external text (§17): the agent sees it only in a user message, never in the
-  // host-set system prompt; enforceTrust is applied after model output. The one
-  // write (boss.greet) is R3-approval-gated and lands in a later pass.
-  registry.register({
-    name: 'boss.applied',
-    description: 'List jobs the user has applied to on BOSS 直聘 (`boss applied`).',
-    risk: 'R0',
-    requiresApproval: false,
-    parameters: z.object({}),
-    async execute(_args, ctx) {
-      const items = await ctx.bossProvider.listApplications()
-      return { status: 'ok', data: items }
-    }
-  })
-
-  registry.register({
-    name: 'boss.interviews',
-    description: 'List interview invitations on BOSS 直聘 (`boss interviews`).',
-    risk: 'R0',
-    requiresApproval: false,
-    parameters: z.object({}),
-    async execute(_args, ctx) {
-      const items = await ctx.bossProvider.listInterviews()
-      return { status: 'ok', data: items }
-    }
-  })
-
-  registry.register({
-    name: 'boss.chat',
-    description: 'List communicated recruiters on BOSS 直聘 (`boss chat`).',
-    risk: 'R0',
-    requiresApproval: false,
-    parameters: z.object({}),
-    async execute(_args, ctx) {
-      const items = await ctx.bossProvider.listChats()
-      return { status: 'ok', data: items }
-    }
-  })
-
-  registry.register({
-    name: 'boss.detail',
-    description: 'Get full job details by securityId (`boss detail`).',
-    risk: 'R0',
-    requiresApproval: false,
-    parameters: z.object({ securityId: z.string() }),
-    async execute(args, ctx) {
-      const a = args as { securityId: string }
-      const job = await ctx.bossProvider.getJobDetail(a.securityId)
-      return { status: 'ok', data: job }
-    }
-  })
-
-  registry.register({
-    name: 'boss.search',
-    description: 'Search jobs on BOSS 直聘 (`boss search`).',
-    risk: 'R0',
-    requiresApproval: false,
-    parameters: z.object({
-      keyword: z.string(),
-      city: z.string().optional(),
-      salary: z.string().optional(),
-      experience: z.string().optional(),
-      degree: z.string().optional(),
-      page: z.number().optional(),
-      limit: z.number().optional()
-    }),
-    async execute(args, ctx) {
-      const a = args as {
-        keyword: string
-        city?: string
-        salary?: string
-        experience?: string
-        degree?: string
-        page?: number
-        limit?: number
-      }
-      const items = await ctx.bossProvider.searchJobs(a)
-      return { status: 'ok', data: items }
-    }
-  })
-
-  // ── Job-search intent (Milestone C) — read structured jobIntent from settings
-  // Exposes the user's configured criteria (keyword/cities/salary/experience/
-  // degree) as a typed value for the `job_recommendation` routine's step graph
-  // to template `boss.search` args + feed `score_job_matches`. R0 read of a
-  // non-secret settings field. Returns `{ status: 'ok', data: null }` with an
-  // Activity note when jobIntent is absent so the routine short-circuits
-  // gracefully (no crash, no-op run) — mirrors how unavailable providers log
-  // `provider_unavailable` and continue.
-  registry.register({
-    name: 'job_search.get_intent',
-    description:
-      'Read the user’s structured job-search intent (keyword/cities/salary/experience/degree) from settings. R0 read.',
-    risk: 'R0',
-    requiresApproval: false,
-    parameters: z.object({}).strict(),
-    async execute(_args, ctx) {
-      if (!ctx.settings) {
-        return { status: 'ok', data: null }
-      }
-      const { jobIntent } = await ctx.settings.readJobSearch()
-      return { status: 'ok', data: jobIntent ?? null }
-    }
-  })
-
   // ── 投递漏斗 (Milestone A) — application CRUD + resume/prep/面经 ──────────────
   // All local DB writes (R1) — no external effect, no approval needed (Spec §11).
   // JD stored on the application row is UNTRUSTED (§17); it only ever reaches a
@@ -919,34 +810,64 @@ export function createToolRegistry(): ToolRegistry {
   registry.register({
     name: 'web.fetch_jd',
     description:
-      'Fetch a best-effort job-description snippet from the public web (DuckDuckGo HTML) for a company+position. R0 read — never sends, never writes externally. The returned text is UNTRUSTED public web content (§17): the caller stores it as data and the renderer renders it in a sandboxed iframe. On-demand only (web quality is inconsistent — the user reviews before accepting).',
+      'Fetch a best-effort job-description snippet from the public web (DuckDuckGo HTML) for a company+position+jobCode. R0 read — never sends, never writes externally. The returned text is UNTRUSTED public web content (§17): the caller stores it as data and the renderer renders it in a sandboxed iframe. On-demand only (web quality is inconsistent — the user reviews before accepting).',
     risk: 'R0',
     requiresApproval: false,
     parameters: z.object({
       company: z.string(),
-      position: z.string().optional()
+      position: z.string().optional(),
+      jobCode: z.string().optional()
     }),
     async execute(args, ctx) {
       if (!ctx.webFetch) {
         return { status: 'error', error: 'web 抓取未配置（无 webFetch 注入）' }
       }
-      const a = args as { company: string; position?: string }
-      const q = `${a.company} ${a.position ?? ''} 招聘 岗位描述`.trim()
-      const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(q)}`
-      let html: string
-      try {
-        html = await ctx.webFetch(url)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
+      const a = args as { company: string; position?: string; jobCode?: string }
+      const queries: string[] = []
+      if (a.company && a.position) {
+        if (a.jobCode) {
+          queries.push(`${a.company} 校园招聘官网 ${a.jobCode} 岗位职责 职位详情 -boss直聘 -zhipin`)
+          queries.push(`${a.company} 校招 ${a.position} ${a.jobCode} 岗位职责 任职要求`)
+        }
+        queries.push(`${a.company} 校园招聘官网 ${a.position} 岗位职责 任职要求 职位详情 -boss直聘 -zhipin`)
+        queries.push(`${a.company} 校招 ${a.position} 招聘官网 岗位职责`)
+      } else if (a.company) {
+        queries.push(`${a.company} 校园招聘官网 职位详情 岗位职责 -boss直聘 -zhipin`)
+      } else {
+        return { status: 'ok', data: { text: '', note: '缺少公司名称，无法检索 JD' } }
+      }
+
+      const allSnippets: string[] = []
+      let lastErr: unknown = null
+      let successCount = 0
+      for (const q of queries) {
+        const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q.trim())}`
+        try {
+          const html = await ctx.webFetch(url)
+          successCount++
+          const snippets = extractSnippets(html, 5)
+          for (const s of snippets) {
+            if (!allSnippets.includes(s)) {
+              allSnippets.push(s)
+            }
+          }
+          if (allSnippets.length >= 4) break
+        } catch (err) {
+          lastErr = err
+        }
+      }
+
+      if (allSnippets.length === 0 && successCount === 0 && lastErr) {
+        const msg = lastErr instanceof Error ? lastErr.message : String(lastErr)
         return { status: 'error', error: `web 抓取失败：${msg}` }
       }
-      const snippets = extractSnippets(html, 5)
-      if (snippets.length === 0) {
-        return { status: 'ok', data: { text: '', note: '未抓到 JD 片段（DDG 反爬或无结果），可手动粘贴' } }
+
+      if (allSnippets.length === 0) {
+        return { status: 'ok', data: { text: '', note: '未在公开互联网检索到匹配的 JD 片段，可手动粘贴补充' } }
       }
       // Plain-text join (§17: tags already stripped in extractSnippets; the
       // stored value is inert text, rendered sandboxed regardless).
-      return { status: 'ok', data: { text: snippets.join('\n\n') } }
+      return { status: 'ok', data: { text: allSnippets.join('\n\n') } }
     }
   })
 

@@ -2,15 +2,11 @@ import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ApplicationService } from '../../src/main/services/application-service'
 import { ActivityService } from '../../src/main/services/activity-service'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
-import type { ApplicationEventInput } from '@shared/types'
-
-function makeService(): { svc: ApplicationService; store: InMemoryStore; boss: MockBossProvider; activity: ActivityService } {
+function makeService(): { svc: ApplicationService; store: InMemoryStore; activity: ActivityService } {
   const store = new InMemoryStore()
   const activity = new ActivityService(store)
-  const boss = new MockBossProvider()
-  const svc = new ApplicationService(store, boss, activity)
-  return { svc, store, boss, activity }
+  const svc = new ApplicationService(store, activity)
+  return { svc, store, activity }
 }
 
 describe('application service — manual CRUD', () => {
@@ -110,68 +106,7 @@ describe('application service — status computation', () => {
   })
 })
 
-describe('application service — boss sync', () => {
-  it('pulls applied + interviews + chats from the mock boss provider', async () => {
-    const { svc } = makeService()
-    const res = await svc.syncFromBoss()
-    expect(res.synced).toBe(2) // two applied jobs in the mock
-    const list = svc.list()
-    // 字节跳动 (golang) has applied + interview + communicated events
-    const bytedance = list.find((v) => v.application.company === '字节跳动')
-    expect(bytedance).toBeDefined()
-    const types = bytedance!.events.map((e) => e.type).sort()
-    expect(types).toContain('applied')
-    expect(types).toContain('interview')
-    expect(types).toContain('communicated')
-    // 美团 (frontend) has only applied
-    const meituan = list.find((v) => v.application.company === '美团')
-    expect(meituan!.events.map((e) => e.type)).toEqual(['applied'])
-    expect(bytedance!.currentStatus).toBe('interview')
-    // boss-detected events are not locked (auto-detected)
-    const interviewEv = bytedance!.events.find((e) => e.type === 'interview')
-    expect(interviewEv!.locked).toBe(false)
-    expect(interviewEv!.source).toBe('boss')
-  })
 
-  it('is idempotent — syncing twice does not duplicate applications or events', async () => {
-    const { svc } = makeService()
-    await svc.syncFromBoss()
-    const firstCount = svc.list().length
-    const firstEvents = svc.list().flatMap((v) => v.events).length
-    await svc.syncFromBoss()
-    expect(svc.list().length).toBe(firstCount)
-    expect(svc.list().flatMap((v) => v.events).length).toBe(firstEvents)
-  })
-
-  it('records a provider_unavailable activity on boss failure and returns gracefully', async () => {
-    const { svc, store, boss } = makeService()
-    // Force listApplications to throw a BossCliError-shaped error.
-    boss.listApplications = async () => {
-      throw new (class extends Error {
-        code = 'not_authenticated' as const
-      })('boss-cli 未安装')
-    }
-    const res = await svc.syncFromBoss()
-    expect(res.synced).toBe(0)
-    expect(res.message).toContain('同步失败')
-    const activities = store.listActivity()
-    const unavailable = activities.find((a) => a.type === 'provider_unavailable')
-    expect(unavailable).toBeDefined()
-    expect(unavailable!.summary).toContain('BOSS 直聘同步失败')
-  })
-
-  it('matches interviews/chats by company+position when securityId is absent', async () => {
-    const { svc, boss } = makeService()
-    // Strip securityId from the interview fixture so matching falls back to
-    // company+position (the golang job).
-    const original = await boss.listInterviews()
-    boss.listInterviews = async () =>
-      original.map((i) => ({ ...i, securityId: undefined }))
-    await svc.syncFromBoss()
-    const bytedance = svc.list().find((v) => v.application.company === '字节跳动')
-    expect(bytedance!.events.map((e) => e.type)).toContain('interview')
-  })
-})
 
 describe('application service — locked-precedence computeStatus', () => {
   it('a locked terminal pins status against a later auto terminal (§17 risk #3)', () => {
@@ -206,8 +141,7 @@ describe('application service — locked-precedence computeStatus', () => {
     // build the app directly so no seeded locked event exists.
     const store = new InMemoryStore()
     const activity = new ActivityService(store)
-    const boss = new MockBossProvider()
-    const autoSvc = new ApplicationService(store, boss, activity)
+    const autoSvc = new ApplicationService(store, activity)
     const id = 'app-auto'
     store.createApplication({
       id,
@@ -284,8 +218,7 @@ describe('application service — rich fields / soft delete / archive / maintena
     // service only ever soft-deletes at "now").
     const store = new InMemoryStore()
     const activity = new ActivityService(store)
-    const boss = new MockBossProvider()
-    const svc = new ApplicationService(store, boss, activity)
+    const svc = new ApplicationService(store, activity)
 
     // a stale app: applied 20 days ago, no progress → should demote to 'back'
     // Use relative dates so the test isn't a date bomb that flips the day the
@@ -380,3 +313,36 @@ describe('application service — resume / prep-material versioning', () => {
     expect(p2.version).toBe(2)
   })
 })
+
+describe('application service — jobCode matching & requisition deduplication', () => {
+  it('creates application with jobCode and allows updating it', () => {
+    const { svc } = makeService()
+    const app = svc.create({ company: '字节跳动', position: '产品经理', jobCode: 'BYTEDANCE_PM_01' })
+    expect(app.application.jobCode).toBe('BYTEDANCE_PM_01')
+
+    const updated = svc.updateFields(app.application.id, { jobCode: 'BYTEDANCE_PM_02' })
+    expect(updated?.application.jobCode).toBe('BYTEDANCE_PM_02')
+  })
+
+  it('confirmEmailMatch sets jobCode on new or existing application', () => {
+    const { svc } = makeService()
+    const svcInternal = svc as unknown as { emailMatches: Map<string, unknown> }
+    svcInternal.emailMatches.set('msg-123', {
+      id: 'em-1',
+      messageId: 'msg-123',
+      subject: '【美团】笔试通知',
+      eventType: 'written_test',
+      company: '美团',
+      position: '后端开发',
+      jobCode: 'MT_RD_999',
+      confidence: 'high'
+    })
+
+    svc.confirmEmailMatch('msg-123', undefined, { jobCode: 'MT_RD_999' })
+    const apps = svc.list()
+    const meituan = apps.find((a) => a.application.company === '美团')
+    expect(meituan).toBeDefined()
+    expect(meituan?.application.jobCode).toBe('MT_RD_999')
+  })
+})
+

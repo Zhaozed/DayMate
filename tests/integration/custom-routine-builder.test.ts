@@ -73,7 +73,7 @@ describe('custom routine builder (Spec §14)', () => {
     const { engine, store } = buildEngine()
     seedPresets(store)
     await expect(
-      engine.createRoutine({ ...customDef(), id: 'morning_brief' })
+      engine.createRoutine({ ...customDef(), id: 'interview_prep' })
     ).rejects.toThrow(/受保留的预设 id/)
   })
 
@@ -120,8 +120,8 @@ describe('custom routine builder (Spec §14)', () => {
     await engine.deleteRoutine('my_triage')
 
     // Presets cannot be deleted.
-    await expect(engine.deleteRoutine('morning_brief')).rejects.toThrow(/无法删除预设例程/)
-    expect(store.getRoutine('morning_brief')).toBeDefined()
+    await expect(engine.deleteRoutine('interview_prep')).rejects.toThrow(/无法删除预设例程/)
+    expect(store.getRoutine('interview_prep')).toBeDefined()
   })
 
   it('refuses to delete a routine with an in-flight run', async () => {

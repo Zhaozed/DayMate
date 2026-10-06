@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ApplicationService } from '../../src/main/services/application-service'
 import { ActivityService } from '../../src/main/services/activity-service'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import type { EmailProvider } from '../../src/main/providers/email/email-provider'
 import type { NormalizedEmail, EmailSyncCursor } from '@shared/types'
 
@@ -15,7 +14,7 @@ import type { NormalizedEmail, EmailSyncCursor } from '@shared/types'
 function makeService(): ApplicationService {
   const store = new InMemoryStore()
   const activity = new ActivityService(store)
-  return new ApplicationService(store, new MockBossProvider(), activity)
+  return new ApplicationService(store, activity)
 }
 
 // A counting runtime — records every classify_application_email call so the

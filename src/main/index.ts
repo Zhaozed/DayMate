@@ -4,11 +4,19 @@
 // renderer communicates through typed IPC only.
 
 import { app, BrowserWindow } from 'electron'
-import { openRobot, openWorkbench } from './windows'
-import { installRobotContextMenu } from './windows/robot-window'
+import { openWorkbench } from './windows'
 import { registerIpcHandlers, bootstrapContainer } from './ipc/handlers'
-import { getContainer } from './app/container'
 import { installContentSecurityPolicy } from './security/csp'
+
+// Prevent transient background network/socket errors (e.g. IMAP ECONNRESET, Socket timeout)
+// from triggering Electron's default native modal crash dialogs.
+process.on('uncaughtException', (err) => {
+  console.error('[main process] Uncaught Exception:', err)
+})
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[main process] Unhandled Rejection:', reason)
+})
 
 // Single-instance lock — the robot is a persistent ambient surface.
 if (!app.requestSingleInstanceLock()) {
@@ -27,16 +35,7 @@ function bootstrap(): void {
   // is ready so app.getPath('userData') resolves.
   bootstrapContainer()
   registerIpcHandlers()
-  // Persistent robot first (ambient surface), workbench on demand.
-  openRobot()
-  // Native right-click context menu on the robot (M4 §18). Actions inject the
-  // container's scheduler + windows so robot-window stays cycle-free.
-  installRobotContextMenu({
-    onPause: () => getContainer().scheduler.pause(),
-    onResume: () => getContainer().scheduler.resume(),
-    onOpenWorkbench: () => openWorkbench(),
-    onQuit: () => app.quit()
-  })
+  // Launch the workbench directly (desktop robot orb removed per user preference)
   openWorkbench()
 }
 
@@ -53,7 +52,7 @@ app.whenReady().then(() => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      bootstrap()
+      openWorkbench()
     }
   })
 })

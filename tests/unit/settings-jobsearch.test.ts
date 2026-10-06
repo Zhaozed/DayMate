@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ActivityService } from '../../src/main/services/activity-service'
 import { ApplicationService } from '../../src/main/services/application-service'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { Settings } from '../../src/main/util/settings'
 import { createDeterministicAgentRuntime } from '../../src/main/agent/agent-runtime'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
@@ -12,7 +11,7 @@ import { join } from 'node:path'
 function makeService(): { svc: ApplicationService; store: InMemoryStore } {
   const store = new InMemoryStore()
   const activity = new ActivityService(store)
-  const svc = new ApplicationService(store, new MockBossProvider(), activity)
+  const svc = new ApplicationService(store, activity)
   return { svc, store }
 }
 
@@ -67,19 +66,6 @@ describe('settings — jobSearch config (§G)', () => {
 })
 
 describe('applicationService — manual AI generation (§4.2/§4.3)', () => {
-  it('generateResume runs the agent + saves a versioned resume with a promptHash', async () => {
-    const { svc } = makeService()
-    const app = svc.create({ company: '腾讯', position: '后端', jdText: 'Go 微服务' })
-    const runtime = createDeterministicAgentRuntime()
-    const v1 = await svc.generateResume(app.application.id, runtime, '<b>我的简历</b>')
-    expect(v1.version).toBe(1)
-    expect(v1.html).toBeTruthy()
-    expect(v1.promptHash).toBeTruthy()
-    // A second generate → version 2.
-    const v2 = await svc.generateResume(app.application.id, runtime, '<b>我的简历</b>')
-    expect(v2.version).toBe(2)
-  })
-
   it('generatePrepMaterial pulls the latest resume + notes + saves a prep version', async () => {
     const { svc } = makeService()
     const app = svc.create({ company: '字节跳动', position: '后端', jdText: 'Kubernetes' })
@@ -97,9 +83,9 @@ describe('applicationService — manual AI generation (§4.2/§4.3)', () => {
     expect(m1.html).toContain('字节跳动')
   })
 
-  it('generate throws when the application does not exist', async () => {
+  it('generatePrepMaterial throws when the application does not exist', async () => {
     const { svc } = makeService()
     const runtime = createDeterministicAgentRuntime()
-    await expect(svc.generateResume('nope', runtime)).rejects.toThrow(/未找到投递记录/)
+    await expect(svc.generatePrepMaterial('nope', runtime)).rejects.toThrow(/未找到投递记录/)
   })
 })

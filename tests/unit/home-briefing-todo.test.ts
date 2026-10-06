@@ -30,43 +30,7 @@ function realEmail(over: Partial<NormalizedEmail>): NormalizedEmail {
   }
 }
 
-describe('generate_daily_weather stub (ADR 0026)', () => {
-  const weather = {
-    city: '北京',
-    tempC: 23,
-    feelsLikeC: 21,
-    desc: 'Partly cloudy',
-    humidity: 40,
-    windSpeedKmph: 12,
-    maxTempC: 26,
-    minTempC: 18,
-    weatherCode: 116
-  }
 
-  it('produces a complete briefing (tempText / summary / clothing / yi / ji)', async () => {
-    const out = (await rt.runAgentStep('generate_daily_weather', { weather })) as {
-      tempText: string; summary: string; clothing: string; yi: string[]; ji: string[]
-    }
-    expect(out.tempText).toContain('23°C')
-    expect(out.summary).toBeTruthy()
-    expect(out.clothing).toBeTruthy()
-    expect(out.yi.length).toBeGreaterThanOrEqual(1)
-    expect(out.ji.length).toBeGreaterThanOrEqual(1)
-  })
-
-  it('is deterministic — same input yields the same output', async () => {
-    const a = await rt.runAgentStep('generate_daily_weather', { weather })
-    const b = await rt.runAgentStep('generate_daily_weather', { weather })
-    expect(a).toEqual(b)
-  })
-
-  it('surfaces a clothing recommendation that fits the temperature band', async () => {
-    const cold = (await rt.runAgentStep('generate_daily_weather', {
-      weather: { ...weather, tempC: -2, feelsLikeC: -5, weatherCode: 113 }
-    })) as { clothing: string }
-    expect(cold.clothing).toMatch(/羽绒服|棉服|保暖/)
-  })
-})
 
 describe('classify_inbox ToDo extraction (ADR 0026, no new LLM call)', () => {
   it('a reply email yields a readable Chinese todoTitle (sender + topic), category + dueDate', async () => {
@@ -165,6 +129,23 @@ describe('classify_application_email ToDo extraction (ADR 0026)', () => {
     }
     expect(out.results[0].eventType).toBe('offer')
     expect(out.results[0].todoTitle).toBeUndefined()
+  })
+
+  it('a resume-update notice yields eventType=applied and an actionable todoTitle', async () => {
+    const email = realEmail({
+      messageId: 'resume-update-1',
+      from: { name: '优必选招聘', address: 'hr@ubtrobot.com' },
+      subject: '请完善您的个人简历与应聘信息',
+      textBody: '感谢应聘产品经理岗位，请于9月1日前完善您的简历附件和个人信息。'
+    })
+    const out = (await rt.runAgentStep('classify_application_email', { emails: [email] })) as {
+      results: { eventType: string; todoTitle?: string; dueDate?: string }[]
+    }
+    const r = out.results[0]
+    expect(r.eventType).toBe('applied')
+    expect(r.todoTitle).toContain('完善')
+    expect(r.todoTitle).toContain('简历')
+    expect(r.dueDate).toMatch(/^\d{4}-09-01$/)
   })
 })
 

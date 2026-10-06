@@ -98,44 +98,14 @@ function ProfileSection({
   get: (key: MemoryKey) => MemoryItem | undefined
   onSaved: () => void
 }): ReactElement {
-  const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState<string | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-
-  const generate = async (): Promise<void> => {
-    setBusy(true)
-    setErr(null)
-    setMsg(null)
-    try {
-      const out = await window.daymate.generatePersona()
-      onSaved()
-      const n = out.memoryProposals?.length ?? 0
-      setMsg(n > 0 ? `${out.summary}（已更新 ${n} 条画像记忆）` : out.summary)
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
   return (
     <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
       <div className="flex items-center justify-between">
         <div className="text-xs font-semibold uppercase tracking-wide text-white/40">用户画像</div>
-        <button
-          onClick={generate}
-          disabled={busy}
-          className="rounded bg-white/5 px-2.5 py-1 text-xs text-white/70 hover:bg-white/10 disabled:opacity-50"
-          title="读取你授权连接的邮箱的已发送邮件，自动推断人物画像并生成待确认记忆"
-        >
-          {busy ? '推断中…' : '生成用户画像'}
-        </button>
       </div>
       <p className="mt-1 text-xs text-white/35">
-        读取已连接邮箱的已发送邮件，自动推断你的画像与写作风格，生成待确认提案。
+        你的画像与偏好设置，支持直接编辑。
       </p>
-      {msg && <div className="mt-2 text-xs text-emerald-300/80">{msg}</div>}
-      {err && <div className="mt-2 text-xs text-rose-300/80">{err}</div>}
       <div className="mt-3 space-y-2">
         {keys.map((key) => {
           const item = get(key)

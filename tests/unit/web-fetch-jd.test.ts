@@ -86,6 +86,24 @@ describe('web.fetch_jd tool', () => {
     expect(capturedUrl).toContain(encodeURIComponent('后端工程师'))
   })
 
+  it('builds a query with jobCode when provided', async () => {
+    const capturedUrls: string[] = []
+    const webFetch: WebFetch = async (input) => {
+      capturedUrls.push(input)
+      return `<a class="result__snippet">优必选机器人 产品经理 (J18671) 岗位职责</a>`
+    }
+    const res = await registry.execute(
+      'web.fetch_jd',
+      { company: '优必选', position: '产品经理', jobCode: 'J18671' },
+      makeCtx(webFetch)
+    )
+    expect(res.status).toBe('ok')
+    if (res.status !== 'ok') throw new Error('unreachable')
+    const data = res.data as { text: string }
+    expect(data.text).toContain('J18671')
+    expect(capturedUrls.some((u) => u.includes(encodeURIComponent('J18671')))).toBe(true)
+  })
+
   it('works with company only (no position)', async () => {
     const webFetch: WebFetch = async () =>
       `<a class="result__snippet">公司简介片段</a>`

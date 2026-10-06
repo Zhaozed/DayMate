@@ -99,7 +99,6 @@ const api: DaymateApi = {
     ipcRenderer.on(IPC.MEMORY_CHANGED, listener)
     return () => ipcRenderer.removeListener(IPC.MEMORY_CHANGED, listener)
   },
-  generatePersona: () => ipcRenderer.invoke(IPC.MEMORY_GENERATE_PERSONA),
 
   // LLM configuration (M3). The key is WRITE-ONLY: it is sent to main and
   // encrypted at rest; it is never read back into the renderer. getLlmConfig
@@ -126,25 +125,14 @@ const api: DaymateApi = {
   disconnectMail163: () => ipcRenderer.invoke(IPC.MAIL163_DISCONNECT),
   testMail163: () => ipcRenderer.invoke(IPC.MAIL163_TEST),
 
-  // Feishu Calendar (Spec §10) — app_id/app_secret + user refresh token are
-  // credentials in the SecretStore; these never return a secret to the renderer.
-  setFeishuClient: (input) => ipcRenderer.invoke(IPC.FEISHU_SET_CLIENT, input),
-  getFeishuStatus: () => ipcRenderer.invoke(IPC.FEISHU_GET_STATUS),
-  connectFeishu: () => ipcRenderer.invoke(IPC.FEISHU_CONNECT),
-  disconnectFeishu: () => ipcRenderer.invoke(IPC.FEISHU_DISCONNECT),
-  testFeishu: () => ipcRenderer.invoke(IPC.FEISHU_TEST),
-
   // Job applications — the cross-channel funnel panel.
   listApplications: () => ipcRenderer.invoke(IPC.APPLICATION_LIST),
   createApplication: (input) => ipcRenderer.invoke(IPC.APPLICATION_CREATE, input),
   addApplicationEvent: (input) => ipcRenderer.invoke(IPC.APPLICATION_ADD_EVENT, input),
   updateApplicationFields: (id, patch) =>
     ipcRenderer.invoke(IPC.APPLICATION_UPDATE_FIELDS, id, patch),
-  fetchJobJd: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_FETCH_JD, applicationId),
-  syncBossApplications: () => ipcRenderer.invoke(IPC.APPLICATION_SYNC_BOSS),
-  getBossStatus: () => ipcRenderer.invoke(IPC.BOSS_GET_STATUS),
-  loginBoss: () => ipcRenderer.invoke(IPC.BOSS_LOGIN),
-  logoutBoss: () => ipcRenderer.invoke(IPC.BOSS_LOGOUT),
+  fetchJobJd: (applicationId, overrides) =>
+    ipcRenderer.invoke(IPC.APPLICATION_FETCH_JD, applicationId, overrides),
   onApplicationChanged: (cb) => {
     const listener = (_e: unknown, views: Parameters<typeof cb>[0]): void => cb(views)
     ipcRenderer.on(IPC.APPLICATION_CHANGED, listener)
@@ -154,6 +142,8 @@ const api: DaymateApi = {
   // ── Milestone A: email inference, AI generation, recycle bin, config ──
   syncEmailApplications: () => ipcRenderer.invoke(IPC.APPLICATION_SYNC_EMAIL),
   uploadResume: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_UPLOAD_RESUME, applicationId),
+  openPdfInSystem: (dataUrl) => ipcRenderer.invoke(IPC.APPLICATION_OPEN_PDF, dataUrl),
+  selectBaseResume: () => ipcRenderer.invoke(IPC.APPLICATION_SELECT_BASE_RESUME),
   generatePrepMaterial: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_GENERATE_PREP, applicationId),
   listResumeVersions: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_LIST_RESUMES, applicationId),
   listPrepMaterials: (applicationId) => ipcRenderer.invoke(IPC.APPLICATION_LIST_PREP, applicationId),
@@ -166,9 +156,19 @@ const api: DaymateApi = {
   archiveApplication: (id) => ipcRenderer.invoke(IPC.APPLICATION_ARCHIVE, id),
   unarchiveApplication: (id) => ipcRenderer.invoke(IPC.APPLICATION_UNARCHIVE, id),
   listPendingEmailMatches: () => ipcRenderer.invoke(IPC.EMAIL_MATCHES_LIST),
-  confirmEmailMatch: (messageId, applicationId) =>
-    ipcRenderer.invoke(IPC.EMAIL_MATCH_CONFIRM, messageId, applicationId),
+  confirmEmailMatch: (messageId, applicationId, options) =>
+    ipcRenderer.invoke(IPC.EMAIL_MATCH_CONFIRM, messageId, applicationId, options),
   ignoreEmailMatch: (messageId) => ipcRenderer.invoke(IPC.EMAIL_MATCH_IGNORE, messageId),
+  undoEmailEvent: (applicationId, eventId) =>
+    ipcRenderer.invoke(IPC.APPLICATION_UNDO_EVENT, applicationId, eventId),
+  rebindEmailEvent: (fromAppId, eventId, toAppId) =>
+    ipcRenderer.invoke(IPC.APPLICATION_REBIND_EVENT, fromAppId, eventId, toAppId),
+  deleteApplicationEvent: (applicationId, eventId) =>
+    ipcRenderer.invoke(IPC.APPLICATION_DELETE_EVENT, applicationId, eventId),
+  updateApplicationStatus: (applicationId, status, options) =>
+    ipcRenderer.invoke(IPC.APPLICATION_UPDATE_STATUS, applicationId, status, options),
+  updateApplicationJd: (applicationId, jdText) =>
+    ipcRenderer.invoke(IPC.APPLICATION_UPDATE_JD, applicationId, jdText),
   getEmailThread: (input) => ipcRenderer.invoke(IPC.EMAIL_THREAD_GET, input),
   onEmailMatchesChanged: (cb) => {
     const listener = (_e: unknown, matches: Parameters<typeof cb>[0]): void => cb(matches)
@@ -179,10 +179,6 @@ const api: DaymateApi = {
   setJobSearchConfig: (config) => ipcRenderer.invoke(IPC.JOB_SEARCH_SET_CONFIG, config),
   getApplicationStats: () => ipcRenderer.invoke(IPC.APPLICATION_STATS),
   generateFunnelReview: () => ipcRenderer.invoke(IPC.APPLICATION_GENERATE_FUNNEL_REVIEW),
-  fetchJobRecommendations: (opts?: { bucket?: 'intern' | 'campus'; append?: boolean }) =>
-    ipcRenderer.invoke(IPC.JOB_RECOMMENDATIONS_FETCH, opts),
-  convertJobToApplication: (securityId) => ipcRenderer.invoke(IPC.JOB_CONVERT_TO_APPLICATION, securityId),
-  getJobDetail: (securityId: string) => ipcRenderer.invoke(IPC.JOB_DETAIL_GET, securityId),
   // Milestone D — notification prefs + 投递 data export.
   getNotificationPrefs: () => ipcRenderer.invoke(IPC.NOTIFICATION_GET_PREFS),
   setNotificationPrefs: (prefs) => ipcRenderer.invoke(IPC.NOTIFICATION_SET_PREFS, prefs),
@@ -191,13 +187,11 @@ const api: DaymateApi = {
   getBirthData: () => ipcRenderer.invoke(IPC.BIRTH_DATA_GET),
   setBirthData: (birth) => ipcRenderer.invoke(IPC.BIRTH_DATA_SET, birth),
   clearBirthData: () => ipcRenderer.invoke(IPC.BIRTH_DATA_CLEAR),
-  // ADR 0026 — Home 今日天气 (cached briefing + manual refresh) + 天气城市 +
-  // 晨报轮播 (last 7 morning-brief NTKs).
+  // ADR 0026 — Home 今日天气 (cached briefing + manual refresh) + 天气城市
   getWeather: () => ipcRenderer.invoke(IPC.WEATHER_GET),
   refreshWeather: () => ipcRenderer.invoke(IPC.WEATHER_REFRESH),
   getWeatherCity: () => ipcRenderer.invoke(IPC.WEATHER_CITY_GET),
   setWeatherCity: (city) => ipcRenderer.invoke(IPC.WEATHER_CITY_SET, city),
-  listMorningBriefs: () => ipcRenderer.invoke(IPC.MORNING_BRIEF_LIST),
   // ADR 0027 — ToDo overhaul settings + manual cold-start re-scan.
   getTodoSettings: () => ipcRenderer.invoke(IPC.TODO_GET_SETTINGS),
   setTodoSettings: (todo) => ipcRenderer.invoke(IPC.TODO_SET_SETTINGS, todo),

@@ -118,20 +118,7 @@ describe('§17 — injection mail never produces a task / draft / send (stub pat
     expect(out.counts.ignore).toBeGreaterThanOrEqual(1)
   })
 
-  it('generate_morning_brief nulls any task and strips any action referencing an untrusted thread', async () => {
-    const brief = (await runAgentStep('generate_morning_brief', { emails: [injection, clean] })) as {
-      taskToCreate: { sourceId: string } | null
-      suggestedActions: { toolName?: string; args?: { threadId?: string } }[]
-    }
-    // No task references the injection messageId.
-    if (brief.taskToCreate) {
-      expect(brief.taskToCreate.sourceId).not.toBe('inj-1')
-    }
-    // No suggested action references the injection thread.
-    expect(
-      brief.suggestedActions.every((a) => a.args?.threadId !== 'inj-thread')
-    ).toBe(true)
-  })
+
 })
 
 describe('§17 — unknown action fails clearly (never silently stubs)', () => {

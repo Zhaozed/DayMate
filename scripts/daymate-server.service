@@ -1,0 +1,18 @@
+[Unit]
+Description=Daymate Personal Agent Server Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/daymate
+EnvironmentFile=/opt/daymate/.env
+ExecStart=/usr/bin/node /opt/daymate/out/server/index.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

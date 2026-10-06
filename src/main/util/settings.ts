@@ -7,6 +7,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { extractTextFromPdf } from './pdf'
 import { LLM_PROVIDERS, DEFAULT_LLM_MODEL_IDS } from '@shared/constants'
 import type {
   LlmProvider,
@@ -50,6 +51,8 @@ export interface AppSettings {
   birthData?: BirthData
   /** Non-secret email-sync poll config + incremental cursor (邮件驱动求职汇总). */
   emailSync?: EmailSyncSettings
+  /** Pending email match proposals surviving restarts */
+  pendingEmailMatches?: import('@shared/types').EmailMatchProposal[]
   /** Non-secret weather briefing cache for the Home 今日天气 card (ADR 0026).
    *  Generated daily (real wttr.in + LLM-polished copy); `date` detects staleness. */
   weather?: WeatherBriefing
@@ -208,6 +211,17 @@ export class Settings {
     return next.emailSync!.cursor!
   }
 
+  async readPendingEmailMatches(): Promise<import('@shared/types').EmailMatchProposal[]> {
+    return (await this.read()).pendingEmailMatches ?? []
+  }
+
+  async writePendingEmailMatches(matches: import('@shared/types').EmailMatchProposal[]): Promise<void> {
+    const current = await this.read()
+    const next: AppSettings = { ...current, pendingEmailMatches: matches }
+    await this.persist(next)
+    this.cached = next
+  }
+
   /**
    * Read the base resume file content (trusted §17 — the user's own document).
    * Returns undefined when no path is configured or the file is unreadable;
@@ -219,6 +233,11 @@ export class Settings {
     const { baseResumePath } = await this.readJobSearch()
     if (!baseResumePath) return undefined
     try {
+      if (baseResumePath.toLowerCase().endsWith('.pdf')) {
+        const buf = await readFile(baseResumePath)
+        const text = await extractTextFromPdf(buf)
+        return text || undefined
+      }
       return await readFile(baseResumePath, 'utf8')
     } catch {
       return undefined
@@ -272,12 +291,16 @@ function normalize(parsed: Partial<AppSettings> | null | undefined): AppSettings
       ? parsed.weatherCity.trim()
       : undefined
   const todo = normalizeTodo(parsed?.todo)
+  const pendingEmailMatches = Array.isArray(parsed?.pendingEmailMatches)
+    ? (parsed.pendingEmailMatches as import('@shared/types').EmailMatchProposal[])
+    : undefined
   return {
     llm: { provider, modelId },
     ...(jobSearch ? { jobSearch } : {}),
     ...(notifications ? { notifications } : {}),
     ...(birth ? { birthData: birth } : {}),
     ...(emailSync ? { emailSync } : {}),
+    ...(pendingEmailMatches ? { pendingEmailMatches } : {}),
     ...(weather ? { weather } : {}),
     ...(weatherCity ? { weatherCity } : {}),
     ...(todo ? { todo } : {})

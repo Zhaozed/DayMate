@@ -13,14 +13,11 @@
 // Activity and the run continues (mirror the email-provider-down handling).
 
 import type { RoutineStore } from '../db/store'
-import type { BossProvider } from '../providers/boss/boss-provider'
-import { BossCliError } from '../providers/boss/boss-provider'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type {
   AgentRuntime,
   ClassifyApplicationEmailOutput,
   ApplicationEmailResult,
-  ResumeOutput,
   InterviewTranscriptOutput
 } from '../agent/agent-runtime'
 import type { ActivityService } from './activity-service'
@@ -39,30 +36,18 @@ import type {
   SmartFunnelGroup,
   InterviewNote,
   InterviewNoteInput,
-  BossApplication,
-  BossInterview,
-  BossChat,
   EmailMatchProposal,
   NormalizedEmail,
   ApplicationFunnelStats,
   FunnelStageCounts,
   FunnelReviewInput,
   FunnelReviewOutput,
-  JobMatchInput,
-  JobMatchOutput,
-  JobMatchResult,
-  JobIntent,
-  JobRecommendations,
-  FetchJobRecommendationsOpts,
-  JobBucket,
-  BossJob,
-  BossSearchQuery,
   EmailSyncCursor,
   EmailQuery
 } from '@shared/types'
 import { newId, nowIso } from '../util/ids'
-import { sha256 } from '../util/hash'
-import { shouldSkipFunnel, isSchoolSpam } from '../util/bulk-mail'
+import { shouldSkipFunnel, isSchoolSpam, isRecruitingVip, RECRUITING_KEYWORD_RE, DEFAULT_SKIP_TOKENS } from '../util/bulk-mail'
+import { extractTextFromPdf } from '../util/pdf'
 import { writeZip } from '../util/zip-writer'
 import { APPLICATION_SOURCES, APPLICATION_EVENT_TYPES } from '@shared/constants'
 
@@ -91,6 +76,8 @@ function daysSince(iso: string): number {
 function sortAsc(events: ApplicationEvent[]): ApplicationEvent[] {
   return [...events].sort((a, b) => {
     if (a.eventAt !== b.eventAt) return a.eventAt < b.eventAt ? -1 : 1
+    if (a.type === 'applied' && b.type !== 'applied') return -1
+    if (b.type === 'applied' && a.type !== 'applied') return 1
     return a.createdAt < b.createdAt ? -1 : 1
   })
 }
@@ -133,23 +120,67 @@ function normalizePosition(s: string | undefined): string {
   return s.toLowerCase().replace(POSITION_NOISE_RE, '').replace(/[\s·]+/g, '').trim()
 }
 
+const ATS_POSITION_PATTERNS = [
+  /(?:应聘|投递|申请)(?:[^\s，。！!]{2,35}?(?:有限公司|有限责任公司|公司|集团)(?:的)?)?[:：\s]*[【「[]?([a-zA-Z\u4e00-\u9fa50-9+/#·_-]{2,30}?)[】」\]]?(?:职位|岗位)/i,
+  /(?:职位|岗位|职位名称|应聘职位|投递职位)[:：\s]+[【「[]?([a-zA-Z\u4e00-\u9fa50-9+/#·_-]{2,30}?)[】」\]]?(?:[\r\n\t,，。；;]|$)/i,
+  /【([a-zA-Z\u4e00-\u9fa50-9+/#·_-]{2,30}?(?:经理|专家|工程师|专员|实习生|管培生|管培|设计|运营|开发|分析师|研究员|顾问|总监|助理|产品))】/i,
+  /(?:【|「|\[|的|^|\s)(售前产品经理|售前方案专家|售前工程师|售前技术支持|技术产品经理|AI产品经理|数据产品经理|商业化产品经理|用户产品经理|全球管培生|管培生|产品经理)(?:】|」|\]|岗位|职位|$|\s|，|。)/i,
+  /(?:应聘|投递|申请)[:：\s]+(?:[^\s，。！!]{2,35}?(?:有限公司|有限责任公司|公司|集团)(?:的)?)?[:：\s]*([a-zA-Z\u4e00-\u9fa50-9+/#·_-]{2,30}?)(?:[\r\n\t,，。]|$)/i
+]
+
+const COMPANY_PREFIX_CLEAN_RE = /^(?:[^\s，。！!]{2,35}?(?:有限公司|有限责任公司|股份公司|集团公司|科技公司|网络公司)|我司|本公司|贵司)(?:的)?/i
+const COMPANY_DE_CLEAN_RE = /^(?:[^\s，。！!]{2,35}?(?:公司|集团))的/i
+
+const NON_POSITION_WORDS_RE =
+  /^(反馈通知|结果通知|进展通知|状态更新|感谢信|求职申请|投递反馈|录用通知|面试通知|笔试通知|测评通知|通知|提醒|温馨提示|进展|结果|反馈|公告|邮件|更新|申请|邀请函|邀请)$/i
+
+export function extractPositionFromText(text: string): string | undefined {
+  if (!text) return undefined
+  for (const p of ATS_POSITION_PATTERNS) {
+    const m = text.match(p)
+    if (m && m[1]) {
+      let clean = m[1].trim()
+      clean = clean.replace(COMPANY_PREFIX_CLEAN_RE, '').replace(COMPANY_DE_CLEAN_RE, '').trim()
+      if (
+        clean.length >= 2 &&
+        !/^(您|我|本公司|此致|祝您|该公司|贵司|职位|岗位)$/.test(clean) &&
+        !NON_POSITION_WORDS_RE.test(clean) &&
+        !/(?:反馈通知|结果通知|进展通知|状态更新|感谢信)$/i.test(clean)
+      ) {
+        return clean
+      }
+    }
+  }
+  return undefined
+}
+
+const ATS_JOB_CODE_PATTERNS = [
+  /(?:职位编号|岗位编号|职位代码|岗位代码|职位ID|岗位ID|需求编号|招聘编号|Req(?:uisition)?\s*(?:ID|No|Code|#)?|Job\s*(?:ID|Code|#|Req))[:：\s]*[【「[#]?([a-zA-Z0-9_-]{3,35})[】」\]]?/i,
+  /[【「[](?:职位编号|岗位编号|Job ID|Req ID)[:：\s]*([a-zA-Z0-9_-]{3,35})[】」\]]/i,
+  /\((?:职位编号|岗位编号|Req\s*ID|Job\s*ID)[:：\s]*([a-zA-Z0-9_-]{3,35})\)/i,
+  /(?:职位|岗位|投递|应聘|[a-zA-Z\u4e00-\u9fa5]{2,10})[（(]([A-Z0-9_-]{4,25})[)）]/i,
+  /[（(]([A-Z0-9_-]{5,25})[)）]/i,
+  /\b(J\d{4,8}|REQ\d{4,8}|JOB\d{4,8})\b/i
+]
+
+export function extractJobCodeFromText(text: string): string | undefined {
+  if (!text) return undefined
+  for (const p of ATS_JOB_CODE_PATTERNS) {
+    const m = text.match(p)
+    if (m && m[1]) {
+      const code = m[1].trim()
+      if (code.length >= 3 && !/^(null|undefined|none|true|false)$/i.test(code)) {
+        return code
+      }
+    }
+  }
+  return undefined
+}
+
 export class ApplicationService {
   /** In-memory email→application match queue (low-confidence / unmatched).
    * Keyed by messageId; survives only the process lifetime (§3.3 待确认队列). */
   private readonly emailMatches = new Map<string, EmailMatchProposal>()
-  /** Last fetched boss.jobs by securityId — the lookup cache for `convertJobToApplication`
-   *  (the renderer clicks 转投递 on a job from the most recent 抓取 batch). */
-  private readonly lastJobs = new Map<string, BossJob>()
-  /** Dual-track job recommendation state (校招生 实习 + 秋招正职). `lastPage` is
-   *  the last page fetched per bucket (0 = none yet); `lastResults` the scored
-   *  list per bucket; `*HasMore` the boss `hasMore` flag for "load more";
-   *  `*SecurityIds` the split key (which bucket a securityId belongs to) so
-   *  the bucket-unaware `score_job_matches` output can be split back. */
-  private lastPage: { intern: number; campus: number } = { intern: 0, campus: 0 }
-  private lastResults: { intern: JobMatchResult[]; campus: JobMatchResult[] } = { intern: [], campus: [] }
-  private lastHasMore: { intern: boolean; campus: boolean } = { intern: false, campus: false }
-  private internSecurityIds = new Set<string>()
-  private campusSecurityIds = new Set<string>()
   /** Listener fired when the pending queue changes (container wires the IPC broadcast). */
   private onEmailMatchesChanged?: () => void
   /** ADR 0026 — funnel-path ToDo extraction. Optional TaskService + broadcast;
@@ -162,16 +193,41 @@ export class ApplicationService {
 
   constructor(
     private readonly store: RoutineStore,
-    private readonly bossProvider: BossProvider,
     private readonly activityService: ActivityService
   ) {}
+
+  /** Listener fired when applications change. */
+  private onApplicationsChanged?: () => void
+
+  /** Wire the applications broadcast (container → IPC.APPLICATION_CHANGED). */
+  setApplicationsListener(fn: () => void): void {
+    this.onApplicationsChanged = fn
+  }
+  private broadcastApplications(): void {
+    this.onApplicationsChanged?.()
+  }
 
   /** Wire the pending-queue broadcast (container → IPC.EMAIL_MATCHES_CHANGED). */
   setEmailMatchesListener(fn: () => void): void {
     this.onEmailMatchesChanged = fn
   }
+  private persistPendingWriter?: (proposals: EmailMatchProposal[]) => Promise<void>
+  setPendingPersistence(
+    initialProposals: EmailMatchProposal[] | undefined,
+    writer: (proposals: EmailMatchProposal[]) => Promise<void>
+  ): void {
+    if (initialProposals && Array.isArray(initialProposals)) {
+      for (const p of initialProposals) {
+        if (p && p.messageId) {
+          this.emailMatches.set(p.messageId, p)
+        }
+      }
+    }
+    this.persistPendingWriter = writer
+  }
   private broadcastEmailMatches(): void {
     this.onEmailMatchesChanged?.()
+    this.persistPendingWriter?.([...this.emailMatches.values()]).catch(() => {})
   }
 
   /** Wire funnel-path ToDo extraction (ADR 0026). The service auto-creates a
@@ -191,6 +247,19 @@ export class ApplicationService {
     this.skipTokens = tokens
   }
 
+  /** Background JD enrichment fetcher (using web.fetch_jd tool) */
+  private jdFetcher?: (company: string, position: string, jobCode?: string) => Promise<string | null>
+  setJdFetcher(fn: (company: string, position: string, jobCode?: string) => Promise<string | null>): void {
+    this.jdFetcher = fn
+  }
+
+  async fetchJd(company: string, position: string, jobCode?: string): Promise<string | null> {
+    if (this.jdFetcher) {
+      return this.jdFetcher(company, position, jobCode)
+    }
+    return null
+  }
+
   /** List every application as a funnel view (application + computed state). */
   list(): ApplicationView[] {
     return this.store.listApplications().map((a) => this.toView(a))
@@ -203,6 +272,7 @@ export class ApplicationService {
       id: newId('app'),
       company: input.company,
       position: input.position,
+      jobCode: input.jobCode,
       source: input.source ?? 'manual',
       bossSecurityId: undefined,
       appliedAt: input.appliedAt ?? now,
@@ -214,13 +284,22 @@ export class ApplicationService {
       stage: input.stage,
       stageDeadline: input.stageDeadline,
       interviewLink: input.interviewLink,
+      prepStatus: input.prepStatus ?? 'none',
       priority: 'normal',
       createdAt: now,
       updatedAt: now
     }
     this.store.createApplication(app)
-    this.seedAppliedEvent(app.id, 'manual', undefined, app.appliedAt)
+    const eventSource: 'boss' | 'email' | 'manual' =
+      app.source === 'boss' ? 'boss' : app.source === 'email' ? 'email' : 'manual'
+    this.seedAppliedEvent(app.id, eventSource, undefined, app.appliedAt)
     return this.toView(app)
+  }
+
+  /** Get an application view by id. */
+  get(id: string): ApplicationView | undefined {
+    const app = this.store.getApplication(id)
+    return app ? this.toView(app) : undefined
   }
 
   /**
@@ -235,174 +314,7 @@ export class ApplicationService {
    * detected (source:'email', locked:false) with unique `sourceRef`s.
    */
   seedDemoData(): void {
-    const all = this.list()
-    // "Real" = a non-boss application with a real company+position (not an
-    // empty / literal-"null" junk row left over from prior testing). BOSS is
-    // retired and junk rows are obsolete, so when no real data exists the
-    // seed wipes everything active and seeds a fresh demo funnel.
-    const isReal = (v: ApplicationView): boolean => {
-      const a = v.application
-      if (a.source === 'boss') return false
-      const company = (a.company ?? '').trim().toLowerCase()
-      const position = (a.position ?? '').trim().toLowerCase()
-      return company !== '' && company !== 'null' && position !== '' && position !== 'null'
-    }
-    if (all.some(isReal)) return
-    // Wipe obsolete rows (events/resumes/preps cascade via purge).
-    for (const v of all) this.store.purgeApplication(v.application.id)
-
-    const day = 86_400_000
-    const ago = (n: number): string => new Date(Date.now() - n * day).toISOString()
-    const ahead = (n: number): string => new Date(Date.now() + n * day).toISOString()
-
-    type DemoEvent = { type: ApplicationEventType; round?: number; eventAt: string; evidence: string }
-    type DemoApp = {
-      company: string
-      city: string
-      salary: string
-      jd: string
-      stageDeadline?: string
-      events: DemoEvent[]
-    }
-    const demos: DemoApp[] = [
-      {
-        company: '智谱AI', city: '北京', salary: '35-55K', stageDeadline: ahead(1),
-        jd: '负责GLM大模型应用层产品规划，对接算法团队，驱动B端智能体落地。',
-        events: [
-          { type: 'applied', eventAt: ago(5), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(4), evidence: '邮件：测评邀请' },
-          { type: 'interview', round: 1, eventAt: ago(2), evidence: '邮件：一面安排' }
-        ]
-      },
-      {
-        company: '月之暗面', city: '北京', salary: '40-65K',
-        jd: '负责Kimi产品0-1规划，关注用户增长与留存，深入调研大模型使用场景。',
-        events: [
-          { type: 'applied', eventAt: ago(3), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(2), evidence: '邮件：测评邀请' }
-        ]
-      },
-      {
-        company: '阶跃星辰', city: '上海', salary: '32-50K',
-        jd: '负责多模态AI产品定义，主导需求评审与迭代节奏，协同研发交付。',
-        events: [
-          { type: 'applied', eventAt: ago(4), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(3), evidence: '邮件：测评邀请' },
-          { type: 'interview', round: 1, eventAt: ago(1), evidence: '邮件：一面安排' }
-        ]
-      },
-      {
-        company: '商汤科技', city: '上海', salary: '28-42K',
-        jd: '负责日日新大模型toB产品线，撰写PRD，跟踪交付质量与客户反馈。',
-        events: [
-          { type: 'applied', eventAt: ago(12), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(11), evidence: '邮件：测评邀请' },
-          { type: 'written_test', eventAt: ago(9), evidence: '邮件：笔试通知' },
-          { type: 'interview', round: 1, eventAt: ago(7), evidence: '邮件：一面安排' },
-          { type: 'rejected', eventAt: ago(1), evidence: '邮件：感谢信' }
-        ]
-      },
-      {
-        company: '旷视科技', city: '北京', salary: '30-48K',
-        jd: '负责AI视觉产品商业化，定义场景方案，推动POC与标杆客户落地。',
-        events: [
-          { type: 'applied', eventAt: ago(8), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(7), evidence: '邮件：测评邀请' },
-          { type: 'interview', round: 1, eventAt: ago(5), evidence: '邮件：一面安排' },
-          { type: 'offer', eventAt: ago(0), evidence: '邮件：录用通知' }
-        ]
-      },
-      {
-        company: '百川智能', city: '北京', salary: '33-52K',
-        jd: '负责百川大模型C端产品，设计对话与助手场景，迭代留存与付费转化。',
-        events: [
-          { type: 'applied', eventAt: ago(6), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(5), evidence: '邮件：测评邀请' },
-          { type: 'interview', round: 1, eventAt: ago(3), evidence: '邮件：一面安排' },
-          { type: 'interview', round: 2, eventAt: ago(1), evidence: '邮件：二面安排' }
-        ]
-      },
-      {
-        company: 'MiniMax', city: '上海', salary: '30-50K',
-        jd: '负责海螺AI产品规划，关注多模态内容生成场景，主导增长实验。',
-        events: [
-          { type: 'applied', eventAt: ago(2), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(1), evidence: '邮件：测评邀请' }
-        ]
-      },
-      {
-        company: '科大讯飞', city: '合肥', salary: '25-40K',
-        jd: '负责星火大模型教育/办公场景产品，撰写PRD，跟踪交付与数据指标。',
-        events: [
-          { type: 'applied', eventAt: ago(20), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(18), evidence: '邮件：测评邀请' }
-        ]
-      },
-      {
-        company: '小红书', city: '上海', salary: '30-50K',
-        jd: '负责AI搜索/推荐产品，主导内容理解与分发策略，驱动社区增长。',
-        events: [
-          { type: 'applied', eventAt: ago(16), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(15), evidence: '邮件：测评邀请' },
-          { type: 'written_test', eventAt: ago(13), evidence: '邮件：笔试通知' }
-        ]
-      },
-      {
-        company: '腾讯', city: '深圳', salary: '28-45K',
-        jd: '负责混元大模型应用产品，定义智能体与C端场景，跨团队协同交付。',
-        events: [
-          { type: 'applied', eventAt: ago(25), evidence: '邮件：投递成功' },
-          { type: 'assessment', eventAt: ago(24), evidence: '邮件：测评邀请' },
-          { type: 'interview', round: 1, eventAt: ago(20), evidence: '邮件：一面安排' },
-          { type: 'withdrawn', eventAt: ago(18), evidence: '邮件：主动放弃' }
-        ]
-      }
-    ]
-
-    for (const d of demos) {
-      const now = nowIso()
-      const app: Application = {
-        id: newId('app'),
-        company: d.company,
-        position: 'AI产品经理',
-        source: 'email',
-        bossSecurityId: undefined,
-        appliedAt: d.events[0].eventAt,
-        city: d.city,
-        salaryRange: d.salary,
-        jdText: d.jd,
-        stage: undefined,
-        stageDeadline: d.stageDeadline,
-        interviewLink: undefined,
-        priority: 'normal',
-        createdAt: now,
-        updatedAt: now
-      }
-      // `app.id` is assigned above; link the emailRefId back to it.
-      app.emailRefId = `demo:${app.id}`
-      this.store.createApplication(app)
-      for (const ev of d.events) {
-        this.store.createApplicationEvent({
-          id: newId('appevt'),
-          applicationId: app.id,
-          type: ev.type,
-          round: ev.round,
-          role: undefined,
-          subState: undefined,
-          source: 'email',
-          sourceRef: `email:demo:${app.id}:${ev.type}`,
-          evidence: ev.evidence,
-          locked: false,
-          eventAt: ev.eventAt,
-          createdAt: now
-        })
-      }
-    }
-    this.activityService.record({
-      type: 'tool_completed',
-      summary: `已载入 AI产品经理 演示数据（${demos.length} 条）`,
-      metadata: { demo: true, count: demos.length }
-    })
+    // Purged: No demo data is seeded.
   }
 
   /** Append a manual progress event. Manual events are locked by default. */
@@ -417,8 +329,8 @@ export class ApplicationService {
       round: input.round,
       role: input.role,
       subState: input.subState,
-      source: 'manual',
-      sourceRef: undefined,
+      source: input.source ?? 'manual',
+      sourceRef: input.sourceRef,
       evidence: input.evidence,
       locked: input.locked ?? true,
       eventAt: input.eventAt ?? now,
@@ -426,71 +338,6 @@ export class ApplicationService {
     }
     this.store.createApplicationEvent(event)
     return this.toView(app)
-  }
-
-  /**
-   * Pull `boss applied/interviews/chat` into the funnel. Idempotent by
-   * `bossSecurityId` (application) and `sourceRef` (event). A boss-cli failure
-   * (not installed / cookies expired / rate-limited) is logged as a
-   * `provider_unavailable` Activity and the call returns gracefully.
-   */
-  async syncFromBoss(): Promise<{ synced: number; message: string }> {
-    let applications: BossApplication[]
-    let interviews: BossInterview[]
-    let chats: BossChat[]
-    try {
-      ;[applications, interviews, chats] = await Promise.all([
-        this.bossProvider.listApplications(),
-        this.bossProvider.listInterviews(),
-        this.bossProvider.listChats()
-      ])
-    } catch (err) {
-      const message = err instanceof BossCliError ? err.message : err instanceof Error ? err.message : String(err)
-      this.activityService.record({
-        type: 'provider_unavailable',
-        summary: `BOSS 直聘同步失败：${message}`,
-        metadata: { provider: 'boss', error: message }
-      })
-      return { synced: 0, message: `BOSS 同步失败：${message}` }
-    }
-
-    let synced = 0
-    // 1. Upsert applications + seed an `applied` event each.
-    for (const b of applications) {
-      const app = this.upsertBossApplication(b)
-      this.seedAppliedEvent(app.id, 'boss', `boss:applied:${b.securityId}`, b.appliedAt ?? app.appliedAt)
-      synced++
-    }
-    // 2. Interviews → an `interview` event on the matching application.
-    for (const iv of interviews) {
-      const app = this.matchBossApplication(iv.securityId, iv.companyName, iv.jobName)
-      if (!app) continue
-      this.appendEvent(app.id, {
-        type: 'interview',
-        source: 'boss',
-        sourceRef: `boss:interview:${iv.interviewId}`,
-        eventAt: iv.interviewTime ?? nowIso(),
-        evidence: iv.status ? `BOSS 面试：${iv.status}` : 'BOSS 面试邀请'
-      })
-    }
-    // 3. Chats → a `communicated` event (the HR replied on BOSS).
-    for (const c of chats) {
-      const app = this.matchBossApplication(c.securityId, c.companyName, c.jobName)
-      if (!app) continue
-      this.appendEvent(app.id, {
-        type: 'communicated',
-        source: 'boss',
-        sourceRef: `boss:chat:${c.friendId}`,
-        eventAt: c.lastTime ?? nowIso(),
-        evidence: c.lastMessage ? `BOSS 沟通：${c.lastMessage}` : 'BOSS 沟通'
-      })
-    }
-    this.activityService.record({
-      type: 'tool_completed',
-      summary: `BOSS 同步完成：${synced} 条投递`,
-      metadata: { provider: 'boss', synced }
-    })
-    return { synced, message: `已同步 ${synced} 条 BOSS 投递` }
   }
 
   // ── Email→application inference (§3.3) ────────────────────────────────────
@@ -540,6 +387,9 @@ export class ApplicationService {
       }
       try {
         const emails = await p.listMessages(query)
+        if (emails.length > 0) {
+          console.log(`[email-sync] ${p.provider} listMessages query=${JSON.stringify(query)} returned ${emails.length} emails`)
+        }
         for (const e of emails) {
           byMessageId.set(e.messageId, e)
           // Advance the high-water-mark per provider type.
@@ -551,8 +401,22 @@ export class ApplicationService {
             if (Number.isFinite(ts) && ts > nextGmailInternalDate) nextGmailInternalDate = ts
           }
         }
+        if (p.provider === 'gmail' && typeof p.searchMessages === 'function' && !cursor.gmailLastInternalDate) {
+          try {
+            const searchTerms = '招聘 OR 校招 OR 求职 OR 投递 OR 面试 OR 笔试 OR 测评 OR 录用 OR offer OR "application received" OR "thank you for applying" OR "interview invitation"'
+            const found = await p.searchMessages(searchTerms, 30)
+            for (const e of found) {
+              if (!byMessageId.has(e.messageId)) {
+                byMessageId.set(e.messageId, e)
+              }
+            }
+          } catch {
+            // best-effort search query fallback
+          }
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
+        console.error(`[email-sync] ${p.provider} listMessages FAILED:`, message)
         this.activityService.record({
           type: 'provider_unavailable',
           summary: `邮件推断跳过 ${p.provider}：${message}`,
@@ -578,11 +442,12 @@ export class ApplicationService {
     // funnel never burns a classify pass on platform edm. 投递确认 / 面试通知 are
     // bulk but NOT ads → kept (they ARE the funnel's feed). The full delta is
     // still returned as `newEmails` for the briefing path to filter its own way.
-    // ADR 0027 — also drop school-wide broadcast spam ([student_ips]) here so it
-    // never reaches classify_application_email either.
-    const funnelEmails = [...byMessageId.values()].filter(
-      (e) => !shouldSkipFunnel(e) && !(this.skipTokens && isSchoolSpam(e, this.skipTokens))
-    )
+    const activeTokens = this.skipTokens && this.skipTokens.length > 0 ? this.skipTokens : DEFAULT_SKIP_TOKENS
+    const funnelEmails = [...byMessageId.values()].filter((e) => {
+      if (shouldSkipFunnel(e, activeTokens) || isSchoolSpam(e, activeTokens)) return false
+      const text = `${e.subject ?? ''} ${e.textBody ?? ''}`
+      return isRecruitingVip(e) || RECRUITING_KEYWORD_RE.test(text)
+    })
     if (funnelEmails.length === 0) {
       return {
         synced: 0,
@@ -628,15 +493,6 @@ export class ApplicationService {
     // confidence OR missing company/position → pending queue (no identity to
     // dedupe/create on, or the signal is too weak to trust as a real
     // application the user actually submitted). Untrusted → skip (§17).
-    //
-    // ADR 0027 fix — the old "aggressive: create even at low confidence"
-    // built fake 投递 from recruiting OUTREACH mail (a school announcing an
-    // open RA/PhD position, or a cold recruiter "we're hiring, apply here")
-    // that the LLM tagged low confidence: the candidate never applied, yet a
-    // 投递 row appeared. Low confidence now routes to the manual-confirm
-    // queue instead of auto-creating. Real application-progress events
-    // (applied-confirmation / interview / test invite / offer / rejection)
-    // return high/medium and still auto-create.
     const apps = this.store.listApplications()
     let synced = 0
     let created = 0
@@ -647,50 +503,275 @@ export class ApplicationService {
       const email = byMessageId.get(r.messageId)
       if (!email) continue
 
-      // ADR 0026 — auto-extract a ToDo when the funnel classify found a
-      // concrete next step + date (interview / written-test notice). No new
-      // LLM call: rides on the classify_application_email pass already running
-      // on funnelEmails. Idempotent by sourceId (`email:<messageId>`).
-      if (r.todoTitle && this.taskService) {
+      // 增量读取防重：若本邮件在数据库中已有对应的投递记录或事件，彻底跳过且清理可能残留的待确认
+      const alreadyHandled = apps.some((a) => {
+        if (a.emailRefId === r.messageId) return true
+        const evts = this.store.listApplicationEvents(a.id)
+        return evts.some((e) => e.sourceRef === `email:${r.messageId}`)
+      })
+      if (alreadyHandled) {
+        this.emailMatches.delete(r.messageId)
+        continue
+      }
+
+      // 1. Verification codes / tokens are NEVER application progress events (even from a hiring portal)
+      const isVerificationCode = /(验证码|verification code|动态验证码|校验码)/i.test(email.subject + ' ' + (email.textBody || ''))
+      if (isVerificationCode) {
+        this.emailMatches.delete(r.messageId)
+        continue
+      }
+
+      // 2. Explicit non-job / non-recruiting emails must NEVER enter the recruiting funnel or pending queue!
+      const emailFullText = (email.subject + ' ' + (email.textBody || '')).toLowerCase()
+      const isExplicitlyNonJob =
+        r.isJobRelated === false ||
+        /非求职|非招聘/i.test(r.evidence || '') ||
+        /(域名服务|ci 通知|instagram|fontawesome)/i.test(r.evidence || '') ||
+        /(run failed:|run succeeded:|workflow run|is active \(free plan\)|在动态中查看)/i.test(emailFullText)
+      if (isExplicitlyNonJob) {
+        this.emailMatches.delete(r.messageId)
+        continue
+      }
+
+      const isRecruiting =
+        isRecruitingVip(email) ||
+        /(招聘|校招|求职|投递|应聘|简历|application|interview|recruitment|job offer|assessment)/i.test(email.subject)
+
+      // Company fallback: extract from subject bracket e.g. 【途游游戏校招】, 【深信服科技】, [Shopee] or sender name
+      if (!r.company) {
+        const subjMatch = (email.subject || '').match(/[【「\[]([^】」\]]+)[】」\]]/)
+        if (subjMatch && subjMatch[1]) {
+          const raw = subjMatch[1].trim()
+          const cleaned = raw.replace(/(?:校招组|校招|校园招聘|社会招聘|招聘官网|招聘|HR团队|HR|人力|官方|Recruitment|Careers|Team)/gi, '').trim()
+          if (cleaned.length >= 2 && !/^(通知|提醒|温馨提示|重要|公告|验证码|Notice|Alert)$/i.test(cleaned)) {
+            r.company = cleaned
+          }
+        }
+        if (!r.company && email.from.name) {
+          const fromCleaned = email.from.name.replace(/(?:校招组|校招|校园招聘|社会招聘|招聘官网|招聘|HR团队|HR|人力|官方|Recruitment|Careers|Team)/gi, '').trim()
+          if (fromCleaned.length >= 2 && !/^(通知|提醒|温馨提示|重要|公告|验证码|No[- ]?reply)$/i.test(fromCleaned)) {
+            r.company = fromCleaned
+          }
+        }
+      }
+
+      // ATS fallback: if position is empty, attempt regex extraction from email body/subject
+      if (!r.position) {
+        const extracted = extractPositionFromText(email.subject + '\n' + (email.textBody || ''))
+        if (extracted) {
+          r.position = extracted
+        }
+      }
+
+      // ATS fallback: if jobCode is empty, attempt regex extraction from email body/subject
+      if (!r.jobCode) {
+        const extractedCode = extractJobCodeFromText(email.subject + '\n' + (email.textBody || ''))
+        if (extractedCode) {
+          r.jobCode = extractedCode
+        }
+      }
+
+      if (isRecruiting && r.confidence === 'low') {
+        r.confidence = 'medium'
+      }
+
+      // ADR 0026 — Job 待办事项同步提取：当邮件属于面试、笔试、在线测评或包含行动项时，同步生成/更新 Job 待办
+      const isActionableJobEvent =
+        Boolean(r.todoTitle) ||
+        r.eventType === 'interview' ||
+        r.eventType === 'written_test' ||
+        r.eventType === 'assessment'
+
+      if (isActionableJobEvent && this.taskService && !r.isCancelled) {
+        const eventLabel =
+          r.eventType === 'interview'
+            ? '面试'
+            : r.eventType === 'written_test'
+              ? '笔试'
+              : r.eventType === 'assessment'
+                ? '在线测评'
+                : '求职跟进'
+        const defaultTitle = `${r.company || '公司'} ${eventLabel}${r.position ? ` · ${r.position}` : ''}`
+        const taskTitle = r.todoTitle || defaultTitle
+
         const task = this.taskService.create({
-          title: r.todoTitle,
-          description: r.evidence || undefined,
-          priority: r.eventType === 'interview' || r.eventType === 'written_test' ? 'urgent' : 'high',
+          title: taskTitle,
+          description: [r.evidence, r.meetingInfo].filter(Boolean).join('\n') || undefined,
+          priority:
+            r.eventType === 'interview' || r.eventType === 'written_test' || r.eventType === 'assessment'
+              ? 'urgent'
+              : 'high',
           dueAt: r.dueDate,
           sourceType: 'email',
           sourceId: `email:${r.messageId}`,
           sourceProvider: email.provider,
-          // ADR 0027 — funnel ToDos are always job domain; link back to the
-          // source mail (Gmail only; 163 has no web deep link).
           category: r.category ?? 'job',
           sourceLink: email.sourceUrl
         })
         if (task.updatedAt === task.createdAt) tasksCreated++
       }
 
-      // ADR 0027 fix — low-confidence results are NOT applications the user
-      // actually submitted (recruiting outreach / job ads / solicitations the
-      // prompt is instructed to tag low). Route to the manual-confirm queue
-      // instead of auto-creating a fake 投递 row. Only high/medium confidence
-      // (real progress events) auto-create below.
-      if (r.confidence === 'low' || !r.company || !r.position) {
-        this.pushPending(r, email, undefined)
-        pending++
-        continue
+      // ── Job Code Matching (highest-confidence deterministic requisition matching) ──
+      const codeMatch = r.jobCode
+        ? apps.find((a) => a.jobCode && a.jobCode.trim().toLowerCase() === r.jobCode!.trim().toLowerCase())
+        : undefined
+
+      const companyApps = this.findApplicationsByCompany(apps, r.company || codeMatch?.company || '')
+
+      // ── Find matching application among existing applications ──
+      let match = codeMatch
+      if (!match && r.company && r.position) {
+        match = this.findApplicationByNormalized(apps, r.company, r.position)
       }
-      const match = this.findApplicationByNormalized(apps, r.company, r.position)
+      if (!match && companyApps.length === 1) {
+        const singleApp = companyApps[0]
+        const singlePosNorm = normalizePosition(singleApp.position)
+        const emailPosNorm = r.position ? normalizePosition(r.position) : ''
+        const isSubsequentRound =
+          Boolean(r.round && /(?:2|3|4|5|二|三|四|五|终|复试|总监|hr|综合|加面)/i.test(r.round)) ||
+          /(?:二面|三面|四面|终面|复试|终审|2nd round|final round|hr面)/i.test(email.subject + ' ' + (r.evidence || '')) ||
+          Boolean(r.isReschedule || r.isCancelled)
+
+        // 确定性归并硬逻辑：
+        // 1) 岗位名称规范化一致 -> 归并到已有记录
+        // 2) 已有记录为'未知岗位' -> 归并并补齐岗位名称
+        // 3) 显式后续面试轮次 (二面/三面/终面/复试/HR面/改期/取消) -> 归并到已有记录
+        if (
+          (r.position && singlePosNorm === emailPosNorm) ||
+          singleApp.position === '未知岗位' ||
+          isSubsequentRound
+        ) {
+          match = singleApp
+        }
+      }
+
+      // If no existing match, evaluate if it can auto-create or must escalate to human
+      if (!match) {
+        // 1. 公司主体缺失 -> 无法确定归属或新建 -> 进入待人工确认队列
+        if (!r.company) {
+          this.pushPending(r, email, undefined, companyApps)
+          pending++
+          continue
+        }
+
+        // 2. 缺失岗位信息 -> 信息不全，生成待确认候选记录，由人工决定归并已有记录或新建
+        if (!r.position) {
+          this.pushPending(r, email, companyApps.length === 1 ? companyApps[0].id : undefined, companyApps)
+          pending++
+          continue
+        }
+
+        // 3. 低置信度非招聘推广邮件
+        if (r.confidence === 'low' && !isRecruiting) {
+          this.pushPending(r, email, companyApps.length === 1 ? companyApps[0].id : undefined, companyApps)
+          pending++
+          continue
+        }
+      }
+
+      // ── Scenario 12: 会前提醒防重 (1-hour before meeting reminder) ──
+      if (/(会议即将开始|会议提醒|日程提醒|即将开始|reminder)/i.test(email.subject)) {
+        const candidateApp = match || (companyApps.length > 0 ? companyApps[0] : undefined)
+        if (candidateApp) {
+          const events = this.store.listApplicationEvents(candidateApp.id)
+          const hasRecentInterview = events.some(
+            (e) =>
+              e.type === 'interview' &&
+              Math.abs(new Date(e.eventAt).getTime() - new Date(email.receivedAt).getTime()) < 24 * 3600 * 1000
+          )
+          if (hasRecentInterview) {
+            continue
+          }
+        }
+      }
+
+      // ── Scenario 09: 面试改期 (Reschedule) ──
+      if (r.isReschedule || /(改期|时间调整|重新安排|reschedule)/i.test(email.subject + ' ' + (r.evidence || ''))) {
+        if (match) {
+          const events = this.store.listApplicationEvents(match.id)
+          const latestInterview = [...events].reverse().find((e) => e.type === 'interview')
+          if (latestInterview) {
+            this.store.deleteApplicationEvent(latestInterview.id)
+            this.store.createApplicationEvent({
+              ...latestInterview,
+              eventAt: r.dueDate || email.receivedAt,
+              evidence: `【改期】${r.evidence || email.subject}`
+            })
+            if (r.dueDate) {
+              this.store.updateApplication(match.id, { stageDeadline: r.dueDate })
+            }
+            synced++
+            continue
+          }
+        }
+      }
+
+      // ── Scenario 10: 面试取消 (Cancelled) ──
+      if (r.isCancelled || /(取消面试|面试取消|行程取消)/i.test(email.subject + ' ' + (r.evidence || ''))) {
+        if (match) {
+          this.store.createApplicationEvent({
+            id: newId('appevt'),
+            applicationId: match.id,
+            type: 'communicated',
+            source: 'email',
+            sourceRef: `email:${r.messageId}`,
+            evidence: `【已取消】${r.evidence || email.subject}`,
+            locked: true,
+            eventAt: email.receivedAt,
+            createdAt: nowIso()
+          })
+          synced++
+          continue
+        }
+      }
       let appId: string
       if (match) {
         appId = match.id
+
+        // Backfill jobCode if existing application lacked it
+        if (!match.jobCode && r.jobCode) {
+          match.jobCode = r.jobCode
+          this.store.updateApplication(match.id, { jobCode: r.jobCode })
+        }
+        // Backfill position if existing application was '未知岗位'
+        if ((!match.position || match.position === '未知岗位') && r.position && r.position !== '未知岗位') {
+          match.position = r.position
+          this.store.updateApplication(match.id, { position: r.position })
+        }
+
+        // Auto-enrich JD if existing application lacked it
+        if (!match.jdText && this.jdFetcher && (match.company || r.company)) {
+          const c = match.company || r.company!
+          const p = match.position || r.position || ''
+          const jc = match.jobCode || r.jobCode
+          void this.jdFetcher(c, p, jc).then((text) => {
+            if (text) this.updateJdText(match.id, text)
+          }).catch(() => {})
+        }
+
+        // ── Scenario 08: 模糊轮次面试自动递进 ──
+        if (r.eventType === 'interview') {
+          const existingEvents = this.store.listApplicationEvents(match.id)
+          const interviewCount = existingEvents.filter((e) => e.type === 'interview').length
+          if (interviewCount > 0 && !r.round) {
+            r.round = `${interviewCount + 1}面`
+          }
+        }
       } else {
         // high/medium confidence + company + position → create application.
+        const isSuspendedJd = r.eventType === 'interview' && !r.jdExcerpt
         const view = this.create({
-          company: r.company,
-          position: r.position,
+          company: r.company || '未知公司',
+          position: r.position || '未知岗位',
+          jobCode: r.jobCode,
           source: 'email',
+          appliedAt: email.receivedAt,
           city: r.city,
           salaryRange: r.salary,
-          jdText: r.jdExcerpt
+          jdText: r.jdExcerpt,
+          stageDeadline: r.dueDate,
+          interviewLink: r.meetingInfo,
+          prepStatus: isSuspendedJd ? 'suspended_missing_jd' : 'none'
         })
         // Link the new application to this email so future mail in the thread
         // matches directly (mirrors confirmEmailMatch's direct-link seeding).
@@ -699,8 +780,16 @@ export class ApplicationService {
         appId = view.application.id
         created++
         apps.push(view.application)
+
+        // Auto-enrich JD if new application lacks it
+        if (!view.application.jdText && this.jdFetcher && r.company) {
+          void this.jdFetcher(r.company, r.position || '', r.jobCode).then((text) => {
+            if (text) this.updateJdText(view.application.id, text)
+          }).catch(() => {})
+        }
       }
       if (this.appendEmailEvent(appId, r, email)) synced++
+      this.emailMatches.delete(r.messageId)
     }
     this.broadcastEmailMatches()
     if (tasksCreated > 0) this.onTasksChanged?.()
@@ -744,6 +833,13 @@ export class ApplicationService {
     )
   }
 
+  /** Find all applications for a given company (used for multi-job disambiguation). */
+  private findApplicationsByCompany(apps: Application[], company: string): Application[] {
+    const nc = normalizeCompany(company)
+    if (!nc) return []
+    return apps.filter((a) => normalizeCompany(a.company) === nc)
+  }
+
   /**
    * @deprecated Replaced by `findApplicationByNormalized` (mail-driven funnel
    * rebuild). The normalized compare + fuzzy fallback there subsumes the old
@@ -759,6 +855,14 @@ export class ApplicationService {
     r: ApplicationEmailResult,
     email: NormalizedEmail
   ): boolean {
+    // Verification codes and explicit non-job emails must NEVER be appended as application progress events
+    if (
+      r.isJobRelated === false ||
+      /非求职|非招聘/i.test(r.evidence || '') ||
+      /(验证码|verification code|动态验证码|校验码)/i.test(email.subject + ' ' + (email.textBody || ''))
+    ) {
+      return false
+    }
     const sourceRef = `email:${r.messageId}`
     const existing = this.store.getApplicationEventBySourceRef(applicationId, sourceRef)
     if (existing) return false
@@ -768,7 +872,7 @@ export class ApplicationService {
       type: r.eventType,
       source: 'email',
       sourceRef,
-      evidence: r.evidence || email.subject,
+      evidence: [r.evidence || email.subject, r.meetingInfo].filter(Boolean).join(' ｜ '),
       locked: false, // §17 risk #3: auto events never override a locked anchor
       eventAt: email.receivedAt,
       createdAt: nowIso()
@@ -782,6 +886,8 @@ export class ApplicationService {
       if (!app.jdText && r.jdExcerpt) patch.jdText = r.jdExcerpt
       if (!app.city && r.city) patch.city = r.city
       if (!app.salaryRange && r.salary) patch.salaryRange = r.salary
+      if (!app.interviewLink && r.meetingInfo) patch.interviewLink = r.meetingInfo
+      if (!app.stageDeadline && r.dueDate) patch.stageDeadline = r.dueDate
       if (Object.keys(patch).length > 0) this.store.updateApplication(applicationId, patch)
     }
     return true
@@ -791,7 +897,8 @@ export class ApplicationService {
   private pushPending(
     r: ApplicationEmailResult,
     email: NormalizedEmail,
-    applicationId?: string
+    applicationId?: string,
+    candidateApps?: Application[]
   ): void {
     // Idempotent: an existing proposal for this messageId is overwritten (refresh).
     const existing = this.store.getApplication(applicationId ?? '')
@@ -803,16 +910,60 @@ export class ApplicationService {
       eventType: r.eventType,
       company: r.company,
       position: r.position,
+      jobCode: r.jobCode,
       confidence: r.confidence,
       applicationId,
       applicationCompany: existing?.company,
       applicationPosition: existing?.position,
+      applicationJobCode: existing?.jobCode,
+      candidateApplications: candidateApps?.map((a) => ({
+        id: a.id,
+        company: a.company,
+        position: a.position,
+        jobCode: a.jobCode
+      })),
+      meetingInfo: r.meetingInfo,
+      isReschedule: r.isReschedule,
+      isCancelled: r.isCancelled,
       evidence: r.evidence
     })
   }
 
   /** The current pending-queue proposals (renderer sub-section, §3.3). */
   listPendingEmailMatches(): EmailMatchProposal[] {
+    const apps = this.store.listApplications()
+    // Purge non-job items or already-handled / uniquely-matched items on the fly
+    for (const [id, p] of this.emailMatches.entries()) {
+      if (
+        /非求职|非招聘/i.test(p.evidence || '') ||
+        /(域名服务|ci 通知|instagram|fontawesome|验证码)/i.test(p.evidence || '') ||
+        /(run failed|is active \(free plan\)|在动态中查看)/i.test(p.subject.toLowerCase()) ||
+        /(cloudflare|github|instagram|fontawesome)/i.test(p.from?.toLowerCase() || '')
+      ) {
+        this.emailMatches.delete(id)
+        continue
+      }
+      // If already recorded in applications or events, remove from pending
+      const handled = apps.some((a) => {
+        if (a.emailRefId === id) return true
+        const evts = this.store.listApplicationEvents(a.id)
+        return evts.some((e) => e.sourceRef === `email:${id}`)
+      })
+      if (handled) {
+        this.emailMatches.delete(id)
+        continue
+      }
+      // If uniquely matched by jobCode in existing applications, remove from pending
+      if (p.jobCode) {
+        const codeMatch = apps.find(
+          (a) => a.jobCode && a.jobCode.trim().toLowerCase() === p.jobCode!.trim().toLowerCase()
+        )
+        if (codeMatch) {
+          this.emailMatches.delete(id)
+          continue
+        }
+      }
+    }
     return [...this.emailMatches.values()]
   }
 
@@ -821,27 +972,54 @@ export class ApplicationService {
    * or to a freshly-created application (with `emailRefId` set so future mail in
    * the thread links directly). Removes the proposal from the queue.
    */
-  confirmEmailMatch(messageId: string, applicationId?: string): void {
+  confirmEmailMatch(
+    messageId: string,
+    applicationId?: string,
+    options?: { company?: string; position?: string; eventType?: ApplicationEventType; jobCode?: string }
+  ): void {
     const proposal = this.emailMatches.get(messageId)
     if (!proposal) return
     let appId = applicationId
+    const jobCodeToSet = options?.jobCode?.trim() || proposal.jobCode
     if (!appId) {
+      const company = options?.company?.trim() || proposal.company || '未知公司'
+      const position = options?.position?.trim() || proposal.position || '未知岗位'
       const created = this.create({
-        company: proposal.company ?? '未知公司',
-        position: proposal.position ?? '未知岗位',
+        company,
+        position,
+        jobCode: jobCodeToSet,
         source: 'email'
       })
       appId = created.application.id
       // Link the new application to this email so future mail matches directly.
       this.store.updateApplication(appId, { emailRefId: messageId })
+    } else {
+      // If merging into an existing application, check if its position was '未知岗位' or if jobCode can be updated
+      const app = this.store.getApplication(appId)
+      if (app) {
+        const patch: Partial<Application> = {}
+        if (!app.position || app.position === '未知岗位') {
+          const newPos = options?.position?.trim() || proposal.position
+          if (newPos && newPos !== '未知岗位') {
+            patch.position = newPos
+          }
+        }
+        if (!app.jobCode && jobCodeToSet) {
+          patch.jobCode = jobCodeToSet
+        }
+        if (Object.keys(patch).length > 0) {
+          this.store.updateApplication(appId, patch)
+        }
+      }
     }
+    const eventType = options?.eventType || proposal.eventType
     const sourceRef = `email:${messageId}`
     const existing = this.store.getApplicationEventBySourceRef(appId, sourceRef)
     if (!existing) {
       this.store.createApplicationEvent({
         id: newId('appevt'),
         applicationId: appId,
-        type: proposal.eventType,
+        type: eventType,
         source: 'email',
         sourceRef,
         evidence: proposal.evidence ?? proposal.subject,
@@ -850,7 +1028,68 @@ export class ApplicationService {
         createdAt: nowIso()
       })
     }
+
+    // Synchronously ensure Job ToDo exists/updates with the user-confirmed details
+    if (this.taskService) {
+      const targetApp = this.store.getApplication(appId)
+      const comp = options?.company?.trim() || targetApp?.company || proposal.company || '公司'
+      const pos = options?.position?.trim() || targetApp?.position || proposal.position
+      const finalEventType = options?.eventType || proposal.eventType
+      if (
+        finalEventType === 'interview' ||
+        finalEventType === 'written_test' ||
+        finalEventType === 'assessment'
+      ) {
+        const eventLabel =
+          finalEventType === 'interview'
+            ? '面试'
+            : finalEventType === 'written_test'
+              ? '笔试'
+              : '在线测评'
+        const expectedTitle = `${comp} ${eventLabel}${pos && pos !== '未知岗位' ? ` · ${pos}` : ''}`
+        const existingTask = this.store.getTaskBySource('email', sourceRef)
+        if (existingTask) {
+          this.store.updateTask(existingTask.id, {
+            title: expectedTitle,
+            description: [proposal.evidence, proposal.meetingInfo].filter(Boolean).join('\n') || existingTask.description
+          })
+        } else {
+          this.taskService.create({
+            title: expectedTitle,
+            description: [proposal.evidence, proposal.meetingInfo].filter(Boolean).join('\n') || undefined,
+            priority: 'urgent',
+            dueAt: targetApp?.stageDeadline,
+            sourceType: 'email',
+            sourceId: sourceRef,
+            category: 'job'
+          })
+        }
+        this.onTasksChanged?.()
+      }
+    }
+
     this.emailMatches.delete(messageId)
+    this.broadcastEmailMatches()
+  }
+
+  /** Clear all non-job proposals from the pending queue. */
+  cleanupPendingEmailMatches(): void {
+    for (const [id, p] of this.emailMatches.entries()) {
+      if (
+        /非求职|非招聘/i.test(p.evidence || '') ||
+        /(域名服务|ci 通知|instagram|fontawesome|验证码)/i.test(p.evidence || '') ||
+        /(run failed|is active \(free plan\)|在动态中查看)/i.test(p.subject.toLowerCase()) ||
+        /(cloudflare|github|instagram|fontawesome)/i.test(p.from?.toLowerCase() || '')
+      ) {
+        this.emailMatches.delete(id)
+      }
+    }
+    this.broadcastEmailMatches()
+  }
+
+  /** Clear all proposals from the pending queue. */
+  clearAllPendingEmailMatches(): void {
+    this.emailMatches.clear()
     this.broadcastEmailMatches()
   }
 
@@ -860,53 +1099,148 @@ export class ApplicationService {
     this.broadcastEmailMatches()
   }
 
+  /**
+   * Undo a previous email event match: removes the event from the application
+   * timeline and restores it to the pending proposals queue so the user can
+   * re-assign or split it (HITL safety lock).
+   */
+  undoEmailEvent(applicationId: string, eventId: string): boolean {
+    const app = this.store.getApplication(applicationId)
+    if (!app) return false
+    const events = this.store.listApplicationEvents(applicationId)
+    const target = events.find((e) => e.id === eventId)
+    if (!target) return false
+
+    this.store.deleteApplicationEvent(eventId)
+
+    if (target.sourceRef?.startsWith('email:')) {
+      const messageId = target.sourceRef.replace(/^email:/, '').replace(/:seed_applied$/, '')
+      this.emailMatches.set(messageId, {
+        id: newId('ematch'),
+        messageId,
+        subject: target.evidence || '已撤回事件 — 请重新确认归并',
+        eventType: target.type,
+        company: app.company,
+        position: app.position,
+        confidence: 'medium',
+        evidence: target.evidence
+      })
+    }
+
+    this.broadcastEmailMatches()
+    this.broadcastApplications()
+    return true
+  }
+
+  /**
+   * Rebind an event from one application to another (e.g. user corrected a multi-job merge).
+   */
+  rebindEmailEvent(fromAppId: string, eventId: string, toAppId: string): boolean {
+    const fromApp = this.store.getApplication(fromAppId)
+    const toApp = this.store.getApplication(toAppId)
+    if (!fromApp || !toApp) return false
+
+    const events = this.store.listApplicationEvents(fromAppId)
+    const target = events.find((e) => e.id === eventId)
+    if (!target) return false
+
+    this.store.deleteApplicationEvent(eventId)
+    this.store.createApplicationEvent({
+      ...target,
+      id: newId('appevt'),
+      applicationId: toAppId,
+      createdAt: nowIso()
+    })
+
+    this.broadcastApplications()
+    return true
+  }
+
+  /**
+   * Delete a specific application event and recompute status.
+   */
+  deleteEvent(applicationId: string, eventId: string): ApplicationView {
+    const app = this.store.getApplication(applicationId)
+    if (!app) throw new Error(`未找到投递记录：${applicationId}`)
+    this.store.deleteApplicationEvent(eventId)
+    this.broadcastApplications()
+    return this.toView(app)
+  }
+
+  /**
+   * Manually update the current status/stage of an application.
+   * Creates a locked manual event to pin the application status.
+   */
+  updateStatus(
+    applicationId: string,
+    status: ApplicationEventType,
+    options?: { round?: number; evidence?: string; eventAt?: string }
+  ): ApplicationView {
+    const app = this.store.getApplication(applicationId)
+    if (!app) throw new Error(`未找到投递记录：${applicationId}`)
+    const now = nowIso()
+    let defaultEvidence = options?.evidence
+    if (!defaultEvidence) {
+      if (status === 'rejected') defaultEvidence = '收到感谢信'
+      else if (status === 'offer') defaultEvidence = '获得录用'
+      else if (status === 'interview') defaultEvidence = options?.round ? `${options.round}面` : '面试'
+      else if (status === 'written_test') defaultEvidence = '专业笔试'
+      else if (status === 'assessment') defaultEvidence = '在线测评'
+      else if (status === 'applied') defaultEvidence = '简历投递'
+      else if (status === 'withdrawn') defaultEvidence = '已放弃/撤回'
+      else defaultEvidence = '手动修改状态'
+    }
+
+    this.store.createApplicationEvent({
+      id: newId('appevt'),
+      applicationId,
+      type: status,
+      round: options?.round,
+      source: 'manual',
+      evidence: defaultEvidence,
+      locked: true,
+      eventAt: options?.eventAt || now,
+      createdAt: now
+    })
+
+    const stageMap: Record<ApplicationEventType, string> = {
+      applied: '已投递',
+      communicated: '已沟通',
+      assessment: '在线测评',
+      written_test: '专业笔试',
+      interview: options?.round ? `${options.round}面` : '面试',
+      offer: '已录用',
+      rejected: '流程结束',
+      withdrawn: '已撤回'
+    }
+    this.store.updateApplication(applicationId, { stage: stageMap[status] })
+
+    this.broadcastApplications()
+    return this.toView(app)
+  }
+
+  /**
+   * Update JD text on an application. If prepStatus was suspended due to missing JD,
+   * it is automatically promoted to 'ready' to unlock interview prep generation.
+   */
+  updateJdText(applicationId: string, jdText: string): Application | undefined {
+    const app = this.store.getApplication(applicationId)
+    if (!app) return undefined
+    const patch: ApplicationUpdateFields = {
+      jdText,
+      prepStatus: app.prepStatus === 'suspended_missing_jd' ? 'ready' : app.prepStatus
+    }
+    const updated = this.store.updateApplication(applicationId, patch)
+    this.broadcastApplications()
+    return updated ?? undefined
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
-  private upsertBossApplication(b: BossApplication): Application {
-    const existing = b.securityId ? this.store.getApplicationByBossSecurityId(b.securityId) : undefined
-    const now = nowIso()
-    if (existing) {
-      const updated = this.store.updateApplication(existing.id, {
-        company: b.companyName,
-        position: b.jobName,
-        appliedAt: b.appliedAt ?? existing.appliedAt
-      })
-      return updated ?? existing
-    }
-    const app: Application = {
-      id: newId('app'),
-      company: b.companyName,
-      position: b.jobName,
-      source: 'boss',
-      bossSecurityId: b.securityId,
-      appliedAt: b.appliedAt ?? now,
-      createdAt: now,
-      updatedAt: now
-    }
-    this.store.createApplication(app)
-    return app
-  }
-
-  /** Match a boss interview/chat back to an application (by securityId, else
-   * company+position). Chat fixtures may omit company/position names, in which
-   * case only the securityId path can match. */
-  private matchBossApplication(
-    securityId: string | undefined,
-    company: string | undefined,
-    position: string | undefined
-  ): Application | undefined {
-    if (securityId) {
-      const bySid = this.store.getApplicationByBossSecurityId(securityId)
-      if (bySid) return bySid
-    }
-    if (!company || !position) return undefined
-    return this.store.listApplications().find((a) => a.company === company && a.position === position)
-  }
-
-  /** Seed an `applied` event — idempotent by sourceRef (boss sync) / always for manual. */
+  /** Seed an `applied` event — idempotent by sourceRef / always for manual. */
   private seedAppliedEvent(
     applicationId: string,
-    source: 'boss' | 'manual',
+    source: 'boss' | 'email' | 'manual',
     sourceRef: string | undefined,
     eventAt: string
   ): void {
@@ -922,26 +1256,6 @@ export class ApplicationService {
       sourceRef,
       locked: source === 'manual',
       eventAt,
-      createdAt: nowIso()
-    })
-  }
-
-  /** Append a boss-detected event — idempotent by sourceRef. */
-  private appendEvent(
-    applicationId: string,
-    spec: { type: ApplicationEventType; source: 'boss'; sourceRef: string; eventAt: string; evidence: string }
-  ): void {
-    const existing = this.store.getApplicationEventBySourceRef(applicationId, spec.sourceRef)
-    if (existing) return
-    this.store.createApplicationEvent({
-      id: newId('appevt'),
-      applicationId,
-      type: spec.type,
-      source: spec.source,
-      sourceRef: spec.sourceRef,
-      evidence: spec.evidence,
-      locked: false,
-      eventAt: spec.eventAt,
       createdAt: nowIso()
     })
   }
@@ -1280,29 +1594,7 @@ export class ApplicationService {
   // JD via `frameJd` (untrusted, user message only, §17) and the base resume
   // via `frameTrustedDoc` (trusted — the user's own document).
 
-  /**
-   * Generate (or regenerate) an AI resume for an application, save it as a new
-   * version, and return it. `baseResume` is the user's own document content
-   * (read by the caller from `settings.readBaseResumeContent()`). `promptHash`
-   * = SHA-256 of (baseResume + jdText) so a re-request with unchanged inputs is
-   * a cache hit (skip the LLM) in a later iteration.
-   */
-  async generateResume(
-    applicationId: string,
-    agentRuntime: AgentRuntime,
-    baseResume?: string
-  ): Promise<ResumeVersion> {
-    const app = this.store.getApplication(applicationId)
-    if (!app) throw new Error(`未找到投递记录：${applicationId}`)
-    const output = (await agentRuntime.runAgentStep('generate_resume', {
-      company: app.company,
-      position: app.position,
-      jdText: app.jdText,
-      baseResume
-    })) as ResumeOutput
-    const promptHash = sha256((baseResume ?? '') + '\n---\n' + (app.jdText ?? ''))
-    return this.saveResume(applicationId, output.html, undefined, promptHash)
-  }
+
 
   /**
    * Regenerate an interview transcript (prep material) for an application on
@@ -1314,15 +1606,36 @@ export class ApplicationService {
   async generatePrepMaterial(applicationId: string, agentRuntime: AgentRuntime): Promise<PrepMaterial> {
     const app = this.store.getApplication(applicationId)
     if (!app) throw new Error(`未找到投递记录：${applicationId}`)
+
+    // Anti-hallucination guard: if JD is missing, suspend generation and guide completion!
+    if (!app.jdText || app.jdText.trim().length === 0) {
+      this.store.updateApplication(applicationId, { prepStatus: 'suspended_missing_jd' })
+      this.broadcastApplications()
+      throw new Error(`当前投递记录（${app.company} · ${app.position}）缺失岗位 JD，已暂缓深度备战资料生成。请先补充 JD（手动粘贴或联网搜索）后再生成。`)
+    }
+
     const notes = this.listInterviewNotes(app.company)
     const resume = this.getLatestResume(applicationId)
+    let resumeText = resume?.html
+    if (resumeText && (resumeText.startsWith('data:application/pdf;base64,') || resumeText.startsWith('JVBERi0'))) {
+      try {
+        const base64 = resumeText.startsWith('data:') ? resumeText.split(',')[1] : resumeText
+        const buf = Buffer.from(base64, 'base64')
+        const extracted = await extractTextFromPdf(buf)
+        if (extracted) resumeText = extracted
+      } catch {
+        // keep fallback
+      }
+    }
     const output = (await agentRuntime.runAgentStep('generate_interview_transcript', {
       company: app.company,
       position: app.position,
       jdText: app.jdText,
-      resume: resume?.html,
+      resume: resumeText,
       notes
     })) as InterviewTranscriptOutput
+    this.store.updateApplication(applicationId, { prepStatus: 'ready' })
+    this.broadcastApplications()
     return this.savePrepMaterial(applicationId, output.html, undefined, undefined)
   }
 
@@ -1470,251 +1783,8 @@ export class ApplicationService {
     return output
   }
 
-  /**
-   * Search one bucket (实习 / 秋招正职) across all configured cities for a single
-   * page, sequentially (NOT concurrent — BOSS anti-bot trips on parallel CLI
-   * probes; verified empirically during real-cli integration). Bucket is a
-   * deterministic business rule (§12): 实习桶 filters `--job-type 实习`;
-   * 秋招正职桶 filters `--job-type 全职 --exp 在校/应届` (校招生 truth). The agent
-   * (`score_job_matches`) stays bucket-unaware — the service splits results back
-   * into buckets by securityId after the single scoring call. §17: job field
-   * values are short structured strings framed as DATA in the user message.
-   *
-   * Rate-limit tolerance: a `BossCliError` with code `not_authenticated`/
-   * `rate_limited` (anti-bot trip / cookie staleness) stops the bucket but keeps
-   * already-fetched partial results + surfaces an `error` string (mirror email
-   * provider outage graceful degradation). Other errors propagate.
-   */
-  private async searchOneBucket(
-    bucket: JobBucket,
-    intent: JobIntent,
-    cities: string[],
-    page: number
-  ): Promise<{ jobs: BossJob[]; hasMore: boolean; error?: string }> {
-    const jobs: BossJob[] = []
-    let hasMore = false
-    let error: string | undefined
-    for (const city of cities) {
-      try {
-        const query: BossSearchQuery = {
-          keyword: intent.keyword,
-          city,
-          degree: intent.degree,
-          page,
-          jobType: bucket === 'intern' ? '实习' : '全职',
-          experience: bucket === 'campus' ? '在校/应届' : undefined
-        }
-        const res = await this.bossProvider.searchJobsPaged(query)
-        for (const j of res.jobs) {
-          if (!jobs.some((x) => x.securityId === j.securityId)) jobs.push(j)
-        }
-        hasMore = hasMore || res.hasMore
-      } catch (err) {
-        const code = err instanceof BossCliError ? err.code : undefined
-        const message =
-          err instanceof BossCliError
-            ? err.message
-            : err instanceof Error
-            ? err.message
-            : String(err)
-        if (code === 'not_authenticated' || code === 'rate_limited') {
-          error = message
-          this.activityService.record({
-            type: 'provider_unavailable',
-            summary: `BOSS ${
-              bucket === 'intern' ? '实习' : '秋招正职'
-            }抓取受限：${message}`,
-            metadata: { provider: 'boss', bucket, error: message }
-          })
-          break // stop more cities for this bucket; keep partial.
-        }
-        throw err // unexpected → propagate to the caller.
-      }
-    }
-    return { jobs, hasMore, error }
-  }
 
-  /**
-   * Fetch + score job recommendations across two buckets (实习 / 秋招正职) —
-   * manual "抓取" button, NOT via the Routine Engine (mirrors
-   * `generateFunnelReview`). 校招生 dual-applies: 实习桶 + 秋招正职桶 each
-   * filtered appropriately (job-type / experience). Caches raw jobs by
-   * securityId so `convertJobToApplication` can find them.
-   *
-   * - refresh (no opts or `append:false`): reset state, fetch page 1 of both
-   *   buckets, score the combined set once (agent bucket-unaware), split results
-   *   back into buckets by securityId.
-   * - append (`{bucket, append:true}`): fetch that bucket's next page, score only
-   *   the new jobs, merge into the bucket's cached results.
-   *
-   * Boss-cli outage → `error` field set, partial results still returned.
-   */
-  async fetchJobRecommendations(
-    agentRuntime: AgentRuntime,
-    jobIntent: JobIntent,
-    opts: FetchJobRecommendationsOpts = {}
-  ): Promise<JobRecommendations> {
-    const bucket =
-      opts.bucket === 'intern' || opts.bucket === 'campus' ? opts.bucket : null
-    const append = opts.append === true && bucket !== null
 
-    if (append) {
-      // append: no reset, fetch next page of `bucket`.
-    } else if (bucket) {
-      // refresh ONE bucket: reset only that bucket's state. The other bucket's
-      // cached results + lastJobs stay (convertJobToApplication still works).
-      this.lastPage[bucket] = 0
-      this.lastResults[bucket] = []
-      this.lastHasMore[bucket] = false
-      ;(bucket === 'intern' ? this.internSecurityIds : this.campusSecurityIds).clear()
-    } else {
-      this.lastJobs.clear()
-      this.lastPage = { intern: 0, campus: 0 }
-      this.lastResults = { intern: [], campus: [] }
-      this.lastHasMore = { intern: false, campus: false }
-      this.internSecurityIds.clear()
-      this.campusSecurityIds.clear()
-    }
-
-    const cities =
-      jobIntent.cities && jobIntent.cities.length > 0 ? jobIntent.cities : ['全国']
-    const buckets: JobBucket[] = bucket ? [bucket] : ['intern', 'campus']
-    const newJobs: BossJob[] = []
-    const errors: string[] = []
-
-    for (const b of buckets) {
-      const page = (append ? this.lastPage[b] : 0) + 1
-      let bucketError: string | undefined
-      try {
-        const res = await this.searchOneBucket(b, jobIntent, cities, page)
-        bucketError = res.error
-        const sidSet =
-          b === 'intern' ? this.internSecurityIds : this.campusSecurityIds
-        for (const j of res.jobs) {
-          if (!sidSet.has(j.securityId)) {
-            sidSet.add(j.securityId)
-            newJobs.push(j)
-            this.lastJobs.set(j.securityId, j)
-          }
-        }
-        this.lastPage[b] = page
-        this.lastHasMore[b] = res.hasMore
-      } catch (err) {
-        const message =
-          err instanceof BossCliError
-            ? err.message
-            : err instanceof Error
-            ? err.message
-            : String(err)
-        this.activityService.record({
-          type: 'provider_unavailable',
-          summary: `BOSS ${b === 'intern' ? '实习' : '秋招正职'}抓取失败：${message}`,
-          metadata: { provider: 'boss', bucket: b, error: message }
-        })
-        bucketError = message
-        this.lastHasMore[b] = false
-      }
-      if (bucketError) {
-        errors.push(`${b === 'intern' ? '实习' : '秋招正职'}：${bucketError}`)
-      }
-    }
-
-    // Score the newly-fetched jobs in ONE call (agent stays bucket-unaware),
-    // then split results back into buckets by securityId.
-    if (newJobs.length > 0) {
-      const input: JobMatchInput = { intent: jobIntent, jobs: newJobs }
-      const output = (await agentRuntime.runAgentStep(
-        'score_job_matches',
-        input as unknown as Record<string, unknown>
-      )) as JobMatchOutput
-      for (const r of output.results) {
-        if (this.internSecurityIds.has(r.securityId)) {
-          if (!this.lastResults.intern.some((x) => x.securityId === r.securityId)) {
-            this.lastResults.intern.push(r)
-          }
-        } else if (this.campusSecurityIds.has(r.securityId)) {
-          if (!this.lastResults.campus.some((x) => x.securityId === r.securityId)) {
-            this.lastResults.campus.push(r)
-          }
-        }
-      }
-    }
-
-    // recommend-first, then score-desc (stub already sorts, but append merges).
-    const sortFn = (a: JobMatchResult, b: JobMatchResult) =>
-      a.recommend !== b.recommend ? (a.recommend ? -1 : 1) : b.score - a.score
-    this.lastResults.intern.sort(sortFn)
-    this.lastResults.campus.sort(sortFn)
-
-    const errorText = errors.length
-      ? `部分抓取受限：${errors.join('；')}。请稍后重试或 boss login。`
-      : undefined
-
-    return {
-      title: '岗位推荐',
-      summary: `实习 ${this.lastResults.intern.length} 个 · 秋招正职 ${this.lastResults.campus.length} 个`,
-      reason: errorText ?? '抓取完成',
-      priority: 'medium',
-      intern: this.lastResults.intern,
-      campus: this.lastResults.campus,
-      error: errorText,
-      internHasMore: this.lastHasMore.intern,
-      campusHasMore: this.lastHasMore.campus,
-      internFetched: this.lastPage.intern > 0,
-      campusFetched: this.lastPage.campus > 0
-    }
-  }
-
-  /**
-   * Convert a recommended BOSS job (from the most recent `fetchJobRecommendations`
-   * batch) into a tracked application — the "一键转投递" action. Idempotent: if an
-   * application with the same `bossSecurityId` already exists, returns its view
-   * unchanged. Creates the application with source `boss` + `bossSecurityId` set
-   * (so a future boss-cli sync upserts onto it rather than duplicating) and a
-   * `locked` `applied` event (the user decided to apply — user truth; sourceRef
-   * `boss:applied:<sid>` dedupes against the boss-sync seed).
-   */
-  convertJobToApplication(securityId: string): ApplicationView {
-    const job = this.lastJobs.get(securityId)
-    if (!job) {
-      throw new Error('未找到该岗位（请先抓取岗位推荐）。')
-    }
-    const existing = this.store.getApplicationByBossSecurityId(securityId)
-    if (existing) return this.toView(existing)
-    const now = nowIso()
-    const app: Application = {
-      id: newId('app'),
-      company: job.companyName,
-      position: job.jobName,
-      source: 'boss',
-      bossSecurityId: securityId,
-      appliedAt: now,
-      city: job.city,
-      salaryRange: job.salary,
-      priority: 'normal',
-      createdAt: now,
-      updatedAt: now
-    }
-    this.store.createApplication(app)
-    // User-initiated → locked. sourceRef matches boss-sync's seed so a later
-    // sync dedupes (getApplicationEventBySourceRef) instead of duplicating.
-    this.store.createApplicationEvent({
-      id: newId('appevt'),
-      applicationId: app.id,
-      type: 'applied',
-      source: 'boss',
-      sourceRef: `boss:applied:${securityId}`,
-      locked: true,
-      eventAt: now,
-      createdAt: nowIso()
-    })
-    this.activityService.record({
-      type: 'tool_completed',
-      summary: `转投递：${job.companyName}·${job.jobName}`,
-      metadata: { securityId, applicationId: app.id }
-    })
-    return this.toView(app)
-  }
 
   /** Build a ZIP of the entire 投递 module (Milestone D §D3): every
    *  application (active + soft-deleted + archived) with its events, every

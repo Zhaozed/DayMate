@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ApplicationService } from '../../src/main/services/application-service'
 import { ActivityService } from '../../src/main/services/activity-service'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { runAgentStep } from '../../src/main/agent/agent-runtime'
 import type { EmailProvider } from '../../src/main/providers/email/email-provider'
 import type { NormalizedEmail } from '@shared/types'
@@ -18,7 +17,7 @@ const runtime = { runAgentStep: (a: string, i: Record<string, unknown>) => runAg
 function makeService(): ApplicationService {
   const store = new InMemoryStore()
   const activity = new ActivityService(store)
-  return new ApplicationService(store, new MockBossProvider(), activity)
+  return new ApplicationService(store, activity)
 }
 
 function makeEmailProvider(emails: NormalizedEmail[]): EmailProvider {

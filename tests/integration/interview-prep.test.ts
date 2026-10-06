@@ -22,12 +22,11 @@ import { RoutineScheduler } from '../../src/main/routines/scheduler'
 import { MockEmailProvider } from '../../src/main/providers/email/mock-email-provider'
 import { MockMail163Provider } from '../../src/main/providers/email/mock-mail163-provider'
 import { MockCalendarProvider } from '../../src/main/providers/calendar/mock-calendar-provider'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 
 function buildEngine() {
   const store = new InMemoryStore()
   const activityService = new ActivityService(store)
-  const applicationService = new ApplicationService(store, new MockBossProvider(), activityService)
+  const applicationService = new ApplicationService(store, activityService)
   const deps: EngineDeps = {
     store,
     toolRegistry: createToolRegistry(),
@@ -37,7 +36,6 @@ function buildEngine() {
     approvalService: new ApprovalService(store),
     emailProviders: [new MockEmailProvider(), new MockMail163Provider()],
     calendarProvider: new MockCalendarProvider(),
-    bossProvider: new MockBossProvider(),
     agentRuntime: createDeterministicAgentRuntime(),
     memoryService: new MemoryService(store),
     applicationService,
@@ -139,7 +137,7 @@ describe('interview_prep routine (Milestone A §F)', () => {
     let notified = ''
     // Rebuild engine with a capturing notify.
     const activityService = new ActivityService(store)
-    const applicationService = new ApplicationService(store, new MockBossProvider(), activityService)
+    const applicationService = new ApplicationService(store, activityService)
     const deps: EngineDeps = {
       store,
       toolRegistry: createToolRegistry(),
@@ -149,7 +147,6 @@ describe('interview_prep routine (Milestone A §F)', () => {
       approvalService: new ApprovalService(store),
       emailProviders: [new MockEmailProvider(), new MockMail163Provider()],
       calendarProvider: new MockCalendarProvider(),
-      bossProvider: new MockBossProvider(),
       agentRuntime: createDeterministicAgentRuntime(),
       memoryService: new MemoryService(store),
       applicationService,

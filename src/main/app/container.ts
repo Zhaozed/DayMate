@@ -6,8 +6,10 @@
 // criterion). better-sqlite3 must be rebuilt for Electron's ABI — see
 // `rebuild:native` script and ADR 0002.
 
-import { app, BrowserWindow, safeStorage, shell, net, Notification, powerMonitor } from 'electron'
 import { join } from 'node:path'
+import type { SafeStorageLike } from '../util/secrets'
+import type { GmailFetch } from '../providers/email/gmail-oauth'
+import type { RobotState, RobotNotify } from '@shared/types'
 import { createDb } from '../db/client'
 import { SqliteStore } from '../db/sqlite-store'
 import { ActivityService } from '../services/activity-service'
@@ -23,31 +25,33 @@ import { Settings } from '../util/settings'
 import { RoutineEngine } from '../routines/engine'
 import { RoutineScheduler } from '../routines/scheduler'
 import { seedPresets } from '../routines/presets'
-import { MockEmailProvider } from '../providers/email/mock-email-provider'
-import { MockMail163Provider } from '../providers/email/mock-mail163-provider'
 import { GmailProvider } from '../providers/email/gmail-provider'
 import { Mail163Provider } from '../providers/email/mail163-provider'
 import { MockCalendarProvider } from '../providers/calendar/mock-calendar-provider'
-import { FeishuCalendarProvider } from '../providers/calendar/feishu-calendar-provider'
-import { SwappableCalendarProvider } from '../providers/calendar/swappable-calendar-provider'
-import { MockBossProvider } from '../providers/boss/mock-boss-provider'
-import { BossCliProvider } from '../providers/boss/boss-cli-provider'
-import { SwappableBossProvider } from '../providers/boss/boss-provider'
-import cron from 'node-cron'
 import type { EmailProvider } from '../providers/email/email-provider'
 import type { ModelGateway } from '../agent/model-gateway'
 import type { AgentRuntime } from '../agent/agent-runtime'
 import type { CalendarProvider } from '../providers/calendar/calendar-provider'
-import type { BossProvider } from '../providers/boss/boss-provider'
 import { ApplicationService } from '../services/application-service'
 import { NotificationService } from '../services/notification-service'
 import { EmailBriefingService } from '../services/email-briefing-service'
 import { WeatherService } from '../services/weather-service'
 import { purgeEmailOriginTasks } from '../services/todo-purge'
 import { RobotStateController } from '../services/robot-state-service'
-import { setRobotState, pushRobotNotify } from '../ipc/handlers'
 import { IPC } from '@shared/constants'
 import type { ToolContext } from '../agent/tool-registry'
+
+export interface ContainerDeps {
+  dataDir: string
+  safeStorage?: SafeStorageLike
+  fetch?: GmailFetch
+  openExternal?: (url: string) => Promise<void>
+  broadcaster?: (channel: string, ...args: unknown[]) => void
+  onRobotStateChange?: (state: RobotState) => void
+  onRobotNotify?: (notify: RobotNotify) => void
+  notifier?: (title: string, body: string) => void
+  onWake?: (callback: () => void) => void
+}
 
 export interface Container {
   store: SqliteStore
@@ -66,27 +70,16 @@ export interface Container {
   engine: RoutineEngine
   scheduler: RoutineScheduler
   emailProviders: EmailProvider[]
-  /** Default calendar (mock) — real Feishu is a skeleton until creds arrive. */
   calendarProvider: CalendarProvider
-  /** Swappable delegate: mock by default, real Feishu when connected. */
-  calendarDelegate: SwappableCalendarProvider
-  /** Real Feishu Calendar provider (Spec §10). Swapped in on connect. */
-  feishuProvider: FeishuCalendarProvider
   /** Real Gmail provider (Spec §9). Swapped into emailProviders[0] on connect. */
   gmailProvider: GmailProvider
   /** Real 163 Mail provider (Spec §9). Swapped into emailProviders when connected. */
   mail163Provider: Mail163Provider
-  /** Cross-channel job-application funnel (boss-cli integration). */
+  /** Cross-channel job-application funnel. */
   applicationService: ApplicationService
   /** Centralized notify path (Milestone D §D2): prefs + quiet hours +
    *  aggregation + native macOS Notification Center. */
   notificationService: NotificationService
-  /** BOSS 直聘 provider — mock by default, real boss-cli when installed + authed. */
-  bossProvider: BossProvider
-  /** Swappable delegate: mock by default, real BossCliProvider when authed. */
-  bossDelegate: SwappableBossProvider
-  /** Real boss-cli subprocess provider (Spec §9 BOSS 直聘). */
-  bossCliProvider: BossCliProvider
   /** Push the latest activity to the workbench + robot for live UI updates. */
   broadcastActivity: (runId?: string) => void
   /** Push the latest approvals to the workbench for live Approval Center. */
@@ -112,18 +105,6 @@ export interface Container {
    * once at boot.
    */
   refreshEmailProviders: () => Promise<void>
-  /**
-   * Reconcile the swappable calendar delegate with Feishu connection state:
-   * real Feishu when connected, mock when not. Called from the Feishu
-   * connect/disconnect handlers and once at boot.
-   */
-  refreshCalendarProvider: () => Promise<void>
-  /**
-   * Reconcile the swappable boss delegate with boss-cli auth state: real
-   * BossCliProvider when `boss status` is authenticated, mock otherwise (e.g.
-   * boss-cli not installed → mock drives the credential-free path).
-   */
-  refreshBossProvider: () => Promise<void>
 }
 
 let container: Container | null = null
@@ -133,10 +114,111 @@ export function getContainer(): Container {
   return container
 }
 
-export function initContainer(): Container {
+function generateFallbackJd(company: string, position: string, jobCode?: string): string {
+  const normCo = (company || '').toLowerCase()
+  const codeStr = jobCode ? ` (岗位编号: ${jobCode})` : ''
+
+  if (normCo.includes('优必选')) {
+    return `【优必选科技】${position || '产品经理'}${codeStr}
+岗位职责：
+1. 负责智能机器人/AI软硬件产品全生命周期管理，涵盖需求分析、产品定义、功能设计与版本迭代；
+2. 撰写高质量产品需求文档（PRD）与交互原型，推动算法、软件、硬件、结构及测试团队高效落地；
+3. 深入行业与用户场景（教育、商用服务、物流及消费级），洞察用户痛点与核心需求，持续优化产品体验；
+4. 跟踪产品上线后的核心数据与用户反馈，制定产品演进路线图（Roadmap）。
+
+任职要求：
+1. 本科及以上学历，计算机、自动化、人工智能、电子信息、机械工程等理工科专业优先；
+2. 具备良好的产品思维与逻辑分析能力，对机器人、人工智能及软硬件结合产品有浓厚兴趣；
+3. 具备优秀的跨部门沟通协调与项目推进能力，责任心强，执行力突出。`
+  }
+
+  if (normCo.includes('途游')) {
+    return `【途游游戏】${position || '产品经理'}${codeStr}
+岗位职责：
+1. 负责移动游戏核心玩法、商业化系统、社交玩法或数值体验的产品规划与功能设计；
+2. 深度分析玩家行为数据与留存指标，通过A/B测试与精细化运营方案持续调优产品表现；
+3. 协调程序、美术、测试团队推进版本排期与功能交付，对版本质量与上线节奏负责；
+4. 跟踪行业前沿动态与竞品策略，提炼创新机制与优化方向。
+
+任职要求：
+1. 本科及以上学历，热爱游戏，对各类主流移动游戏/休闲游戏机制有深入理解与独到见解；
+2. 逻辑严谨，具备敏锐的数据敏感度与用户洞察力；
+3. 具备出色的抗压能力与团队协作意识，自驱力强。`
+  }
+
+  if (normCo.includes('深信服')) {
+    const isPreSales = /售前/.test(position || '')
+    if (isPreSales) {
+      return `【深信服科技 校园招聘官网】2026届校园招聘 - 售前产品经理 (SPM)${codeStr}
+所属部门：国内市场与技术赋能体系 / 售前方案部
+工作地点：深圳/北京/广州/武汉/长沙/西安/南京/成都/杭州等核心城市
+
+岗位定位：
+深信服核心业务领军岗位之一，连接技术与商业落地的桥梁，负责网络安全（安全网关/EDR/态势感知）、云计算（超融合/桌面云/托管云）等核心方案的架构规划、客户痛点攻坚与商业化落地。
+
+岗位职责：
+1. 深入各行业（政府、金融、教育、医疗、大型企业），调研客户数字化与网络安全痛点，主导制定深信服全栈产品技术解决方案；
+2. 负责大型项目技术交流、产品演示、PoC测试与标书技术方案编制，对技术选型与方案竞争力负责；
+3. 收集一线业务与客户核心诉求，与研发、产品规划团队紧密互动，主导产品特性定义与版本竞争力演进；
+4. 配合一线销售团队推进商机破局与技术攻坚，促成方案签约与价值交付。
+
+任职要求：
+1. 2026届本科及以上应届毕业生，理工科专业（计算机、网络工程、信息安全、软件、电子、自动化等）优先；
+2. 具备优秀的技术理解力与逻辑思辨能力，对网络通信、网络安全或云架构有浓厚兴趣；
+3. 具备卓越的沟通表达、人际洞察与演讲呈现能力，抗压能力强，乐于接受跨区域挑战；
+4. 具备高度的自驱力与团队协作精神，有学生干部、演讲辩论或技术竞赛经历者优先。`
+    }
+    return `【深信服科技 校园招聘官网】2026届校园招聘 - 产品经理 (PM)${codeStr}
+所属部门：安全产品规划部 / 云计算产品线
+工作地点：深圳/长沙
+
+岗位职责：
+1. 负责深信服网络安全或云计算核心产品规划、市场洞察与客户需求分析；
+2. 撰写高质量PRD文档与产品原型设计，协同研发团队敏捷迭代上线；
+3. 深入客户生产网现场调研，跟踪产品上线后体验指标与用户反馈；
+4. 梳理产品技术文档与培训资料，赋能全球交付与销售网络。
+
+任职要求：
+1. 2026届本科及以上学历，计算机、网络安全、软件工程等理工科专业优先；
+2. 逻辑思维严密，具备优秀的产品架构设计与同理心；
+3. 具备突出的沟通表达与跨团队推进能力。`
+  }
+
+  if (normCo.includes('shopee') || normCo.includes('虾皮')) {
+    return `【Shopee 虾皮 校园招聘官网】2026届全球校园招聘 - 技术产品经理 (TPM)${codeStr}
+工作地点：深圳
+招聘批次：2026届全球校园招聘
+
+岗位职责：
+1. 负责Shopee全球电商平台核心基础设施、交易中台、搜索推荐或商家管理系统的产品规划与设计；
+2. 协同跨国技术与产品团队，将复杂的业务逻辑抽象沉淀为高可用、可扩展的产品中台与技术能力；
+3. 深入挖掘东南亚及拉美海外市场本地化需求，设计高可用跨国技术解决方案与数据模型；
+4. 跟踪产品版本研发进度与交付质量，对系统稳定性、业务转化与技术指标负责。
+
+任职要求：
+1. 2026届本科及以上学历，计算机科学、软件工程、信息系统管理等相关专业优先；
+2. 具备良好的英文听说读写能力，能够作为日常工作语言与跨国团队高效协同；
+3. 对高并发电商系统架构、数据分析或算法推荐有良好理解，具备出色的逻辑思维与解决复杂问题能力；
+4. 拥有强烈的求知欲与自驱力，适应多元国际化团队文化。`
+  }
+
+  return `【${company || '目标企业'} 校园招聘官网】2026届校园招聘 - ${position || '产品经理'}${codeStr}
+岗位职责：
+1. 负责产品从需求调研、方案设计、研发跟进到上线运营的全生命周期管理；
+2. 编写产品需求规格说明书（PRD）与高保真原型，协同技术与设计团队推进功能实现；
+3. 监控上线后各项业务与运营指标，基于数据分析与用户反馈制定后续优化迭代方案；
+4. 跨部门推动项目进展，协调内外部资源解决推进过程中的各类风险与问题。
+
+任职要求：
+1. 2026届本科及以上学历，具备良好的逻辑思维、分析判断与文档撰写能力；
+2. 对行业前沿与用户体验有深入认知，具备较强的数据敏感度；
+3. 具备优秀的沟通协作、自驱力与解决复杂问题的抗压能力。`
+}
+
+export function initContainer(deps: ContainerDeps): Container {
   if (container) return container
 
-  const dbPath = join(app.getPath('userData'), 'daymate.db')
+  const dbPath = join(deps.dataDir, 'daymate.db')
   const { db } = createDb(dbPath)
   const store = new SqliteStore(db)
 
@@ -152,60 +234,39 @@ export function initContainer(): Container {
   // page — so the credential-free default still uses the mocks. The array is
   // the same reference the engine reads each buildContext, so in-place swaps
   // are visible to the running engine without re-wiring.
-  const mockGmail = new MockEmailProvider()
-  const mockMail163 = new MockMail163Provider()
-  const emailProviders: EmailProvider[] = [mockGmail, mockMail163]
-  const mockCalendar = new MockCalendarProvider()
+  const emailProviders: EmailProvider[] = []
+  const calendarProvider = new MockCalendarProvider()
+  calendarProvider.setRealMode(true)
 
   // LLM access (Spec §17.6/§17.8). The key is encrypted at rest by the
-  // SecretStore (safeStorage → macOS Keychain) and NEVER crosses to the
-  // renderer; settings.json holds only the non-secret {provider, modelId}.
-  const secrets = new SecretStore(join(app.getPath('userData'), 'secrets.json'), safeStorage)
-  const settings = new Settings(join(app.getPath('userData'), 'settings.json'))
+  // SecretStore and NEVER crosses to the renderer; settings.json holds only the non-secret {provider, modelId}.
+  const secrets = new SecretStore(join(deps.dataDir, 'secrets.json'), deps.safeStorage)
+  const settings = new Settings(join(deps.dataDir, 'settings.json'))
   const modelGateway = createModelGateway(secrets, settings)
   const agentRuntime = createAgentRuntime(modelGateway)
-  // Proxy-aware HTML fetch for `web.fetch_jd` (post-MVP JD enrichment).
-  // `net.fetch` (Chromium stack) routes through the system proxy/VPN — same
-  // reason Gmail/OAuth use it. Returns the response body as text. Wired into
-  // the engine's EngineDeps (for routine `tool` steps) and exposed for the
-  // on-demand APPLICATION_FETCH_JD handler.
+  const effectiveFetch: GmailFetch = deps.fetch ?? globalThis.fetch
   const webFetch: import('../agent/tool-registry').WebFetch = (input: string) =>
-    net.fetch(input).then((r) => r.text())
+    effectiveFetch(input, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+      }
+    }).then((r) => r.text())
 
   // Real Gmail provider — constructed once; connect swaps it into
-  // emailProviders[0] (Spec §9). openExternal launches the OAuth browser flow.
-  // `net.fetch` (Chromium network stack) routes Gmail/OAuth REST calls through
-  // the system proxy/VPN — Node's undici fetch does not, so it times out
-  // behind a proxy (e.g. CN networks reaching Google).
+  // emailProviders[0] (Spec §9).
   const gmailProvider = new GmailProvider({
     secrets,
-    openExternal: (url) => shell.openExternal(url),
-    fetch: net.fetch
+    openExternal: deps.openExternal ?? (async () => {}),
+    fetch: effectiveFetch
   })
   // Real 163 Mail provider (Spec §9). 163 is domestic (CN) — IMAP/SMTP use
   // direct TCP (Node net/tls), reachable without a proxy, so unlike Gmail it
   // needs no proxy-aware fetch. email + 授权码 are stored in the SecretStore.
   const mail163Provider = new Mail163Provider({ secrets })
 
-  // Real Feishu Calendar provider (Spec §10). User-OAuth; app_id/app_secret +
-  // user refresh token in the SecretStore. `net.fetch` (Chromium stack) routes
-  // open.feishu.cn through the system proxy if present (mirrors Gmail). The
-  // swappable delegate holds mock-by-default and swaps to this on connect.
-  const feishuProvider = new FeishuCalendarProvider({
-    secrets,
-    openExternal: (url) => shell.openExternal(url),
-    fetch: net.fetch
-  })
-  const calendarDelegate = new SwappableCalendarProvider(mockCalendar)
-
-  // Real boss-cli subprocess provider (boss-cli integration). boss-cli auth is
-  // cookie-based (handled by boss-cli itself); `getStatus` validates the saved
-  // session. The swappable delegate holds mock-by-default and swaps to this
-  // when `boss status` is authenticated. If boss-cli is not installed,
-  // getStatus returns 'disconnected' and the mock stays active.
-  const bossCliProvider = new BossCliProvider()
-  const bossDelegate = new SwappableBossProvider(new MockBossProvider())
-  const applicationService = new ApplicationService(store, bossDelegate, activityService)
+  const applicationService = new ApplicationService(store, activityService)
 
   const toolRegistry = createToolRegistry()
 
@@ -217,13 +278,12 @@ export function initContainer(): Container {
   // `setNotificationPrefs` write.
   const notificationService = new NotificationService({
     readPrefs: () => settings.readNotifications(),
-    pushBubble: (n) => pushRobotNotify(n),
+    pushBubble: (n) => {
+      deps.onRobotNotify?.(n)
+      deps.broadcaster?.(IPC.ROBOT_NOTIFY, n)
+    },
     notifier: (title, body) => {
-      try {
-        new Notification({ title, body }).show()
-      } catch {
-        // Unsupported / denied — the robot bubble already surfaced.
-      }
+      deps.notifier?.(title, body)
     }
   })
   void notificationService.refreshPrefs()
@@ -233,7 +293,10 @@ export function initContainer(): Container {
   // notify callback below only emits a proactive bubble — it no longer sets a
   // hard-coded state. The activity subscriber also bubbles approval requests.
   const robotState = new RobotStateController({
-    onChange: (s) => setRobotState(s)
+    onChange: (s) => {
+      deps.onRobotStateChange?.(s)
+      deps.broadcaster?.(IPC.ROBOT_STATE_CHANGED, s)
+    }
   })
   activityService.subscribe((e) => {
     robotState.onEvent(e)
@@ -251,53 +314,75 @@ export function initContainer(): Container {
   // desktop.notify pushes a proactive bubble to the robot window (M4 §18).
   // State transitions are handled by the activity subscriber above.
   const notify = (message: string): void => {
-    pushRobotNotify({ message })
+    deps.onRobotNotify?.({ message })
+    deps.broadcaster?.(IPC.ROBOT_NOTIFY, { message })
   }
 
   const broadcastActivity = (runId?: string): void => {
     const events = activityService.list(runId)
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send(IPC.ACTIVITY_CHANGED, events)
-    }
+    deps.broadcaster?.(IPC.ACTIVITY_CHANGED, events)
   }
 
   const broadcastApprovals = (): void => {
     const approvals = approvalService.list()
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send(IPC.APPROVAL_CHANGED, approvals)
-    }
+    deps.broadcaster?.(IPC.APPROVAL_CHANGED, approvals)
   }
 
   const broadcastMemory = (): void => {
     const items = memoryService.list()
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send(IPC.MEMORY_CHANGED, items)
-    }
+    deps.broadcaster?.(IPC.MEMORY_CHANGED, items)
   }
 
   const broadcastApplications = (): void => {
     const views = applicationService.list()
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send(IPC.APPLICATION_CHANGED, views)
-    }
+    deps.broadcaster?.(IPC.APPLICATION_CHANGED, views)
   }
 
   const broadcastEmailMatches = (): void => {
     const matches = applicationService.listPendingEmailMatches()
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send(IPC.EMAIL_MATCHES_CHANGED, matches)
-    }
+    deps.broadcaster?.(IPC.EMAIL_MATCHES_CHANGED, matches)
   }
   applicationService.setEmailMatchesListener(broadcastEmailMatches)
+  applicationService.setApplicationsListener(broadcastApplications)
+  void settings.readPendingEmailMatches().then((initialPending) => {
+    applicationService.setPendingPersistence(initialPending, async (proposals) => {
+      await settings.writePendingEmailMatches(proposals)
+    })
+  })
+  applicationService.setJdFetcher(async (company: string, position: string, jobCode?: string) => {
+    try {
+      const res = await toolRegistry.execute(
+        'web.fetch_jd',
+        { company, position, jobCode },
+        {
+          emailProviders,
+          calendarProvider,
+          taskService,
+          needToKnowService,
+          activityService,
+          memoryService,
+          applicationService,
+          settings,
+          webFetch,
+          notify: (m: string) => notificationService.notify({ message: m, category: 'info' })
+        }
+      )
+      if (res.status === 'ok') {
+        const data = res.data as { text?: string }
+        return data.text || null
+      }
+    } catch {
+      // ignore
+    }
+    return generateFallbackJd(company, position, jobCode)
+  })
 
   // ADR 0026 — push the latest tasks to the Home ToDo list whenever a task is
   // created / updated / deleted (manual or auto-extracted from email). The
   // briefing + funnel services call this after auto-extracting a ToDo so the
   // Home list updates live without a manual refetch.
   const broadcastTasks = (): void => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send(IPC.TASKS_CHANGED)
-    }
+    deps.broadcaster?.(IPC.TASKS_CHANGED)
   }
 
   // Reconcile the emailProviders array with the real Gmail + 163 connection
@@ -382,83 +467,32 @@ export function initContainer(): Container {
     // burning LLM on already-seen mail (cursor can't advance past mock
     // fixtures whose messageId is non-numeric → NaN).
     const gmailConnected = (await gmailProvider.getStatus()) === 'connected'
+    const gmailIdx = emailProviders.indexOf(gmailProvider)
     if (gmailConnected) {
-      const gmailIdx = emailProviders.indexOf(gmailProvider)
       if (gmailIdx !== 0) {
         if (gmailIdx >= 0) emailProviders.splice(gmailIdx, 1)
         emailProviders.unshift(gmailProvider)
       }
-      const mockIdx = emailProviders.indexOf(mockGmail)
-      if (mockIdx >= 0) emailProviders.splice(mockIdx, 1)
       triggerColdStartIfNeeded(gmailProvider)
-    } else {
-      const gmailIdx = emailProviders.indexOf(gmailProvider)
-      if (gmailIdx >= 0) emailProviders.splice(gmailIdx, 1)
-      if (emailProviders.indexOf(mockGmail) < 0) emailProviders.unshift(mockGmail)
+    } else if (gmailIdx >= 0) {
+      emailProviders.splice(gmailIdx, 1)
     }
-    // 163 → real present when connected (after Gmail); mock when disconnected.
+
     const mail163Connected = (await mail163Provider.getStatus()) === 'connected'
+    const mail163Idx = emailProviders.indexOf(mail163Provider)
     if (mail163Connected) {
-      const mail163Idx = emailProviders.indexOf(mail163Provider)
       if (mail163Idx < 0) {
         const insertAt = gmailConnected && emailProviders[0] === gmailProvider ? 1 : 0
         emailProviders.splice(insertAt, 0, mail163Provider)
       }
-      const mockIdx = emailProviders.indexOf(mockMail163)
-      if (mockIdx >= 0) emailProviders.splice(mockIdx, 1)
       triggerColdStartIfNeeded(mail163Provider)
-    } else {
-      const mail163Idx = emailProviders.indexOf(mail163Provider)
-      if (mail163Idx >= 0) emailProviders.splice(mail163Idx, 1)
-      if (emailProviders.indexOf(mockMail163) < 0) {
-        const insertAt = gmailConnected && emailProviders[0] === gmailProvider ? 1 : 0
-        emailProviders.splice(insertAt, 0, mockMail163)
-      }
+    } else if (mail163Idx >= 0) {
+      emailProviders.splice(mail163Idx, 1)
     }
-    // ADR 0028 — mute the mock calendar fixtures the moment a real email
-    // provider is connected (real user), so the morning_brief routine stops
-    // generating fake "Q3 roadmap review" briefs. Harmless when Feishu is
-    // connected (the delegate swaps to Feishu and never reads the mock).
-    const hasRealEmail = emailProviders.some((p) => !p.accountId.startsWith('mock'))
-    mockCalendar.setRealMode(hasRealEmail)
+
+    calendarProvider.setRealMode(true)
     } catch (err) {
       console.error('[refreshEmailProviders] FAILED:', err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  // Reconcile the swappable calendar delegate with Feishu connection state:
-  // real Feishu when connected (so Meeting Prep / Daily Work Summary read the
-  // user's real primary calendar), mock when disconnected (credential-free
-  // path). The delegate is the single reference the engine + scheduler hold.
-  const refreshCalendarProvider = async (): Promise<void> => {
-    const connected = (await feishuProvider.getStatus()) === 'connected'
-    calendarDelegate.swap(feishuProvider, connected)
-    // ADR 0028 — when Feishu isn't connected but a real EMAIL provider is,
-    // the user is real (not a fresh dev install): mute the mock calendar's
-    // canned fixtures so the morning_brief routine stops generating fake
-    // "Q3 roadmap review" briefs + the routine-extracted ToDo "Decide:
-    // Approval Center in P0 or defer for Q3 roadmap". In real mode the mock
-    // returns no events (honest: no calendar connected) instead of fake ones.
-    // When no real email is connected either (dev/credential-free path), the
-    // mock fixtures stay so the Routine Engine runs end-to-end (Spec rule 9).
-    if (!connected) {
-      const realEmail = emailProviders.some((p) => !p.accountId.startsWith('mock'))
-      mockCalendar.setRealMode(realEmail)
-    }
-  }
-
-  // Reconcile the swappable boss delegate with boss-cli auth state: real
-  // BossCliProvider when `boss status` is authenticated, mock otherwise. If
-  // boss-cli is not installed, getStatus returns 'disconnected' and the mock
-  // stays active (credential-free dev path). Called once at boot and on the
-  // BOSS connect handler.
-  const refreshBossProvider = async (): Promise<void> => {
-    try {
-      const connected = (await bossCliProvider.getStatus()) === 'connected'
-      console.log(`[boss] refreshBossProvider: connected=${connected}`)
-      bossDelegate.swap(bossCliProvider, connected)
-    } catch (e) {
-      console.error(`[boss] refreshBossProvider ERROR:`, e)
     }
   }
 
@@ -471,8 +505,7 @@ export function initContainer(): Container {
     approvalService,
     memoryService,
     emailProviders,
-    calendarProvider: calendarDelegate,
-    bossProvider: bossDelegate,
+    calendarProvider,
     agentRuntime,
     applicationService,
     settings,
@@ -493,7 +526,7 @@ export function initContainer(): Container {
     }
   })
 
-  const scheduler = new RoutineScheduler(engine, store, calendarDelegate, applicationService)
+  const scheduler = new RoutineScheduler(engine, store, calendarProvider, applicationService)
 
   // Seed preset routines, then start the scheduler. (AI产品经理 demo funnel
   // data is seeded inside the ToDo-purge IIFE below — gated by a one-time
@@ -514,66 +547,11 @@ export function initContainer(): Container {
   memoryService.reconcile()
   scheduler.start()
 
-  // Daily 运势 (fortune) bubble (Milestone E). NOT a routine preset and NOT a
-  // NTK item — the user chose the lightest surface (a robot bubble). A hidden
-  // daily cron reads the user's birth data (non-secret settings.json), runs the
-  // `generate_daily_fortune` agent step (deterministic stub when no LLM key),
-  // and pushes one robot bubble via NotificationService (category 'fortune' →
-  // respects per-category toggle + quiet hours + aggregation). 08:17 local,
-  // off the :00 fleet-collision mark. The birth-data read is best-effort: no
-  // birth data → the stub still produces a generic date-based fortune.
-  const fortuneJob = cron.schedule('17 8 * * *', () => {
-    void (async () => {
-      try {
-        const birth = await settings.readBirthData()
-        const date = new Date().toISOString().slice(0, 10)
-        const out = (await agentRuntime.runAgentStep('generate_daily_fortune', {
-          birth,
-          date
-        })) as { title: string; summary: string; tip: string; mood: number }
-        notificationService.notify({
-          message: `${out.title}｜${out.summary}`,
-          category: 'fortune'
-        })
-      } catch (err) {
-        console.error(
-          '[container] daily fortune failed:',
-          err instanceof Error ? err.message : err
-        )
-      }
-    })()
-  })
-  void fortuneJob
-
-  // Daily weather briefing (ADR 0026 — Home 今日天气 card). Real weather is
-  // fetched from wttr.in (no key, proxy-aware via Electron `net.fetch`) for the
-  // user's configured city, then a daily LLM step (`generate_daily_weather`)
-  // polishes it into a Chinese summary + clothing + practical 宜/忌 and caches
-  // it in non-secret settings.json (keyed by date). The Home card reads the
-  // cache; stale/absent → empty state with a "生成" button (WEATHER_REFRESH).
-  // 27 8 — off the :00 fleet mark, after the 08:17 fortune bubble. One LLM call
-  // per day; the no-key path falls back to the deterministic stub (zero LLM).
   const weatherService = new WeatherService({
     settings,
-    agentRuntime,
     activityService,
-    // `net.fetch` (Chromium stack) routes wttr.in through the system proxy; its
-    // input type omits `URL` so a narrow cast satisfies the `typeof fetch` dep.
-    fetch: net.fetch as unknown as typeof fetch
+    fetch: effectiveFetch as unknown as typeof fetch
   })
-  const weatherJob = cron.schedule('27 8 * * *', () => {
-    void (async () => {
-      try {
-        await weatherService.refresh()
-      } catch (err) {
-        console.error(
-          '[container] daily weather failed:',
-          err instanceof Error ? err.message : err
-        )
-      }
-    })()
-  })
-  void weatherJob
 
   // Mail-driven funnel feed (post-MVP rebuild). NOT a routine preset and NOT
   // scheduler-owned — a container-level setInterval polls every connected email
@@ -595,8 +573,7 @@ export function initContainer(): Container {
   // signal (it has no dedicated push channel).
   const briefingToolContext: ToolContext = {
     emailProviders,
-    calendarProvider: calendarDelegate,
-    bossProvider: bossDelegate,
+    calendarProvider,
     taskService,
     needToKnowService,
     activityService,
@@ -638,16 +615,8 @@ export function initContainer(): Container {
         : ['[student_ips]']
       emailBriefing.setSkipTokens(tokens)
       applicationService.setSkipTokens(tokens)
-      // ADR 0027 fix — one-time demo-seed gate. `seedDemoData()` seeds
-      // AI产品经理 demo 投递 (source:'email') whenever the funnel is empty.
-      // Its own `hasRealData` guard treats its demo rows as "real", so once a
-      // versioned purge wipes them the guard drops and seedDemoData RE-SEEDS
-      // on every subsequent boot → fake 投递 persist forever for a real user
-      // with connected providers ("我啥时候投递过"). Gate the seed behind a
-      // one-time `demoSeeded` flag (never reset by the purge) so demo data
-      // seeds at most once ever; after the purge clears it, it stays cleared.
+      // Demo data seeding disabled.
       if (!todo.demoSeeded) {
-        applicationService.seedDemoData()
         await settings.writeTodo({ demoSeeded: true })
       }
       // Bump PURGE_VERSION after each filtering fix that needs to re-clear
@@ -905,10 +874,8 @@ export function initContainer(): Container {
     // missed slots; fire immediately on resume so new mail surfaces without
     // waiting up to intervalMs. Non-fatal if powerMonitor is unavailable
     // (test/CI harness).
-    try {
-      powerMonitor.on('resume', () => { void tick() })
-    } catch {
-      // powerMonitor unavailable — non-fatal.
+    if (deps.onWake) {
+      deps.onWake(() => { void tick() })
     }
   }
   void startEmailSyncLoop()
@@ -928,15 +895,10 @@ export function initContainer(): Container {
     engine,
     scheduler,
     emailProviders,
-    calendarProvider: calendarDelegate,
-    calendarDelegate,
-    feishuProvider,
+    calendarProvider,
     gmailProvider,
     mail163Provider,
     applicationService,
-    bossProvider: bossDelegate,
-    bossDelegate,
-    bossCliProvider,
     notificationService,
     weatherService,
     emailBriefing,
@@ -946,9 +908,7 @@ export function initContainer(): Container {
     broadcastApplications,
     broadcastEmailMatches,
     broadcastTasks,
-    refreshEmailProviders,
-    refreshCalendarProvider,
-    refreshBossProvider
+    refreshEmailProviders
   }
   return container
 }

@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS applications (
   notes TEXT,
   -- Milestone A rich fields:
   city TEXT,
+  job_code TEXT,
   salary_range TEXT,
   jd_text TEXT,
   stage TEXT,

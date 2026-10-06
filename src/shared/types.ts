@@ -126,41 +126,6 @@ export interface EmailSendResult {
   sentAt: string
 }
 
-/**
- * Output of the `generate_draft_reply` agent step (Spec §13.5 tone-mirroring).
- * The body mirrors the user's own prior-reply voice (drawn from the sent-mail
- * corpus + the memory profile), NOT a generic canned string. The approval step
- * wraps `email.create_draft` with this body; `contentHash` is computed over the
- * resolved args so the LLM body is captured immutably at approval-request time
- * (Spec §15). Never drafted for an untrusted email (§17).
- */
-export interface DraftReplyOutput {
-  to: MailAddress[]
-  subject: string
-  body: string
-  memoryProposals?: MemoryProposal[]
-}
-
-// Persona inference (on-demand "生成用户画像"). Built ONLY from the user's
-// OWN sent mail (trusted voice, framed by `frameSentReply` — the opposite of
-// §17-untrusted inbound). The output IS the memoryProposals payload —
-// persona / writing_style / email_tone / working_hours facts to save as
-// proposals (confirmed:false) for the user to confirm on the Memory page.
-// `summary` is a one-line recap for the Activity log / a confirmation toast.
-// §17: sent mail is the user's own content, never an instruction source.
-export interface PersonaOutput {
-  summary: string
-  memoryProposals?: MemoryProposal[]
-}
-
-/** Input for `generate_persona`. `sentEmails` is the user's OWN sent-mail
- * corpus (trusted voice, framed by `frameSentReply`). `memory` is the
- * confirmed profile (so the model can skip already-set keys). */
-export interface PersonaInput {
-  sentEmails?: NormalizedEmail[]
-  memory?: MemoryItem[]
-}
-
 export interface EmailQuery {
   accountId?: string
   unreadOnly?: boolean
@@ -665,125 +630,9 @@ export interface Mail163TestResult {
   sampleMessageId?: string
 }
 
-// ── Feishu Calendar (Spec §10) — user-OAuth read ─────────────────────────────
-// The renderer only ever sees opaque status — never app_secret, never the user
-// refresh/access token.
-export interface FeishuStatus {
-  status: IntegrationStatus
-  hasClient: boolean
-}
-
-/** Result of a Feishu connectivity probe (FEISHU_TEST) — lists today's events. */
-export interface FeishuTestResult {
-  ok: boolean
-  /** Human-readable status; never a token. */
-  message: string
-  /** Count of real events read today (proves the calendar read path). */
-  eventCount?: number
-  /** First event title, to prove a real read (no event body/attendees). */
-  sampleEventTitle?: string
-}
-
-// ── BOSS 直聘 (boss-cli) — read-side DTOs ────────────────────────────────────
-// boss-cli (jackwener/boss-cli) wraps BOSS 直聘's reverse-engineered API and
-// returns a unified `{ok, schema_version, data}` envelope (see its SCHEMA.md).
-// These DTOs are the normalized shape Daymate works with; the real provider
-// maps the envelope's `data` into them. Boss data is UNTRUSTED external text
-// (§17): it only ever enters agent prompts as a user message, never the
-// host-set system prompt, and `enforceTrust` is applied after model output.
-// The mock provider (credential-free default) returns canned fixtures.
-
-export interface BossSearchQuery {
-  keyword: string
-  city?: string
-  salary?: string
-  experience?: string
-  degree?: string
-  industry?: string
-  scale?: string
-  stage?: string
-  jobType?: string
-  page?: number
-  limit?: number
-}
-
-/** A job listing from `boss search` / `boss recommend`. */
-export interface BossJob {
-  provider: 'boss'
-  accountId: string
-  securityId: string
-  jobName: string
-  companyName: string
-  salary?: string
-  city?: string
-  experience?: string
-  degree?: string
-  hrName?: string
-  brandName?: string
-  jobLabels?: string[]
-  // Detail-only fields (populated by `boss detail`, NOT by `boss search`).
-  // postDescription/jobDesc is the JD body — untrusted boss data; the renderer
-  // MUST render it as text (React escapes) never as HTML (§17.12/§17.13).
-  jobDescription?: string
-  industry?: string
-  scale?: string
-  stage?: string
-  hrTitle?: string
-  areaDistrict?: string
-  businessDistrict?: string
-}
-
-/** An applied job from `boss applied`. */
-export interface BossApplication {
-  provider: 'boss'
-  accountId: string
-  securityId: string
-  jobName: string
-  companyName: string
-  salary?: string
-  city?: string
-  brandName?: string
-  hrName?: string
-  appliedAt?: string
-}
-
-/** An interview invitation from `boss interviews`. */
-export interface BossInterview {
-  provider: 'boss'
-  accountId: string
-  /** The job this interview is for, when boss-cli surfaces it. */
-  securityId?: string
-  interviewId: string
-  jobName: string
-  companyName: string
-  interviewTime?: string
-  address?: string
-  contact?: string
-  status?: string
-}
-
-/** A communicated recruiter from `boss chat`. */
-export interface BossChat {
-  provider: 'boss'
-  accountId: string
-  friendId: string
-  hrName?: string
-  companyName?: string
-  jobName?: string
-  /** When set, the HR replied (→ a `communicated` event). */
-  lastMessage?: string
-  lastTime?: string
-  unread?: boolean
-  /** Match key back to an applied job (securityId when boss-cli surfaces it). */
-  securityId?: string
-}
-
 // ── Job applications — the cross-channel funnel (Spec §3, §4, §5) ─────────────
-// An Application is ONE job the user has applied to, from any channel (BOSS via
-// boss-cli, or a manual entry for 官网/内推/线下). Its progress is an ordered
-// list of ApplicationEvents (applied → communicated → assessment → written_test
-// → interview → offer/rejected). Manual entries + manual events coexist with
-// boss-synced ones so the panel is the single source of truth across channels.
+// An Application is ONE job the user has applied to. Its progress is an ordered
+// list of ApplicationEvents (applied → assessment → written_test → interview → offer/rejected).
 
 export interface Application {
   id: string
@@ -798,6 +647,8 @@ export interface Application {
   notes?: string
   // ── Rich fields (Milestone A) ────────────────────────────────────────────
   city?: string
+  /** 岗位/职位编号 (ATS Requisition ID / Job Code) */
+  jobCode?: string
   /** Free-text salary, e.g. "25-40K·15薪". */
   salaryRange?: string
   /** Full JD body. Untrusted external text (§17) — never executed. */
@@ -808,6 +659,8 @@ export interface Application {
   stageDeadline?: string
   /** Meeting link for an interview/assessment (may be filled from email). */
   interviewLink?: string
+  /** Interview preparation status: suspended when JD is missing, ready when generated. */
+  prepStatus?: 'ready' | 'generating' | 'suspended_missing_jd' | 'none'
   /** Funnel priority; `back` = deprioritised or auto-stale-demoted. */
   priority?: ApplicationPriority
   /** messageId of the originating email (email→app link for refresh). */
@@ -829,23 +682,27 @@ export interface ApplicationCreateInput {
   channelRef?: string
   notes?: string
   city?: string
+  jobCode?: string
   salaryRange?: string
   jdText?: string
   stage?: string
   stageDeadline?: string
   interviewLink?: string
+  prepStatus?: 'ready' | 'generating' | 'suspended_missing_jd' | 'none'
 }
 
 /** Partial rich-field update (renderer → main, single-field refresh / edit). */
 export interface ApplicationUpdateFields {
   company?: string
   position?: string
+  jobCode?: string
   city?: string
   salaryRange?: string
   jdText?: string
   stage?: string
   stageDeadline?: string
   interviewLink?: string
+  prepStatus?: 'ready' | 'generating' | 'suspended_missing_jd' | 'none'
   notes?: string
   channelRef?: string
   priority?: ApplicationPriority
@@ -882,6 +739,8 @@ export interface ApplicationEventInput {
   subState?: 'scheduled' | 'done'
   eventAt?: string
   evidence?: string
+  source?: 'boss' | 'email' | 'manual'
+  sourceRef?: string
   /** Default true for manual events — the user is the source of truth. */
   locked?: boolean
 }
@@ -899,13 +758,6 @@ export interface ApplicationView {
   daysSinceLastEvent?: number
 }
 
-/** boss-cli login/cookie health (never a cookie crosses to the renderer). */
-export interface BossStatus {
-  status: IntegrationStatus
-  authenticated: boolean
-  /** Human-readable message (e.g. "环境异常，请重新登录" when cookies expired). */
-  message: string
-}
 
 // ── Resume versions (Milestone A §4.2) ───────────────────────────────────────
 // Per-application versioned AI-tailored HTML resumes. The latest `version` is
@@ -977,13 +829,21 @@ export interface EmailMatchProposal {
   eventType: ApplicationEventType
   company?: string
   position?: string
+  /** 邮件中提取到的职位/岗位编号 */
+  jobCode?: string
   confidence: 'high' | 'medium' | 'low'
   /** The matched application id, or undefined when unmatched. */
   applicationId?: string
-  /** Existing application snapshot for the queue card (company/position). */
+  /** Existing application snapshot for the queue card (company/position/jobCode). */
   applicationCompany?: string
   applicationPosition?: string
+  applicationJobCode?: string
   evidence?: string
+  /** Ambiguous candidates when multiple applications exist for the same company (防串线). */
+  candidateApplications?: Array<{ id: string; company: string; position: string; jobCode?: string }>
+  meetingInfo?: string
+  isReschedule?: boolean
+  isCancelled?: boolean
 }
 
 // ── Job-search config (Milestone A §G) ──────────────────────────────────────
@@ -1032,11 +892,6 @@ export interface JobSearchSettings {
   baseResumePath?: string
   /** Optional absolute path to a transcript template (HTML). */
   transcriptTemplatePath?: string
-  /** Structured job-search intent (Milestone C) — the target criteria
-   *  `score_job_matches` scores `boss.search` results against. Optional:
-   *  absent → the job-recommendation routine is a no-op (skips with an
-   *  Activity note), the manual 抓取 button shows an empty-state hint. */
-  jobIntent?: JobIntent
 }
 
 /** Non-secret ToDo settings (ADR 0027 — ToDo 重构). Controls the mail-driven
@@ -1070,25 +925,6 @@ export interface TodoSettings {
    *  empty install; a real user with connected providers must not see fake
    *  投递 ("我啥时候投递过" — ADR 0027 fix). */
   demoSeeded?: boolean
-}
-
-/** The user's structured job-search intent (Milestone C). Matched
- *  deterministically + by the agent against `BossJob` metadata. salaryMin/Max
- *  are monthly figures in 千 (k), e.g. 25 / 35 = 25-35k. */
-export interface JobIntent {
-  /** Target role keyword(s) for `boss search`, e.g. "Go 后端". */
-  keyword: string
-  /** Preferred cities (matches against BossJob.city substring). */
-  cities?: string[]
-  /** Minimum monthly salary in k (e.g. 25). */
-  salaryMin?: number
-  /** Maximum monthly salary in k (e.g. 35). */
-  salaryMax?: number
-  /** Expected experience requirement string, e.g. "3-5年" (matched loosely
-   *  against BossJob.experience). */
-  experience?: string
-  /** Expected degree, e.g. "本科" (matched against BossJob.degree). */
-  degree?: string
 }
 
 // ── Smart funnel grouping (Milestone A §5) ──────────────────────────────────
@@ -1185,89 +1021,6 @@ export interface FunnelReviewOutput {
   memoryProposals?: MemoryProposal[]
 }
 
-// ── Milestone C: job recommendation (每日岗位抓取 + 推荐评分) ───────────────
-// Scores `boss.search` results against the user's structured `JobIntent`.
-// `BossJob` carries no JD text (boss-cli mapping limitation), so scoring is
-// metadata-based: salary / city / experience / degree / jobLabels vs intent.
-
-/** A single scored job. `tier` buckets the 0-100 `score` for display. */
-export interface JobMatchResult {
-  securityId: string
-  jobName: string
-  companyName: string
-  /** 0-100 match score (higher = better). */
-  score: number
-  tier: 'high' | 'medium' | 'low' | 'skip'
-  /** Human-readable match/miss reasons, e.g. "薪资 28-40k 命中你期望 25-35k". */
-  reasons: string[]
-  /** True = worth applying (tier high/medium). */
-  recommend: boolean
-  /** Echoed for the renderer (avoids a re-lookup by securityId). */
-  salary?: string
-  city?: string
-}
-
-/** Input for `score_job_matches` (service-built; renderer never sends). */
-export interface JobMatchInput {
-  intent: JobIntent
-  jobs: BossJob[]
-}
-
-/** Output of `score_job_matches` — extends the PublishableBrief shape so a
- *  daily routine can publish it to NTK via `need_to_know fromKey`. The
- *  `results` array is the per-job detail the renderer lists. */
-export interface JobMatchOutput {
-  title: string
-  summary: string
-  reason: string
-  priority: 'medium' | 'high' | 'urgent'
-  sourceRefs: SourceRef[]
-  suggestedActions: SuggestedAction[]
-  results: JobMatchResult[]
-  memoryProposals?: MemoryProposal[]
-}
-
-// ── Job recommendations, split into two buckets for the 校招生 dual-track
-// (实习 + 秋招正职) ───────────────────────────────────────────────────────
-// `bucket` is a DETERMINISTIC business rule (which boss filter to apply), not
-// an agent decision (§12: keep Agent decisions separate from deterministic
-// business rules). So `score_job_matches` stays bucket-unaware — the service
-// runs one scoring call over both buckets' jobs and splits the results back by
-// securityId. This type is the service→renderer IPC shape; the agent output
-// (`JobMatchOutput`) is unchanged.
-export type JobBucket = 'intern' | 'campus'
-
-export interface JobRecommendations {
-  title: string
-  summary: string
-  reason: string
-  priority: 'medium' | 'high' | 'urgent'
-  /** 实习桶 (`boss search --job-type 实习`). */
-  intern: JobMatchResult[]
-  /** 秋招正职桶 (`boss search --job-type 全职 --exp 在校/应届`). */
-  campus: JobMatchResult[]
-  /** Set when a boss search hit rate-limit / session-expiry mid-fetch; the
-   *  already-fetched partial results are still returned. Empty string = ok. */
-  error?: string
-  /** Per-bucket "another page exists" flags, for the renderer's load-more. */
-  internHasMore: boolean
-  campusHasMore: boolean
-  /** Per-bucket "has been fetched at least once" flags. The renderer fetches
-   *  ONE bucket per click (anti-bot: N search calls not 2N), so a bucket the
-   *  user hasn't opened yet shows "click 抓取 to fetch" rather than "empty". */
-  internFetched: boolean
-  campusFetched: boolean
-}
-
-/** `fetchJobRecommendations` options.
- *  `{bucket: B}` = refresh ONE bucket page 1 (reset that bucket only — anti-bot:
- *  N search calls, not 2N). `{bucket: B, append: true}` = next page for that
- *  bucket, appended. No args = refresh BOTH buckets (page 1, reset all). */
-export interface FetchJobRecommendationsOpts {
-  bucket?: JobBucket
-  append?: boolean
-}
-
 /** A proactive bubble pushed to the robot surface (M4 §18). */
 export interface RobotNotify {
   message: string
@@ -1357,6 +1110,7 @@ export type RobotView = (typeof ROBOT_VIEWS)[number]
 /** The pages the workbench can deep-link to via `onNavigate` (M4). */
 export const WORKBENCH_PAGES = [
   'Home',
+  'Tasks',
   'Need to Know',
   'Applications',
   'Routines',
@@ -1423,8 +1177,6 @@ export interface DaymateApi {
   clearAllNeedToKnow(): Promise<void>
   /** ADR 0029 — edit a 必读 item's headline (title) / summary inline. */
   updateNeedToKnow(id: string, patch: { title?: string; summary?: string }): Promise<void>
-  /** Last ~7 morning-brief NTKs (newest first) for the Home 晨报 carousel. */
-  listMorningBriefs(): Promise<NeedToKnow[]>
   /**
    * ADR 0029 — lazy R0 fetch of ALL emails in a conversation for the 必读
    * thread-Item expand. Gmail uses threads.get; 163 does a best-effort IMAP
@@ -1457,12 +1209,6 @@ export interface DaymateApi {
   confirmMemory(id: string): Promise<MemoryItem>
   deleteMemory(id: string): Promise<void>
   onMemoryChanged(cb: (items: MemoryItem[]) => void): () => void
-  /**
-   * On-demand persona inference (§16): reads the user's own sent mail from
-   * every connected provider, runs the `generate_persona` agent step, and
-   * saves each proposal as `confirmed:false`. Returns the persona summary.
-   */
-  generatePersona(): Promise<PersonaOutput>
 
   // LLM configuration (M3) — key is write-only; getLlmConfig never returns it.
   getLlmConfig(): Promise<LlmConfig>
@@ -1487,18 +1233,8 @@ export interface DaymateApi {
   disconnectMail163(): Promise<Mail163Status>
   testMail163(): Promise<Mail163TestResult>
 
-  // Feishu Calendar (Spec §10). app_id/app_secret + user refresh token are
-  // credentials in the SecretStore; these never return a secret to the renderer.
-  setFeishuClient(input: { appId: string; appSecret: string }): Promise<FeishuStatus>
-  getFeishuStatus(): Promise<FeishuStatus>
-  connectFeishu(): Promise<FeishuStatus>
-  disconnectFeishu(): Promise<FeishuStatus>
-  testFeishu(): Promise<FeishuTestResult>
-
-  // Job applications (boss-cli integration) — the cross-channel funnel panel.
-  // Manual entries + manual events are local R1 writes (no approval); boss sync
-  // pulls `boss applied/interviews/chat` into the funnel. boss:get-status reports
-  // cookie/login health (never a cookie).
+  // Job applications — the cross-channel funnel panel.
+  // Manual entries + manual events are local R1 writes (no approval).
   listApplications(): Promise<ApplicationView[]>
   createApplication(input: ApplicationCreateInput): Promise<ApplicationView>
   addApplicationEvent(input: ApplicationEventInput): Promise<ApplicationView>
@@ -1506,13 +1242,10 @@ export interface DaymateApi {
    *  deadline, interview link, notes, channel, priority). Local DB write (R1,
    *  no approval needed — §15 only gates external writes). */
   updateApplicationFields(id: string, patch: ApplicationUpdateFields): Promise<ApplicationView | undefined>
-  fetchJobJd(applicationId: string): Promise<{ jdText: string | null; error: string | null }>
-  syncBossApplications(): Promise<{ synced: number; message: string }>
-  getBossStatus(): Promise<BossStatus>
-  /** Spawn `boss login --qrcode` — QR opens in system viewer; user scans. */
-  loginBoss(): Promise<BossStatus>
-  /** `boss logout` — clears boss-cli's saved credential. */
-  logoutBoss(): Promise<BossStatus>
+  fetchJobJd(
+    applicationId: string,
+    overrides?: { company?: string; position?: string; jobCode?: string }
+  ): Promise<{ jdText: string | null; error: string | null }>
   onApplicationChanged(cb: (views: ApplicationView[]) => void): () => void
   // ── Milestone A: email inference, AI generation, recycle bin, config ──
   syncEmailApplications(): Promise<{
@@ -1522,6 +1255,8 @@ export interface DaymateApi {
     message: string
   }>
   uploadResume(applicationId: string): Promise<ResumeVersion | null>
+  openPdfInSystem(dataUrl: string): Promise<boolean>
+  selectBaseResume(): Promise<{ path: string; fileName: string; text?: string } | null>
   generatePrepMaterial(applicationId: string): Promise<PrepMaterial>
   listResumeVersions(applicationId: string): Promise<ResumeVersion[]>
   listPrepMaterials(applicationId: string): Promise<PrepMaterial[]>
@@ -1534,21 +1269,27 @@ export interface DaymateApi {
   archiveApplication(id: string): Promise<ApplicationView | undefined>
   unarchiveApplication(id: string): Promise<ApplicationView | undefined>
   listPendingEmailMatches(): Promise<EmailMatchProposal[]>
-  confirmEmailMatch(messageId: string, applicationId?: string): Promise<void>
+  confirmEmailMatch(
+    messageId: string,
+    applicationId?: string,
+    options?: { company?: string; position?: string; jobCode?: string; eventType?: ApplicationEventType }
+  ): Promise<void>
   ignoreEmailMatch(messageId: string): Promise<void>
+  undoEmailEvent(applicationId: string, eventId: string): Promise<boolean>
+  rebindEmailEvent(fromAppId: string, eventId: string, toAppId: string): Promise<boolean>
+  deleteApplicationEvent(applicationId: string, eventId: string): Promise<ApplicationView>
+  updateApplicationStatus(
+    applicationId: string,
+    status: ApplicationEventType,
+    options?: { round?: number; evidence?: string; eventAt?: string }
+  ): Promise<ApplicationView>
+  updateApplicationJd(applicationId: string, jdText: string): Promise<Application | undefined>
   onEmailMatchesChanged(cb: (matches: EmailMatchProposal[]) => void): () => void
   getJobSearchConfig(): Promise<JobSearchSettings>
   setJobSearchConfig(config: JobSearchSettings): Promise<JobSearchSettings>
   // ── Milestone B: funnel review (stats + AI 复盘) ──
   getApplicationStats(): Promise<ApplicationFunnelStats>
   generateFunnelReview(): Promise<FunnelReviewOutput>
-  // ── Milestone C: job recommendation (抓取 + 评分 + 转投递) ──
-  fetchJobRecommendations(opts?: FetchJobRecommendationsOpts): Promise<JobRecommendations>
-  convertJobToApplication(securityId: string): Promise<ApplicationView>
-  /** Fetch the full detail (JD body, company industry/scale/stage, HR title)
-   *  for a recommended job by securityId. JD body is untrusted boss data — the
-   *  renderer renders it as text, never HTML (§17.12/§17.13). */
-  getJobDetail(securityId: string): Promise<BossJob>
   // ── Milestone D: notification prefs + 投递数据导出 ──
   getNotificationPrefs(): Promise<NotificationPrefs>
   setNotificationPrefs(prefs: NotificationPrefs): Promise<NotificationPrefs>
@@ -1560,7 +1301,7 @@ export interface DaymateApi {
   getBirthData(): Promise<BirthData | undefined>
   setBirthData(birth: BirthData): Promise<BirthData>
   clearBirthData(): Promise<void>
-  // ── ADR 0026: Home 今日天气 + 天气城市 + 晨报轮播 ──
+  // ── ADR 0026: Home 今日天气 + 天气城市 ──
   /** Today's cached weather briefing (null when not generated / stale). */
   getWeather(): Promise<WeatherBriefing | null>
   /** Force a fresh fetch + generate + cache. Returns the new briefing or null. */

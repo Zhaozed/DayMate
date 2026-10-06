@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ActivityService } from '../../src/main/services/activity-service'
 import { ApplicationService } from '../../src/main/services/application-service'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import type { Application, ApplicationEvent } from '@shared/types'
 
 // stats() aggregate (Milestone B). DESCRIPTIVE only — no productivity framing.
@@ -42,7 +41,7 @@ function makeEvent(appId: string, overrides: Partial<ApplicationEvent> = {}): Ap
 function makeService(): { svc: ApplicationService; store: InMemoryStore } {
   const store = new InMemoryStore()
   const activity = new ActivityService(store)
-  const svc = new ApplicationService(store, new MockBossProvider(), activity)
+  const svc = new ApplicationService(store, activity)
   return { svc, store }
 }
 

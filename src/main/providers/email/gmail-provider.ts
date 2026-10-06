@@ -73,7 +73,7 @@ export class GmailProvider implements EmailProvider {
     return this.deps.secrets.has(CLIENT_KEY)
   }
 
-  private async getClient(): Promise<OAuthClient> {
+  async getClient(): Promise<OAuthClient> {
     const raw = await this.deps.secrets.readKey(CLIENT_KEY)
     if (!raw) throw new Error('Gmail OAuth 客户端未配置 —— 请在「集成」中填写 client_id/secret。')
     const parsed = JSON.parse(raw) as OAuthClient
@@ -83,7 +83,7 @@ export class GmailProvider implements EmailProvider {
 
   // ── Token storage ──────────────────────────────────────────────────────────
 
-  private async loadTokens(): Promise<GmailTokens | undefined> {
+  async loadTokens(): Promise<GmailTokens | undefined> {
     const raw = await this.deps.secrets.readKey(TOKENS_KEY)
     if (!raw) return undefined
     try {
@@ -93,7 +93,7 @@ export class GmailProvider implements EmailProvider {
     }
   }
 
-  private async saveTokens(t: GmailTokens): Promise<void> {
+  async saveTokens(t: GmailTokens): Promise<void> {
     await this.deps.secrets.save(TOKENS_KEY, JSON.stringify(t))
   }
 

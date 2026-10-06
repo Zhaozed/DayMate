@@ -8,15 +8,11 @@ import type {
   GmailTestResult,
   Mail163Status,
   Mail163TestResult,
-  FeishuStatus,
-  FeishuTestResult,
-  BossStatus,
   IntegrationStatus,
   JobSearchSettings,
   NotificationPrefs,
   NotificationCategory,
   RoutineDefinition,
-  BirthData,
   TodoSettings
 } from '@shared/types'
 import { NOTIFICATION_CATEGORIES } from '@shared/types'
@@ -56,10 +52,8 @@ export function IntegrationsPage(): ReactElement {
 
       <GmailCard />
       <Mail163Card />
-      <FeishuCard />
       <LlmCard />
       <JobSearchCard />
-      <BirthDataCard />
       <WeatherCityCard />
       <TodoSettingsCard />
       <NotificationPrefsCard />
@@ -417,295 +411,6 @@ function Mail163Card(): ReactElement {
   )
 }
 
-function FeishuCard(): ReactElement {
-  const [status, setStatus] = useState<FeishuStatus | null>(null)
-  const [appId, setAppId] = useState('')
-  const [appSecret, setAppSecret] = useState('')
-  const [test, setTest] = useState<FeishuTestResult | null>(null)
-  const [busy, setBusy] = useState<'save' | 'connect' | 'disconnect' | 'test' | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
-
-  const refresh = async (): Promise<void> => {
-    try {
-      setStatus(await window.daymate.getFeishuStatus())
-      setLoadError(null)
-    } catch (e) {
-      setLoadError(e instanceof Error ? e.message : String(e))
-    }
-  }
-
-  useEffect(() => {
-    void refresh()
-  }, [])
-
-  const saveClient = async (): Promise<void> => {
-    if (!appId || !appSecret) return
-    setBusy('save')
-    setActionError(null)
-    try {
-      setStatus(await window.daymate.setFeishuClient({ appId, appSecret }))
-      setAppId('')
-      setAppSecret('')
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const connect = async (): Promise<void> => {
-    setBusy('connect')
-    setActionError(null)
-    try {
-      setStatus(await window.daymate.connectFeishu())
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const disconnect = async (): Promise<void> => {
-    setBusy('disconnect')
-    setActionError(null)
-    try {
-      setStatus(await window.daymate.disconnectFeishu())
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const runTest = async (): Promise<void> => {
-    setBusy('test')
-    setActionError(null)
-    try {
-      setTest(await window.daymate.testFeishu())
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const connected = status?.status === 'connected'
-
-  return (
-    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-white/90">飞书日历</h2>
-        <span
-          className={`rounded px-1.5 py-0.5 text-xs ${connected ? 'bg-emerald-900/60 text-emerald-200' : 'bg-white/5 text-white/45'}`}
-        >
-          {statusBadge(status?.status)}
-        </span>
-      </div>
-      <p className="mt-1 text-xs text-white/45">
-        通过用户 OAuth 连接真实飞书日历（只读）。在飞书开放平台创建一个自建应用，开启日历权限，并注册
-        <code>http://127.0.0.1:12700/callback</code> 作为回调地址。把 app_id/app_secret 粘贴到此处，再点击连接
-        （会打开浏览器授权）。凭证加密存储（钥匙串），且永不回显。日历创建/更新已推迟（只读）。
-      </p>
-
-      {loadError && (
-        <div className="mt-3 rounded border border-rose-500/20 p-2 text-xs text-rose-200" style={{ background: 'rgba(120,0,40,0.08)' }}>
-          无法加载飞书状态：{loadError}
-        </div>
-      )}
-      {actionError && (
-        <div className="mt-3 rounded border border-rose-500/20 p-2 text-xs text-rose-200" style={{ background: 'rgba(120,0,40,0.08)' }}>
-          {actionError}
-        </div>
-      )}
-
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <label className="block">
-          <span className="text-xs text-white/50">应用 ID</span>
-          <input
-            value={appId}
-            onChange={(e) => setAppId(e.target.value)}
-            placeholder={status?.hasClient ? 'cli_••••（已设置 — 留空则保持不变）' : 'cli_xxxxxxxxxxxx'}
-            className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
-          />
-        </label>
-        <label className="block">
-          <span className="text-xs text-white/50">应用密钥</span>
-          <input
-            type="password"
-            value={appSecret}
-            onChange={(e) => setAppSecret(e.target.value)}
-            placeholder={status?.hasClient ? '••••••（永不回显）' : '飞书控制台的应用密钥'}
-            className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
-          />
-        </label>
-      </div>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          onClick={saveClient}
-          disabled={busy !== null || !appId || !appSecret}
-          className="rounded px-3 py-1 text-xs text-white/80 disabled:opacity-50"
-          style={{ background: 'var(--dm-accent)' }}
-        >
-          {busy === 'save' ? '保存中…' : '保存应用'}
-        </button>
-        <button
-          onClick={connect}
-          disabled={busy !== null || !status?.hasClient || connected}
-          className="rounded px-3 py-1 text-xs text-white/80 disabled:opacity-50"
-          style={{ background: 'var(--dm-accent)' }}
-        >
-          {busy === 'connect' ? '连接中…' : '连接'}
-        </button>
-        <button
-          onClick={disconnect}
-          disabled={busy !== null || !connected}
-          className="rounded bg-white/5 px-3 py-1 text-xs text-white/60 disabled:opacity-50"
-        >
-          {busy === 'disconnect' ? '断开中…' : '断开'}
-        </button>
-        <button
-          onClick={runTest}
-          disabled={busy !== null || !connected}
-          className="rounded bg-white/5 px-3 py-1 text-xs text-white/60 disabled:opacity-50"
-        >
-          {busy === 'test' ? '测试中…' : '测试'}
-        </button>
-      </div>
-
-      {test ? (
-        <div
-          className={`mt-3 rounded p-2 text-xs ${test.ok ? 'text-emerald-200' : 'text-rose-200'}`}
-          style={{ background: test.ok ? 'rgba(0,120,80,0.12)' : 'rgba(120,0,40,0.12)' }}
-        >
-          {test.ok ? '✓' : '✗'} {test.message}
-          {test.sampleEventTitle ? ` — 首条：「${test.sampleEventTitle}」` : ''}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-// DORMANT — BOSS retired for anti-bot. Kept exported (not deleted) so
-// re-mounting <BossCard /> is a one-line change if BOSS is ever revived.
-export function BossCard(): ReactElement {
-  const [status, setStatus] = useState<BossStatus | null>(null)
-  const [busy, setBusy] = useState<'login' | 'logout' | 'sync' | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  const [actionMsg, setActionMsg] = useState<string | null>(null)
-
-  const refresh = async (): Promise<void> => {
-    try {
-      setStatus(await window.daymate.getBossStatus())
-      setLoadError(null)
-    } catch (e) {
-      setLoadError(e instanceof Error ? e.message : String(e))
-    }
-  }
-
-  useEffect(() => {
-    void refresh()
-  }, [])
-
-  const login = async (): Promise<void> => {
-    setBusy('login')
-    setActionMsg(null)
-    try {
-      const r = await window.daymate.loginBoss()
-      setStatus(r)
-      setActionMsg(r.message)
-    } catch (e) {
-      setActionMsg(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const logout = async (): Promise<void> => {
-    setBusy('logout')
-    setActionMsg(null)
-    try {
-      const r = await window.daymate.logoutBoss()
-      setStatus(r)
-      setActionMsg(r.message)
-    } catch (e) {
-      setActionMsg(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const sync = async (): Promise<void> => {
-    setBusy('sync')
-    setActionMsg(null)
-    try {
-      const r = await window.daymate.syncBossApplications()
-      setActionMsg(`${r.message}（同步 ${r.synced} 条）`)
-      // login may have flipped the delegate; refresh status too.
-      void refresh()
-    } catch (e) {
-      setActionMsg(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const connected = status?.status === 'connected'
-
-  return (
-    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-white/90">BOSS 直聘</h2>
-        <span
-          className={`rounded px-1.5 py-0.5 text-xs ${connected ? 'bg-emerald-900/60 text-emerald-200' : 'bg-white/5 text-white/45'}`}
-        >
-          {statusBadge(status?.status)}
-        </span>
-      </div>
-      <p className="mt-1 text-xs text-white/45">
-        通过本地 boss-cli 子进程连接 BOSS 直聘（读取投递 / 面试 / 沟通 + 岗位搜索）。点击「登录」会先尝试从真实浏览器提取 cookie：
-        若你已在浏览器登录 zhipin.com 且<b>完全退出该浏览器</b>，即可静默拿到被岗位搜索认可的 stoken（推荐，岗位搜索可用）；
-        否则降级为二维码（系统图片查看器弹出，用 BOSS APP 扫码），该方式可正常同步投递/面试/沟通，但<b>岗位搜索可能被 BOSS 反爬拦截</b>。
-        凭证由 boss-cli 自行保管，Daymate 不接触 cookie。stoken 过期时可在本页直接重新登录。
-      </p>
-
-      {loadError && (
-        <div className="mt-3 rounded border border-rose-500/20 p-2 text-xs text-rose-200" style={{ background: 'rgba(120,0,40,0.08)' }}>
-          无法加载 BOSS 状态：{loadError}
-        </div>
-      )}
-      {actionMsg && (
-        <div className="mt-3 rounded border border-white/10 p-2 text-xs text-white/70" style={{ background: 'rgba(0,0,0,0.2)' }}>
-          {actionMsg}
-        </div>
-      )}
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          onClick={login}
-          disabled={busy !== null}
-          className="rounded px-3 py-1 text-xs text-white/80 disabled:opacity-50"
-          style={{ background: 'var(--dm-accent)' }}
-        >
-          {busy === 'login' ? '登录中…（静默提取浏览器 cookie，失败则弹二维码）' : connected ? '重新登录' : '登录'}
-        </button>
-        <button
-          onClick={logout}
-          disabled={busy !== null || !connected}
-          className="rounded bg-white/5 px-3 py-1 text-xs text-white/60 disabled:opacity-50"
-        >
-          {busy === 'logout' ? '退出中…' : '断开'}
-        </button>
-        <button
-          onClick={sync}
-          disabled={busy !== null || !connected}
-          className="rounded bg-white/5 px-3 py-1 text-xs text-white/60 disabled:opacity-50"
-        >
-          {busy === 'sync' ? '同步中…' : '同步投递'}
-        </button>
-      </div>
-    </div>
-  )
-}
 
 function LlmCard(): ReactElement {
   const [config, setConfig] = useState<LlmConfig | null>(null)
@@ -931,11 +636,23 @@ function JobSearchCard(): ReactElement {
     }
   }
 
+  const selectFile = async (): Promise<void> => {
+    try {
+      const res = await window.daymate.selectBaseResume()
+      if (res?.path) {
+        setBaseResumePath(res.path)
+        setSaved(`已选定：${res.fileName}`)
+      }
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   return (
     <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
       <h2 className="text-sm font-semibold text-white/90">求职设置</h2>
       <p className="mt-1 text-xs text-white/45">
-        基础简历路径（生成定制简历时作为底稿，可信 §17）与逐字稿模板路径。非密设置，本地持久。求职意向已随 BOSS 搜索退场移除。
+        基础简历路径（生成定制简历时作为底稿，支持 PDF / HTML / TXT / Markdown）与逐字稿模板路径。非密设置，本地持久。
       </p>
 
       {loadError && (
@@ -946,11 +663,20 @@ function JobSearchCard(): ReactElement {
 
       <div className="mt-3 grid grid-cols-1 gap-3">
         <label className="block">
-          <span className="text-xs text-white/50">基础简历路径（绝对路径，可选）</span>
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-white/50">基础简历路径（支持 PDF / HTML / TXT / Markdown）</span>
+            <button
+              type="button"
+              onClick={selectFile}
+              className="rounded bg-white/10 px-2 py-0.5 text-xs text-white/80 hover:bg-white/20"
+            >
+              📎 选择 / 上传简历文件
+            </button>
+          </div>
           <input
             value={baseResumePath}
             onChange={(e) => setBaseResumePath(e.target.value)}
-            placeholder={cfg?.baseResumePath ?? '/Users/you/简历/base.html'}
+            placeholder={cfg?.baseResumePath ?? '/Users/you/简历/base.pdf'}
             className="mt-1 w-full rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90"
           />
         </label>
@@ -980,177 +706,6 @@ function JobSearchCard(): ReactElement {
   )
 }
 
-// ── Milestone D §D2 — notification preferences ──
-// ── Milestone E — birth data for the daily 运势 (non-secret settings.json) ──
-function BirthDataCard(): ReactElement {
-  const [birth, setBirth] = useState<BirthData | null | undefined>(undefined) // undefined = loading
-  const [form, setForm] = useState<BirthData>({ year: 2000, month: 1, day: 1 })
-  const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState<string | null>(null)
-
-  const refresh = async (): Promise<void> => {
-    try {
-      const b = await window.daymate.getBirthData()
-      setBirth(b ?? null)
-      if (b) setForm(b)
-      setMsg(null)
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : String(e))
-    }
-  }
-
-  useEffect(() => {
-    void refresh()
-  }, [])
-
-  const save = async (): Promise<void> => {
-    setBusy(true)
-    setMsg(null)
-    try {
-      await window.daymate.setBirthData(form)
-      setBirth(form)
-      setMsg('已保存。每日 08:17 将推送一条运势气泡。')
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const clear = async (): Promise<void> => {
-    setBusy(true)
-    setMsg(null)
-    try {
-      await window.daymate.clearBirthData()
-      setBirth(null)
-      setMsg('已清除。运势将退回到按日期生成的通用版本。')
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const inputCls = 'rounded border border-white/10 bg-black/30 px-2 py-1 text-sm text-white/90'
-
-  return (
-    <div className="mt-6 rounded-lg border border-white/5 p-4" style={{ background: 'var(--dm-panel)' }}>
-      <h2 className="text-sm font-semibold text-white/90">生辰信息（每日运势）</h2>
-      <p className="mt-1 text-xs text-white/45">
-        用于个性化每日运势气泡。数据为非密设置，仅存于本地 settings.json，不上传任何外部服务。
-      </p>
-
-      {msg && (
-        <div className="mt-3 rounded border border-white/10 p-2 text-xs text-white/70" style={{ background: 'rgba(0,0,0,0.2)' }}>
-          {msg}
-        </div>
-      )}
-
-      <div className="mt-3 grid grid-cols-4 gap-2">
-        <label className="flex flex-col">
-          <span className="text-xs text-white/45">出生年</span>
-          <input
-            type="number"
-            min={1900}
-            max={2100}
-            className={inputCls}
-            value={form.year}
-            onChange={(e) => setForm((f) => ({ ...f, year: Number(e.target.value) }))}
-            disabled={busy}
-          />
-        </label>
-        <label className="flex flex-col">
-          <span className="text-xs text-white/45">月</span>
-          <input
-            type="number"
-            min={1}
-            max={12}
-            className={inputCls}
-            value={form.month}
-            onChange={(e) => setForm((f) => ({ ...f, month: Number(e.target.value) }))}
-            disabled={busy}
-          />
-        </label>
-        <label className="flex flex-col">
-          <span className="text-xs text-white/45">日</span>
-          <input
-            type="number"
-            min={1}
-            max={31}
-            className={inputCls}
-            value={form.day}
-            onChange={(e) => setForm((f) => ({ ...f, day: Number(e.target.value) }))}
-            disabled={busy}
-          />
-        </label>
-        <label className="flex flex-col">
-          <span className="text-xs text-white/45">时辰（可选）</span>
-          <input
-            type="number"
-            min={0}
-            max={23}
-            placeholder="—"
-            className={inputCls}
-            value={form.hour ?? ''}
-            onChange={(e) => {
-              const v = e.target.value === '' ? undefined : Number(e.target.value)
-              setForm((f) => {
-                const next = { ...f }
-                if (v === undefined) delete next.hour
-                else next.hour = v
-                return next
-              })
-            }}
-            disabled={busy}
-          />
-        </label>
-      </div>
-      <div className="mt-2 flex items-center gap-3">
-        <label className="text-xs text-white/45">性别（可选）</label>
-        <select
-          className={inputCls}
-          value={form.gender ?? ''}
-          onChange={(e) => {
-            const v = e.target.value as '' | 'male' | 'female'
-            setForm((f) => {
-              const next = { ...f }
-              if (v === '') delete next.gender
-              else next.gender = v
-              return next
-            })
-          }}
-          disabled={busy}
-        >
-          <option value="" className="bg-zinc-800">不指定</option>
-          <option value="male" className="bg-zinc-800">男</option>
-          <option value="female" className="bg-zinc-800">女</option>
-        </select>
-        {birth && (
-          <span className="text-xs text-emerald-300/60">已配置（属{zodiacOf(birth.year)}）</span>
-        )}
-      </div>
-
-      <div className="mt-3 flex items-center gap-2">
-        <button
-          onClick={save}
-          disabled={busy}
-          className="rounded bg-white/10 px-3 py-1.5 text-sm text-white/90 hover:bg-white/20 disabled:opacity-50"
-        >
-          {busy ? '保存中…' : '保存'}
-        </button>
-        {birth && (
-          <button
-            onClick={clear}
-            disabled={busy}
-            className="rounded bg-white/5 px-3 py-1.5 text-sm text-rose-300/70 hover:bg-white/10 disabled:opacity-50"
-          >
-            清除
-          </button>
-        )}
-      </div>
-    </div>
-  )
-}
 
 // ── ADR 0026 — weather city for the daily 今日天气 card (non-secret) ──
 function WeatherCityCard(): ReactElement {
@@ -1215,11 +770,6 @@ function WeatherCityCard(): ReactElement {
   )
 }
 
-/** 生肖 derived from birth year (mirrors the agent-runtime stub). */
-const ZODIAC = ['鼠', '牛', '虎', '兔', '龙', '蛇', '马', '羊', '猴', '鸡', '狗', '猪']
-function zodiacOf(year: number): string {
-  return ZODIAC[((year - 1900) % 12 + 12) % 12]
-}
 
 // ADR 0027 — ToDo pipeline settings: school-spam skip-token editor + cold-start
 // toggle + manual re-scan button per connected account.

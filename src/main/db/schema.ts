@@ -171,6 +171,7 @@ export const applications = sqliteTable('applications', {
   notes: text('notes'),
   // Milestone A rich fields:
   city: text('city'),
+  jobCode: text('job_code'),
   salaryRange: text('salary_range'),
   jdText: text('jd_text'),
   stage: text('stage'),

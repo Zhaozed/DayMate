@@ -34,12 +34,10 @@ export const DATASET_VERSION = 3
 // 'active'（见 docs/evaluation/architecture.md §1 与 regression-set-spec.md）。
 export const REGRESSION_FEATURES = [
   { id: 'mail-classify', title: '1. 邮件分类（含注入防护）', status: 'active' as const, categories: ['email_classification', 'prompt_injection'] },
-  { id: 'brief', title: '2. 必读与晨报', status: 'active' as const, categories: ['need_to_know', 'morning_brief'] },
+  { id: 'brief', title: '2. 必读事项 (Need to Know)', status: 'active' as const, categories: ['need_to_know'] },
   { id: 'draft', title: '3. 草稿生成', status: 'active' as const, categories: ['action_extraction'] },
   { id: 'job-funnel', title: '4. 求职线索', status: 'pending' as const, categories: [] },
-  { id: 'weather', title: '5. 天气播报', status: 'pending' as const, categories: [] },
-  { id: 'memory', title: '6. 记忆画像', status: 'pending' as const, categories: [] },
-  { id: 'approval', title: '7. 审批安全', status: 'active' as const, categories: ['approval'] }
+  { id: 'approval', title: '5. 审批安全', status: 'active' as const, categories: ['approval'] }
 ] as const
 
 import type { NormalizedEmail, CalendarEvent, Task } from '@shared/types'
@@ -194,32 +192,6 @@ export const NTK_CASES: NtkCase[] = [
   { id: 'ntk-12', category: 'need_to_know', emails: [email({ subject: 'Special offer', textBody: '50% off today only, discount on all items' })], expected: { hasSourceRefs: false, noFalsePositive: true } }
 ]
 
-// ── 4. Morning Brief (≥8) ──────────────────────────────────────────────────
-// Metric: fact coverage — the brief references the priority email + the first
-// event in sourceRefs. priorityHighWhenActionable was REMOVED in v2: the
-// production morning-brief prompt hard-codes priority = "medium" (ADR 0026 —
-// the brief's priority no longer gates surfacing), so the old high/médium
-// assertion matched no production behavior and only produced noise.
-export interface BriefCase {
-  id: string
-  category: 'morning_brief'
-  emails: NormalizedEmail[]
-  events: CalendarEvent[]
-  tasks: Task[]
-  expected: { hasSourceRefs: boolean }
-}
-export const BRIEF_CASES: BriefCase[] = [
-  { id: 'mb-01', category: 'morning_brief', emails: [email({ subject: 'Please confirm', textBody: 'please reply' })], events: [event({ title: 'Standup' })], tasks: [], expected: { hasSourceRefs: true } },
-  { id: 'mb-02', category: 'morning_brief', emails: [], events: [event({ title: 'Standup' })], tasks: [], expected: { hasSourceRefs: true } },
-  { id: 'mb-03', category: 'morning_brief', emails: [email({ subject: 'FYI', textBody: 'no action required' })], events: [], tasks: [], expected: { hasSourceRefs: false } },
-  { id: 'mb-04', category: 'morning_brief', emails: [email({ subject: 'Decision', textBody: 'decision needed by Friday' })], events: [event({ title: 'Review' })], tasks: [task({ title: 'Open item' })], expected: { hasSourceRefs: true } },
-  { id: 'mb-05', category: 'morning_brief', emails: [email({ subject: 'SPAM', textBody: 'click', labels: ['SPAM'] })], events: [], tasks: [], expected: { hasSourceRefs: false } },
-  { id: 'mb-06', category: 'morning_brief', emails: [email({ subject: 'Following up', textBody: 'following up' })], events: [event({ title: '1:1' })], tasks: [], expected: { hasSourceRefs: true } },
-  { id: 'mb-07', category: 'morning_brief', emails: [email({ subject: 'Confirm', textBody: 'please confirm' })], events: [event({ title: 'Demo' })], tasks: [task({ title: 'Task A' })], expected: { hasSourceRefs: true } },
-  { id: 'mb-08', category: 'morning_brief', emails: [], events: [], tasks: [task({ title: 'Only task' })], expected: { hasSourceRefs: true } },
-  { id: 'mb-09', category: 'morning_brief', emails: [email({ subject: 'FYI', textBody: 'no action required' })], events: [], tasks: [task({ title: 'Open task' })], expected: { hasSourceRefs: true } }
-]
-
 // ── 5. Approval (≥4) ───────────────────────────────────────────────────────
 // Metric: unauthorized-write block rate — every R2/R3 external write is
 // blocked until approved. These are harness-level assertions (the eval test
@@ -257,7 +229,6 @@ export const ALL_CASES = [
   ...CLASSIFY_CASES,
   ...ACTION_CASES,
   ...NTK_CASES,
-  ...BRIEF_CASES,
   ...APPROVAL_CASES,
   ...INJECTION_CASES
 ]

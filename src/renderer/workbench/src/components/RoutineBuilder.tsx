@@ -68,27 +68,27 @@ const CATALOG: CatalogEntry[] = [
     })
   },
   {
-    key: 'morning_brief',
-    label: '生成晨报',
-    hint: 'agent · generate_morning_brief',
+    key: 'funnel_review',
+    label: '求职复盘分析',
+    hint: 'agent · generate_funnel_review',
     hasOutputKey: true,
     build: (k) => ({
-      id: k || 'brief',
+      id: k || 'review',
       type: 'agent',
-      action: 'generate_morning_brief',
-      inputs: { emails: '{{emails}}', events: '{{events}}', tasks: '{{tasks}}' },
-      outputKey: k || 'brief'
+      action: 'generate_funnel_review',
+      inputs: {},
+      outputKey: k || 'review'
     })
   },
   {
     key: 'publish_ntk',
-    label: '发布必读',
+    label: '发布动态',
     hint: 'need_to_know · 来自某个 agent 输出',
-    refField: { label: '来源输出键', placeholder: 'brief' },
+    refField: { label: '来源输出键', placeholder: 'review' },
     build: () => ({
       id: 'publish',
       type: 'need_to_know',
-      fromKey: 'brief'
+      fromKey: 'review'
     })
   },
   {

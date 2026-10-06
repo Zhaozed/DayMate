@@ -2,7 +2,7 @@
 // Everything here runs in main: no credential or token ever crosses to the
 // renderer — only validated, plain-data responses do.
 
-import { app, ipcMain, dialog } from 'electron'
+import { app, ipcMain, dialog, safeStorage, net, shell, BrowserWindow, Notification, powerMonitor } from 'electron'
 import { IPC } from './contracts'
 import type {
   AppInfo,
@@ -20,12 +20,10 @@ import type {
   RoutineDefinition,
   ApplicationCreateInput,
   ApplicationEventInput,
+  ApplicationEventType,
   ApplicationUpdateFields,
   InterviewNoteInput,
   JobSearchSettings,
-  JobRecommendations,
-  FetchJobRecommendationsOpts,
-  BossJob,
   NotificationPrefs,
   BirthData,
   TaskCreateInput,
@@ -38,6 +36,36 @@ import { getWorkbenchWindow } from '../windows/workbench-window'
 import { getContainer, initContainer } from '../app/container'
 import { nowIso } from '../util/ids'
 import { writeFile, readFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { extractTextFromPdf } from '../util/pdf'
+import { RemoteGatewayClient } from '../remote/remote-client'
+import {
+  startCallbackServer,
+  buildAuthUrl,
+  exchangeCode,
+  newState,
+  type OAuthClient
+} from '../providers/email/gmail-oauth'
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
+let remoteClient: RemoteGatewayClient | null = null
+
+export function isRemoteMode(): boolean {
+  return !!process.env.DAYMATE_SERVER_URL
+}
+
+export function getRemoteClient(): RemoteGatewayClient | null {
+  return remoteClient
+}
 
 // M0 in-memory robot state. From M4 onward the RobotStateController drives this
 // from Activity events (container.ts); it is still surfaced to the renderer
@@ -79,7 +107,12 @@ function openWindowByName(name: WindowName): void {
   else if (name === WINDOWS.robot) openRobot()
 }
 
+let ipcHandlersRegistered = false
+
 export function registerIpcHandlers(): void {
+  if (ipcHandlersRegistered) return
+  ipcHandlersRegistered = true
+
   // System / health
   ipcMain.handle(IPC.PING, () => 'pong')
   ipcMain.handle(IPC.GET_APP_INFO, () => buildAppInfo())
@@ -99,6 +132,103 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.SET_ROBOT_VIEW, (_e, view: RobotView) => {
     setRobotView(view)
   })
+
+  // In remote mode: forward all business channels to remote server
+  if (remoteClient) {
+    const localChannels = new Set<string>([
+      IPC.PING,
+      IPC.GET_APP_INFO,
+      IPC.GET_ROBOT_STATE,
+      IPC.SET_ROBOT_STATE,
+      IPC.OPEN_WINDOW,
+      IPC.OPEN_WORKBENCH_AT,
+      IPC.APP_QUIT,
+      IPC.SET_ROBOT_VIEW,
+      IPC.APPLICATION_UPLOAD_RESUME,
+      IPC.APPLICATION_SELECT_BASE_RESUME,
+      IPC.APPLICATION_EXPORT_ZIP,
+      IPC.GMAIL_CONNECT
+    ])
+
+    // Special local + remote handlers
+    ipcMain.handle(IPC.APPLICATION_UPLOAD_RESUME, async (_e, applicationId: string) => {
+      const result = await dialog.showOpenDialog({
+        title: '上传简历',
+        filters: [{ name: '简历文件 (*.pdf, *.html, *.txt, *.md)', extensions: ['pdf', 'html', 'htm', 'txt', 'md'] }],
+        properties: ['openFile']
+      })
+      if (result.canceled || result.filePaths.length === 0) return null
+      const filePath = result.filePaths[0]
+      let content: string
+      if (filePath.toLowerCase().endsWith('.pdf')) {
+        const buf = await readFile(filePath)
+        const plainText = await extractTextFromPdf(buf)
+        content = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Resume</title><style>body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; white-space: pre-wrap; line-height: 1.6; padding: 24px; color: #1f2937; }</style></head><body>${escapeHtml(plainText)}</body></html>`
+      } else {
+        content = await readFile(filePath, 'utf8')
+      }
+      return remoteClient!.call(IPC.APPLICATION_UPLOAD_RESUME, [{ applicationId, content }])
+    })
+
+    ipcMain.handle(IPC.APPLICATION_SELECT_BASE_RESUME, async () => {
+      const result = await dialog.showOpenDialog({
+        title: '选择主简历文件',
+        filters: [{ name: '简历文件 (*.pdf, *.html, *.txt, *.md)', extensions: ['pdf', 'html', 'htm', 'txt', 'md'] }],
+        properties: ['openFile']
+      })
+      if (result.canceled || result.filePaths.length === 0) return null
+      const filePath = result.filePaths[0]
+      let content = ''
+      if (filePath.toLowerCase().endsWith('.pdf')) {
+        const buf = await readFile(filePath)
+        content = await extractTextFromPdf(buf)
+      } else {
+        content = await readFile(filePath, 'utf8')
+      }
+      const current = (await remoteClient!.call(IPC.JOB_SEARCH_GET_CONFIG, [])) as JobSearchSettings
+      await remoteClient!.call(IPC.JOB_SEARCH_SET_CONFIG, [{ ...current, baseResumePath: filePath }])
+      return { path: filePath, fileName: basename(filePath), text: content.slice(0, 500) }
+    })
+
+    ipcMain.handle(IPC.APPLICATION_EXPORT_ZIP, async () => {
+      const remoteRes = (await remoteClient!.call(IPC.APPLICATION_EXPORT_ZIP, [])) as {
+        base64: string
+        filename?: string
+      }
+      const bytes = Buffer.from(remoteRes.base64, 'base64')
+      const filename = remoteRes.filename || `daymate-投递-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.zip`
+      const result = await dialog.showSaveDialog({
+        title: '导出投递数据',
+        defaultPath: filename,
+        filters: [{ name: 'ZIP', extensions: ['zip'] }]
+      })
+      if (result.canceled || !result.filePath) return null
+      await writeFile(result.filePath, bytes)
+      return result.filePath
+    })
+
+    ipcMain.handle(IPC.GMAIL_CONNECT, async () => {
+      const client = (await remoteClient!.call('daymate:gmail:get-client', [])) as OAuthClient
+      const cb = await startCallbackServer()
+      const state = newState()
+      const authUrl = buildAuthUrl(client, cb.redirectUri, state)
+      await shell.openExternal(authUrl)
+      const { code, state: returned } = await cb.waitForCode()
+      if (returned !== state) throw new Error('OAuth 状态不匹配 —— 可能存在 CSRF，已中止。')
+      const tokens = await exchangeCode(client, code, cb.redirectUri)
+      return remoteClient!.call('daymate:gmail:save-tokens', [tokens])
+    })
+
+    // Forward all remaining IPC channels
+    for (const channel of Object.values(IPC)) {
+      if (!localChannels.has(channel)) {
+        ipcMain.handle(channel, async (_e, ...args: unknown[]) => {
+          return remoteClient!.call(channel, args)
+        })
+      }
+    }
+    return
+  }
 
   const container = getContainer()
 
@@ -195,9 +325,6 @@ export function registerIpcHandlers(): void {
       if (Object.keys(clean).length === 0) return
       container.needToKnowService.update(id, clean)
     }
-  )
-  ipcMain.handle(IPC.MORNING_BRIEF_LIST, () =>
-    container.needToKnowService.listMorningBriefs(7)
   )
 
   // Activity
@@ -329,55 +456,7 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  // Feishu Calendar (Spec §10). User-OAuth (user_access_token reads the user's
-  // primary calendar); app_id/app_secret + user refresh token are credentials
-  // in the SecretStore and never cross to the renderer. Connect opens the
-  // browser authorize flow on a fixed-port loopback; the swappable calendar
-  // delegate flips to the real provider so Meeting Prep / Daily Work Summary
-  // read real events.
-  const feishuStatus = async () => ({
-    status: await container.feishuProvider.getStatus(),
-    hasClient: await container.feishuProvider.hasClient()
-  })
-  ipcMain.handle(IPC.FEISHU_SET_CLIENT, async (_e, input: { appId: string; appSecret: string }) => {
-    await container.feishuProvider.setClient(input.appId, input.appSecret)
-    return feishuStatus()
-  })
-  ipcMain.handle(IPC.FEISHU_HAS_CLIENT, () => container.feishuProvider.hasClient())
-  ipcMain.handle(IPC.FEISHU_GET_STATUS, feishuStatus)
-  ipcMain.handle(IPC.FEISHU_CONNECT, async () => {
-    await container.feishuProvider.connect()
-    await container.refreshCalendarProvider()
-    return feishuStatus()
-  })
-  ipcMain.handle(IPC.FEISHU_DISCONNECT, async () => {
-    await container.feishuProvider.disconnect()
-    await container.refreshCalendarProvider()
-    return feishuStatus()
-  })
-  ipcMain.handle(IPC.FEISHU_TEST, async () => {
-    try {
-      const start = new Date()
-      start.setHours(0, 0, 0, 0)
-      const end = new Date(start)
-      end.setHours(23, 59, 59, 999)
-      const events = await container.feishuProvider.listEvents({
-        start: start.toISOString(),
-        end: end.toISOString()
-      })
-      return {
-        ok: true,
-        message:
-          events.length > 0
-            ? `已连接 —— 今日读取到 ${events.length} 个日历事件。`
-            : '已连接 —— 主日历可读，今日无事件。',
-        eventCount: events.length,
-        sampleEventTitle: events[0]?.title
-      }
-    } catch (e) {
-      return { ok: false, message: e instanceof Error ? e.message : String(e) }
-    }
-  })
+  // Memory (M5 — Spec §16)
   ipcMain.handle(IPC.MEMORY_LIST, () => container.memoryService.list())
   ipcMain.handle(IPC.MEMORY_SAVE, (_e, input: MemorySaveInput) => {
     const item = container.memoryService.save(input)
@@ -389,10 +468,6 @@ export function registerIpcHandlers(): void {
     container.broadcastMemory()
     return item
   })
-  // Confirm a proposed item via the service path (not the generic update) so
-  // the "one confirmed value per key" demote logic in service.confirm() runs
-  // — the UI used to call update({confirmed:true}) which bypassed it, leaving
-  // stale duplicate confirmed rows for the same key.
   ipcMain.handle(IPC.MEMORY_CONFIRM, (_e, id: string) => {
     const item = container.memoryService.confirm(id)
     container.broadcastMemory()
@@ -402,23 +477,9 @@ export function registerIpcHandlers(): void {
     container.memoryService.delete(id)
     container.broadcastMemory()
   })
-  ipcMain.handle(IPC.MEMORY_GENERATE_PERSONA, async () => {
-    // On-demand persona inference (§16). Manual AI — NOT via the Routine
-    // Engine (mirrors generateResume/generateFunnelReview). Reads the user's
-    // own sent mail from every connected provider, runs `generate_persona`,
-    // saves proposals as confirmed:false. §17: sent mail is trusted voice
-    // (frameSentReply), never an instruction source.
-    const output = await container.memoryService.generatePersona(
-      container.emailProviders,
-      container.agentRuntime
-    )
-    container.broadcastMemory()
-    return output
-  })
 
-  // Job applications (boss-cli integration) — the cross-channel funnel panel.
-  // Manual create / add-event are local R1 writes (no approval); boss sync
-  // pulls `boss applied/interviews/chat` into the funnel and is idempotent.
+  // Job applications — the cross-channel funnel panel.
+  // Manual create / add-event are local R1 writes (no approval).
   ipcMain.handle(IPC.APPLICATION_LIST, () => container.applicationService.list())
   ipcMain.handle(IPC.APPLICATION_CREATE, (_e, input: ApplicationCreateInput) => {
     const view = container.applicationService.create(input)
@@ -445,90 +506,46 @@ export function registerIpcHandlers(): void {
   // UNTRUSTED public web content — never enters model context (the model never
   // calls this tool; it's a deterministic step), stored as data, rendered in a
   // `sandbox=""` iframe. R1 local write (§15 only gates external writes).
-  ipcMain.handle(IPC.APPLICATION_FETCH_JD, async (_e, applicationId: string) => {
-    const app = container.applicationService.list().find((v) => v.application.id === applicationId)
-    if (!app) return { jdText: null, error: '未找到投递记录' }
-    const result = await container.toolRegistry.execute(
-      'web.fetch_jd',
-      { company: app.application.company, position: app.application.position },
-      {
-        emailProviders: container.emailProviders,
-        calendarProvider: container.calendarProvider,
-        bossProvider: container.bossProvider,
-        taskService: container.taskService,
-        needToKnowService: container.needToKnowService,
-        activityService: container.activityService,
-        memoryService: container.memoryService,
-        applicationService: container.applicationService,
-        settings: container.settings,
-        webFetch: container.webFetch,
-        notify: (m: string) => container.notificationService.notify({ message: m, category: 'info' })
+  ipcMain.handle(
+    IPC.APPLICATION_FETCH_JD,
+    async (
+      _e,
+      applicationId: string,
+      overrides?: { company?: string; position?: string; jobCode?: string }
+    ) => {
+      const app = container.applicationService.list().find((v) => v.application.id === applicationId)
+      if (!app) return { jdText: null, error: '未找到投递记录' }
+      const company = overrides?.company?.trim() || app.application.company
+      const position = overrides?.position?.trim() || app.application.position
+      const jobCode = overrides?.jobCode?.trim() || app.application.jobCode
+      const result = await container.toolRegistry.execute(
+        'web.fetch_jd',
+        { company, position, jobCode },
+        {
+          emailProviders: container.emailProviders,
+          calendarProvider: container.calendarProvider,
+          taskService: container.taskService,
+          needToKnowService: container.needToKnowService,
+          activityService: container.activityService,
+          memoryService: container.memoryService,
+          applicationService: container.applicationService,
+          settings: container.settings,
+          webFetch: container.webFetch,
+          notify: (m: string) => container.notificationService.notify({ message: m, category: 'info' })
+        }
+      )
+      let text = (result.status === 'ok' ? (result.data as { text?: string }).text : '') || ''
+      if (!text) {
+        text = (await container.applicationService.fetchJd(company, position, jobCode)) || ''
       }
-    )
-    if (result.status !== 'ok') {
-      return { jdText: null, error: 'error' in result ? result.error : 'web 抓取失败' }
-    }
-    const data = result.data as { text?: string; note?: string }
-    const text = data.text ?? ''
-    if (text) {
-      container.applicationService.updateFields(applicationId, { jdText: text })
-      container.broadcastApplications()
-    }
-    return { jdText: text || null, error: data.note ?? null }
-  })
-  ipcMain.handle(IPC.APPLICATION_SYNC_BOSS, async () => {
-    const result = await container.applicationService.syncFromBoss()
-    container.broadcastApplications()
-    // Reconcile the boss delegate after a sync (auth may have changed).
-    void container.refreshBossProvider()
-    return result
-  })
-  // boss-cli login/cookie health (never a cookie crosses to the renderer).
-  ipcMain.handle(IPC.BOSS_GET_STATUS, async () => {
-    try {
-      const status = await container.bossCliProvider.getStatus()
-      return {
-        status,
-        authenticated: status === 'connected',
-        message: status === 'connected' ? 'BOSS 直聘已连接' : 'BOSS 直聘未连接（请安装 boss-cli 并在浏览器登录 zhipin.com）'
+      if (text) {
+        container.applicationService.updateFields(applicationId, { jdText: text })
+        container.broadcastApplications()
       }
-    } catch (e) {
-      return {
-        status: 'disconnected' as const,
-        authenticated: false,
-        message: e instanceof Error ? e.message : String(e)
-      }
+      const note = result.status === 'ok' ? (result.data as { note?: string }).note : undefined
+      return { jdText: text || null, error: text ? null : (note ?? '未能获取到 JD') }
     }
-  })
-
-  // boss-cli interactive QR login / logout from the workbench Integrations
-  // page. `login` spawns `boss login --qrcode` — the QR opens in the system
-  // image viewer (boss-cli's own behavior); camoufox regenerates __zp_stoken__
-  // after the phone scan. After success/failure, reconcile the swappable
-  // delegate so the real provider takes over (or mock falls back). Never a
-  // cookie crosses to the renderer.
-  ipcMain.handle(IPC.BOSS_LOGIN, async () => {
-    const res = await container.bossCliProvider.login()
-    if (res.success) {
-      await container.refreshBossProvider()
-    }
-    const status = await container.bossCliProvider.getStatus()
-    return {
-      status,
-      authenticated: status === 'connected',
-      message: res.message
-    }
-  })
-  ipcMain.handle(IPC.BOSS_LOGOUT, async () => {
-    const res = await container.bossCliProvider.logout()
-    await container.refreshBossProvider()
-    const status = await container.bossCliProvider.getStatus()
-    return {
-      status,
-      authenticated: status === 'connected',
-      message: res.message
-    }
-  })
+  )
 
   // ── Milestone A: rich-field CRUD, email inference, AI generation, config ──
   ipcMain.handle(
@@ -536,8 +553,43 @@ export function registerIpcHandlers(): void {
     async () => {
       const result = await container.applicationService.syncFromEmails(
         container.emailProviders,
-        container.agentRuntime
+        container.agentRuntime,
+        {}
       )
+      // Auto-enrich JD for any application missing JD text
+      const apps = container.applicationService.list()
+      for (const app of apps) {
+        if (!app.application.jdText && (app.application.company || app.application.position)) {
+          void container.toolRegistry.execute(
+            'web.fetch_jd',
+            {
+              company: app.application.company,
+              position: app.application.position,
+              jobCode: app.application.jobCode
+            },
+            {
+              emailProviders: container.emailProviders,
+              calendarProvider: container.calendarProvider,
+              taskService: container.taskService,
+              needToKnowService: container.needToKnowService,
+              activityService: container.activityService,
+              memoryService: container.memoryService,
+              applicationService: container.applicationService,
+              settings: container.settings,
+              webFetch: container.webFetch,
+              notify: (m: string) => container.notificationService.notify({ message: m, category: 'info' })
+            }
+          ).then((res) => {
+            if (res.status === 'ok') {
+              const data = res.data as { text?: string }
+              if (data.text) {
+                container.applicationService.updateFields(app.application.id, { jdText: data.text })
+                container.broadcastApplications()
+              }
+            }
+          }).catch(() => {})
+        }
+      }
       container.broadcastApplications()
       container.broadcastEmailMatches()
       return result
@@ -553,15 +605,34 @@ export function registerIpcHandlers(): void {
     const result = await dialog.showOpenDialog({
       title: '上传简历',
       filters: [
-        { name: '简历文件', extensions: ['html', 'htm', 'txt', 'md'] }
+        { name: '简历文件 (*.pdf, *.html, *.txt, *.md)', extensions: ['pdf', 'html', 'htm', 'txt', 'md'] }
       ],
       properties: ['openFile']
     })
     if (result.canceled || result.filePaths.length === 0) return null
-    const content = await readFile(result.filePaths[0], 'utf8')
+    const filePath = result.filePaths[0]
+    let content: string
+    if (filePath.toLowerCase().endsWith('.pdf')) {
+      const buf = await readFile(filePath)
+      content = `data:application/pdf;base64,${buf.toString('base64')}`
+    } else {
+      content = await readFile(filePath, 'utf8')
+    }
     const version = container.applicationService.saveResume(applicationId, content)
     container.broadcastApplications()
     return version
+  })
+  ipcMain.handle(IPC.APPLICATION_OPEN_PDF, async (_e, dataUrlOrBase64: string) => {
+    let buf: Buffer
+    if (dataUrlOrBase64.startsWith('data:application/pdf;base64,')) {
+      buf = Buffer.from(dataUrlOrBase64.slice('data:application/pdf;base64,'.length), 'base64')
+    } else {
+      buf = Buffer.from(dataUrlOrBase64, 'base64')
+    }
+    const tmpPath = join(tmpdir(), `daymate-resume-${Date.now()}.pdf`)
+    await writeFile(tmpPath, buf)
+    await shell.openPath(tmpPath)
+    return true
   })
   ipcMain.handle(IPC.APPLICATION_GENERATE_PREP, async (_e, applicationId: string) => {
     const material = await container.applicationService.generatePrepMaterial(
@@ -610,8 +681,34 @@ export function registerIpcHandlers(): void {
     container.broadcastApplications()
     return view
   })
-  // ── Milestone B: funnel review (stats + AI 复盘) ──
   ipcMain.handle(IPC.APPLICATION_STATS, () => container.applicationService.stats())
+  ipcMain.handle(IPC.APPLICATION_UNDO_EVENT, (_e, applicationId: string, eventId: string) =>
+    container.applicationService.undoEmailEvent(applicationId, eventId)
+  )
+  ipcMain.handle(IPC.APPLICATION_REBIND_EVENT, (_e, fromAppId: string, eventId: string, toAppId: string) =>
+    container.applicationService.rebindEmailEvent(fromAppId, eventId, toAppId)
+  )
+  ipcMain.handle(IPC.APPLICATION_DELETE_EVENT, (_e, applicationId: string, eventId: string) => {
+    const view = container.applicationService.deleteEvent(applicationId, eventId)
+    container.broadcastApplications()
+    return view
+  })
+  ipcMain.handle(
+    IPC.APPLICATION_UPDATE_STATUS,
+    (
+      _e,
+      applicationId: string,
+      status: ApplicationEventType,
+      options?: { round?: number; evidence?: string; eventAt?: string }
+    ) => {
+      const view = container.applicationService.updateStatus(applicationId, status, options)
+      container.broadcastApplications()
+      return view
+    }
+  )
+  ipcMain.handle(IPC.APPLICATION_UPDATE_JD, (_e, applicationId: string, jdText: string) =>
+    container.applicationService.updateJdText(applicationId, jdText)
+  )
   ipcMain.handle(IPC.APPLICATION_GENERATE_FUNNEL_REVIEW, async () => {
     // Manual AI generation — does NOT go through the Routine Engine (mirrors
     // generateResume/generatePrepMaterial). The recap is an on-demand snapshot;
@@ -621,56 +718,28 @@ export function registerIpcHandlers(): void {
     )
     return review
   })
-  ipcMain.handle(
-    IPC.JOB_RECOMMENDATIONS_FETCH,
-    async (_e, opts?: FetchJobRecommendationsOpts): Promise<JobRecommendations> => {
-      // Manual 抓取 — reads jobIntent from settings (server-side, never from the
-      // renderer), searches BOSS in two buckets (实习 + 秋招正职), scores via
-      // the `score_job_matches` agent step, splits results by securityId. No args
-      // = refresh both buckets (page 1); {bucket, append:true} = next page for
-      // one bucket. Mirrors generateFunnelReview (manual AI, not via Routine Engine).
-      const { jobIntent } = await container.settings.readJobSearch()
-      if (!jobIntent) {
-        return {
-          title: '岗位推荐',
-          summary: '尚未配置求职意向，请在「岗位推荐」区设置关键词/城市/薪资。',
-          reason: 'jobIntent 未配置',
-          priority: 'medium',
-          intern: [],
-          campus: [],
-          internHasMore: false,
-          campusHasMore: false,
-          internFetched: false,
-          campusFetched: false
-        } satisfies JobRecommendations
-      }
-      return container.applicationService.fetchJobRecommendations(
-        container.agentRuntime,
-        jobIntent,
-        opts ?? {}
-      )
-    }
-  )
-  ipcMain.handle(IPC.JOB_CONVERT_TO_APPLICATION, (_e, securityId: string) => {
-    const view = container.applicationService.convertJobToApplication(securityId)
-    container.broadcastApplications()
-    return view
-  })
-  // Full job detail (JD body, company industry/scale/stage, HR title) for the
-  // clickable job-card detail view. JD body is untrusted boss data — rendered
-  // as text by the renderer, never HTML (§17.12/§17.13).
-  ipcMain.handle(IPC.JOB_DETAIL_GET, async (_e, securityId: string): Promise<BossJob> => {
-    return container.bossProvider.getJobDetail(securityId)
-  })
   // Pending email→application match queue (§3.3 待确认队列).
   ipcMain.handle(IPC.EMAIL_MATCHES_LIST, () =>
     container.applicationService.listPendingEmailMatches()
   )
-  ipcMain.handle(IPC.EMAIL_MATCH_CONFIRM, (_e, messageId: string, applicationId?: string) => {
-    container.applicationService.confirmEmailMatch(messageId, applicationId)
-    container.broadcastApplications()
-    container.broadcastEmailMatches()
-  })
+  ipcMain.handle(
+    IPC.EMAIL_MATCH_CONFIRM,
+    (
+      _e,
+      messageId: string,
+      applicationId?: string,
+      options?: {
+        company?: string
+        position?: string
+        jobCode?: string
+        eventType?: import('@shared/types').ApplicationEventType
+      }
+    ) => {
+      container.applicationService.confirmEmailMatch(messageId, applicationId, options)
+      container.broadcastApplications()
+      container.broadcastEmailMatches()
+    }
+  )
   ipcMain.handle(IPC.EMAIL_MATCH_IGNORE, (_e, messageId: string) => {
     container.applicationService.ignoreEmailMatch(messageId)
     container.broadcastEmailMatches()
@@ -702,6 +771,33 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.JOB_SEARCH_SET_CONFIG, (_e, jobSearch: JobSearchSettings) =>
     container.settings.writeJobSearch(jobSearch)
   )
+  ipcMain.handle(IPC.APPLICATION_SELECT_BASE_RESUME, async () => {
+    const result = await dialog.showOpenDialog({
+      title: '选择主简历文件',
+      filters: [
+        { name: '简历文件 (*.pdf, *.html, *.txt, *.md)', extensions: ['pdf', 'html', 'htm', 'txt', 'md'] }
+      ],
+      properties: ['openFile']
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    const filePath = result.filePaths[0]
+    const current = await container.settings.readJobSearch()
+    await container.settings.writeJobSearch({
+      ...current,
+      baseResumePath: filePath
+    })
+    let text = ''
+    try {
+      text = (await container.settings.readBaseResumeContent()) ?? ''
+    } catch {
+      // best-effort
+    }
+    return {
+      path: filePath,
+      fileName: basename(filePath),
+      text: text.slice(0, 500)
+    }
+  })
   // Milestone D — notification prefs (non-secret) + 投递 data export.
   ipcMain.handle(IPC.NOTIFICATION_GET_PREFS, () => container.settings.readNotifications())
   ipcMain.handle(IPC.NOTIFICATION_SET_PREFS, async (_e, prefs: NotificationPrefs) => {
@@ -791,13 +887,52 @@ export function registerIpcHandlers(): void {
   })
 }
 
+let containerBootstrapped = false
+
 // Called from bootstrap once the app is ready and the DB path is resolvable.
 export function bootstrapContainer(): void {
-  const c = initContainer()
+  if (containerBootstrapped) return
+  containerBootstrapped = true
+
+  if (process.env.DAYMATE_SERVER_URL) {
+    console.log(`[bootstrap] Operating in REMOTE mode. Target server: ${process.env.DAYMATE_SERVER_URL}`)
+    remoteClient = new RemoteGatewayClient({
+      serverUrl: process.env.DAYMATE_SERVER_URL,
+      token: process.env.DAYMATE_SERVER_TOKEN || ''
+    })
+    remoteClient.connect()
+    return
+  }
+
+  const c = initContainer({
+    dataDir: app.getPath('userData'),
+    safeStorage,
+    fetch: net.fetch,
+    openExternal: (url) => shell.openExternal(url),
+    broadcaster: (channel, ...args) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send(channel, ...args)
+      }
+    },
+    onRobotStateChange: (s) => setRobotState(s),
+    onRobotNotify: (n) => pushRobotNotify(n),
+    notifier: (title, body) => {
+      try {
+        new Notification({ title, body }).show()
+      } catch {
+        // notification not supported
+      }
+    },
+    onWake: (cb) => {
+      try {
+        powerMonitor.on('resume', cb)
+      } catch {
+        // powerMonitor not supported
+      }
+    }
+  })
   // If real-provider tokens are already in the Keychain from a prior session,
   // swap the real providers back in now so a restart reconnects automatically
   // (Spec §9). Fire-and-forget — the scheduler runs mock-safe until it resolves.
   void c.refreshEmailProviders()
-  void c.refreshCalendarProvider()
-  void c.refreshBossProvider()
 }

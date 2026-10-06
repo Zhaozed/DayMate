@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ApplicationService } from '../../src/main/services/application-service'
 import { ActivityService } from '../../src/main/services/activity-service'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { runAgentStep } from '../../src/main/agent/agent-runtime'
 import type { EmailProvider } from '../../src/main/providers/email/email-provider'
 import type { NormalizedEmail } from '@shared/types'
@@ -14,7 +13,7 @@ const runtime = { runAgentStep: (a: string, i: Record<string, unknown>) => runAg
 function makeService(): { svc: ApplicationService; store: InMemoryStore; activity: ActivityService } {
   const store = new InMemoryStore()
   const activity = new ActivityService(store)
-  const svc = new ApplicationService(store, new MockBossProvider(), activity)
+  const svc = new ApplicationService(store, activity)
   return { svc, store, activity }
 }
 
@@ -400,5 +399,23 @@ describe('application service — email→application inference (§3.3)', () => 
     expect(calls).toBe(1) // syncFromEmails broadcasts once after filling the queue
     svc.ignoreEmailMatch('m8')
     expect(calls).toBe(2)
+  })
+
+  it('resume update email creates an application with extracted position and jobCode', async () => {
+    const { svc } = makeService()
+    const updateMail = makeEmail({
+      messageId: 'm-resume-up',
+      fromName: '优必选招聘',
+      subject: '【优必选】请完善您的个人简历与应聘信息',
+      body: '尊敬的候选人：您好！感谢您应聘产品经理岗位（职位编号：J18671）。请在3日内补充/更新您的个人信息及简历附件。'
+    })
+    const res = await svc.syncFromEmails([makeEmailProvider([updateMail])], runtime)
+    expect(res.synced).toBe(1)
+    const apps = svc.list()
+    expect(apps.length).toBe(1)
+    expect(apps[0].application.company).toContain('优必选')
+    expect(apps[0].application.position).toBe('产品经理')
+    expect(apps[0].application.jobCode).toBe('J18671')
+    expect(apps[0].events.some((e) => e.type === 'applied')).toBe(true)
   })
 })

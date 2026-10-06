@@ -4,14 +4,13 @@ import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
 import { ActivityService } from '../../src/main/services/activity-service'
 import { ApplicationService } from '../../src/main/services/application-service'
-import { MockBossProvider } from '../../src/main/providers/boss/mock-boss-provider'
 import { writeZip } from '../../src/main/util/zip-writer'
 import type { Application, ApplicationEvent, InterviewNote, PrepMaterial, ResumeVersion } from '@shared/types'
 
 function makeService() {
   const store = new InMemoryStore()
   const activity = new ActivityService(store)
-  const svc = new ApplicationService(store, new MockBossProvider(), activity)
+  const svc = new ApplicationService(store, activity)
   return { svc, store }
 }
 
