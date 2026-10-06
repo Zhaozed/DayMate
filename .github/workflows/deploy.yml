@@ -64,3 +64,7 @@ jobs:
             npm install --omit=dev
             pm2 reload server.js --update-env || pm2 start server.js --name daymate --time
             pm2 save
+            sleep 3
+            pm2 status
+            pm2 logs daymate --lines 40 --nostream
+            curl -sS -v http://127.0.0.1:3210/health || true
