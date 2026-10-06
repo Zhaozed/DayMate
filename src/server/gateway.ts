@@ -144,8 +144,12 @@ export class ServerGateway {
 
       ws.on('finish', async () => {
         try {
-          const { rename } = await import('node:fs/promises')
+          const { rename, unlink } = await import('node:fs/promises')
           await rename(tmpPath, targetPath)
+          if (filename === 'daymate.db') {
+            try { await unlink(resolve(targetDir, 'daymate.db-wal')) } catch {}
+            try { await unlink(resolve(targetDir, 'daymate.db-shm')) } catch {}
+          }
           console.log(`[sync] Successfully received and saved: ${filename}`)
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ success: true, filename }))
@@ -180,15 +184,28 @@ export class ServerGateway {
       const targetDir = this.options.dataDir || './data'
       const dbPath = resolve(targetDir, 'daymate.db')
       const size = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0
+      const files = fs.existsSync(targetDir) ? fs.readdirSync(targetDir) : []
       const apps = this.options.container.store.listApplications()
       const tasks = this.options.container.store.listTasks()
+      const ntk = this.options.container.store.listNeedToKnow()
+      let settingsJson: any = null
+      try {
+        const sPath = resolve(targetDir, 'settings.json')
+        if (fs.existsSync(sPath)) {
+          settingsJson = JSON.parse(fs.readFileSync(sPath, 'utf8'))
+        }
+      } catch {}
+
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({
         targetDir,
         dbPath,
         dbSize: size,
+        files,
         appsCount: apps.length,
         tasksCount: tasks.length,
+        ntkCount: ntk.length,
+        purgeVersion: settingsJson?.todo?.purgeVersion,
         pid: process.pid,
         uptime: process.uptime()
       }))

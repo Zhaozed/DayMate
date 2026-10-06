@@ -68,27 +68,41 @@ async function reloadServer() {
 
 async function verifyServer() {
   console.log('[verify] Waiting for server to come back up...')
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 15; i++) {
     await new Promise((r) => setTimeout(r, 1000))
     try {
-      const res = await fetch(`${SERVER_URL}/health`)
+      const res = await fetch(`${SERVER_URL}/api/debug`, {
+        headers: { 'x-daymate-token': SERVER_TOKEN }
+      })
       if (res.ok) {
         const json = await res.json()
-        console.log('[done] Cloud server is ONLINE and healthy! Response:', json)
-        return
+        console.log('[done] Cloud server is ONLINE and verified!')
+        console.log(`[data] DB Size: ${(json.dbSize / 1024 / 1024).toFixed(2)} MB | Apps: ${json.appsCount} | Tasks: ${json.tasksCount} | NTK: ${json.ntkCount ?? 'N/A'}`)
+        return json
       }
     } catch {
       // Retrying
     }
   }
-  throw new Error('Server did not respond within 10 seconds after reload.')
+  throw new Error('Server did not respond within 15 seconds after reload.')
 }
 
 async function main() {
   console.log(`Syncing data to: ${SERVER_URL}`)
   console.log(`Local data dir:  ${USER_DATA}`)
 
-  const files = ['daymate.db', 'settings.json', 'base_resume.html']
+  // 1. Checkpoint WAL on local database to guarantee daymate.db is completely consolidated
+  try {
+    const { execSync } = await import('node:child_process')
+    console.log('[local] Checkpointing local SQLite WAL...')
+    execSync(`sqlite3 "${join(USER_DATA, 'daymate.db')}" "PRAGMA wal_checkpoint(TRUNCATE);"`)
+    console.log('[local] Local WAL checkpoint complete.')
+  } catch (err) {
+    console.warn('[local] Notice: sqlite3 checkpoint command output:', err.message)
+  }
+
+  // 2. Upload settings.json FIRST so todo.purgeVersion is 9 before any DB initialization
+  const files = ['settings.json', 'base_resume.html', 'daymate.db']
   for (const f of files) {
     await uploadFile(f)
   }
