@@ -37,6 +37,12 @@ export class RemoteGatewayClient {
         this.connected = true
         this.isConnecting = false
         console.log(`[remote-client] Connected to remote Daymate server: ${this.options.serverUrl}`)
+        // Notify local renderer windows to refresh data now that connection is established
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send(IPC.ACTIVITY_CHANGED, [])
+          win.webContents.send(IPC.APPLICATION_CHANGED)
+          win.webContents.send(IPC.TASKS_CHANGED)
+        }
       })
 
       this.ws.on('message', (data: Buffer | string) => {
@@ -70,6 +76,12 @@ export class RemoteGatewayClient {
         this.connected = false
         this.isConnecting = false
         this.ws = null
+        // Reject pending calls immediately instead of hanging for 30s
+        for (const [, { reject, timer }] of this.pendingCalls.entries()) {
+          clearTimeout(timer)
+          reject(new Error('WebSocket connection closed'))
+        }
+        this.pendingCalls.clear()
         this.scheduleReconnect()
       })
 
@@ -78,6 +90,11 @@ export class RemoteGatewayClient {
         this.connected = false
         this.isConnecting = false
         this.ws = null
+        for (const [, { reject, timer }] of this.pendingCalls.entries()) {
+          clearTimeout(timer)
+          reject(new Error(`WebSocket error: ${err.message}`))
+        }
+        this.pendingCalls.clear()
         this.scheduleReconnect()
       })
     } catch {
@@ -93,7 +110,7 @@ export class RemoteGatewayClient {
       this.reconnectTimer = null
       console.log('[remote-client] Attempting to reconnect to remote server...')
       this.connect()
-    }, 3000)
+    }, 2000)
   }
 
   private handleServerEvent(channel: string, args: unknown[]): void {
@@ -120,7 +137,7 @@ export class RemoteGatewayClient {
             this.pendingCalls.delete(id)
             reject(new Error(`Remote RPC timeout for ${channel}`))
           }
-        }, 30000)
+        }, 10000)
 
         this.pendingCalls.set(id, { resolve, reject, timer })
         this.ws!.send(JSON.stringify({ id, channel, args }))
@@ -135,7 +152,8 @@ export class RemoteGatewayClient {
         'Content-Type': 'application/json',
         'X-Daymate-Token': this.options.token
       },
-      body: JSON.stringify({ channel, args })
+      body: JSON.stringify({ channel, args }),
+      signal: AbortSignal.timeout(10000)
     })
 
     if (!res.ok) {

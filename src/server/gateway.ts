@@ -63,7 +63,11 @@ export class ServerGateway {
           ws.send(JSON.stringify({ id, success: true, result }))
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : String(err)
-          ws.send(JSON.stringify({ success: false, error: errorMsg }))
+          let msgId: string | undefined
+          try {
+            msgId = JSON.parse(data.toString())?.id
+          } catch {}
+          ws.send(JSON.stringify({ id: msgId, success: false, error: errorMsg }))
         }
       })
 
