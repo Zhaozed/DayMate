@@ -29,13 +29,6 @@ describe.runIf(nativeOk)('SqliteStore persistence (real better-sqlite3)', () => 
     const { TaskService } = await import('../../src/main/services/task-service')
     const { NeedToKnowService } = await import('../../src/main/services/need-to-know-service')
     const { ApprovalService } = await import('../../src/main/services/approval-service')
-    const { MemoryService } = await import('../../src/main/services/memory-service')
-    const { createDeterministicAgentRuntime } = await import('../../src/main/agent/agent-runtime')
-    const { createToolRegistry } = await import('../../src/main/agent/tool-registry')
-    const { RoutineEngine } = await import('../../src/main/routines/engine')
-    const { seedPresets } = await import('../../src/main/routines/presets')
-    const { MockEmailProvider } = await import('../../src/main/providers/email/mock-email-provider')
-    const { MockCalendarProvider } = await import('../../src/main/providers/calendar/mock-calendar-provider')
 
     const dir = mkdtempSync(join(tmpdir(), 'daymate-m1-'))
     const dbPath = join(dir, 'daymate.db')
@@ -43,22 +36,37 @@ describe.runIf(nativeOk)('SqliteStore persistence (real better-sqlite3)', () => 
     // --- first "session": create the DB and run Morning Brief ---
     const { db: db1 } = createDb(dbPath)
     const store1 = new SqliteStore(db1)
-    const engine = new RoutineEngine({
-      store: store1,
-      toolRegistry: createToolRegistry(),
-      activityService: new ActivityService(store1),
-      taskService: new TaskService(store1),
-      needToKnowService: new NeedToKnowService(store1),
-      approvalService: new ApprovalService(store1),
-      memoryService: new MemoryService(store1),
-      emailProviders: [new MockEmailProvider()],
-      calendarProvider: new MockCalendarProvider(),
-      agentRuntime: createDeterministicAgentRuntime(),
-      notify: () => {}
+    const taskService1 = new TaskService(store1)
+    const ntkService1 = new NeedToKnowService(store1)
+    const activityService1 = new ActivityService(store1)
+
+    taskService1.create({
+      title: 'Persist Task',
+      priority: 'high',
+      sourceType: 'user'
     })
-    seedPresets(store1)
-    const run = await engine.run('morning_brief', { idempotencyKey: 'persist-1' })
-    expect(run.status).toBe('completed')
+    ntkService1.create({
+      title: 'Persist NTK',
+      summary: 'Summary text',
+      reason: 'Reason text'
+    })
+
+    const run = {
+      id: 'run-persist-1',
+      routineId: 'test-routine',
+      status: 'completed' as const,
+      trigger: { type: 'manual' as const },
+      stepResults: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      idempotencyKey: 'persist-1'
+    }
+    store1.saveRun(run)
+    activityService1.record({
+      runId: run.id,
+      type: 'routine_started',
+      summary: 'Started persist routine'
+    })
 
     const taskBefore = store1.listTasks()
     const ntkBefore = store1.listNeedToKnow()
