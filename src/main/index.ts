@@ -3,10 +3,24 @@
 // execution, Routine scheduling and database writes run here, in main. The
 // renderer communicates through typed IPC only.
 
+import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { app, BrowserWindow } from 'electron'
 import { openWorkbench } from './windows'
 import { registerIpcHandlers, bootstrapContainer } from './ipc/handlers'
 import { installContentSecurityPolicy } from './security/csp'
+
+// Load .env configuration (e.g. DAYMATE_SERVER_URL for remote cloud mode)
+try {
+  if (typeof process.loadEnvFile === 'function') {
+    const envPath = resolve(process.cwd(), '.env')
+    if (existsSync(envPath)) {
+      process.loadEnvFile(envPath)
+    }
+  }
+} catch {
+  // Ignore env loading error
+}
 
 // Prevent transient background network/socket errors (e.g. IMAP ECONNRESET, Socket timeout)
 // from triggering Electron's default native modal crash dialogs.
