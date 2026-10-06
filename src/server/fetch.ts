@@ -1,17 +1,29 @@
-import { fetch as undiciFetch, ProxyAgent } from 'undici'
 import type { GmailFetch } from '../main/providers/email/gmail-oauth'
 
 /**
- * Creates a fetch implementation that routes through a proxy (e.g. SOCKS5/HTTP proxy on 127.0.0.1:7890)
- * when `proxyUrl` is configured. If `proxyUrl` is omitted, returns the standard global fetch.
+ * Creates a fetch implementation. If `proxyUrl` is omitted or empty,
+ * returns standard globalThis.fetch. If `proxyUrl` is configured, dynamically
+ * delegates to undici ProxyAgent.
  */
 export function createProxyFetch(proxyUrl?: string): GmailFetch {
   const url = proxyUrl ?? process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY
   if (!url || url.trim().length === 0) {
-    return globalThis.fetch
+    return (input: string, init?: Parameters<typeof fetch>[1]) => {
+      return globalThis.fetch(input, init)
+    }
   }
-  const dispatcher = new ProxyAgent(url)
-  return ((input: string, init?: Parameters<typeof fetch>[1]) => {
-    return undiciFetch(input, { ...init, dispatcher } as Parameters<typeof undiciFetch>[1])
-  }) as unknown as GmailFetch
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { fetch: undiciFetch, ProxyAgent } = require('undici')
+    const dispatcher = new ProxyAgent(url)
+    return ((input: string, init?: Parameters<typeof fetch>[1]) => {
+      return undiciFetch(input, { ...init, dispatcher } as Parameters<typeof undiciFetch>[1])
+    }) as unknown as GmailFetch
+  } catch {
+    console.warn('[proxy] Proxy configured but undici ProxyAgent unavailable; falling back to global fetch.')
+    return (input: string, init?: Parameters<typeof fetch>[1]) => {
+      return globalThis.fetch(input, init)
+    }
+  }
 }

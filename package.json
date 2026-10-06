@@ -16,7 +16,7 @@
     "dist": "electron-vite build && electron-builder --mac",
     "dist:dir": "electron-vite build && electron-builder --mac --dir",
     "server:dev": "tsx src/server/index.ts",
-    "server:build": "esbuild src/server/index.ts --bundle --platform=node --target=node20 --outfile=out/server/index.js --external:better-sqlite3 --external:electron --alias:@shared=./src/shared",
+    "server:build": "esbuild src/server/index.ts --bundle --platform=node --target=node20 --outfile=out/server/index.js --external:better-sqlite3 --external:electron --external:undici --alias:@shared=./src/shared",
     "server:start": "node out/server/index.js",
     "rebuild:native": "electron-rebuild -f -w better-sqlite3",
     "rebuild:node": "pnpm rebuild better-sqlite3",
