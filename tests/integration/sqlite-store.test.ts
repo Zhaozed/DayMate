@@ -55,13 +55,14 @@ describe.runIf(nativeOk)('SqliteStore persistence (real better-sqlite3)', () => 
       id: 'run-persist-1',
       routineId: 'test-routine',
       status: 'completed' as const,
-      trigger: { type: 'manual' as const },
-      stepResults: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      idempotencyKey: 'persist-1'
+      triggerType: 'manual',
+      idempotencyKey: 'persist-1',
+      inputs: {},
+      stepOutputs: {},
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString()
     }
-    store1.saveRun(run)
+    store1.createRun(run)
     activityService1.record({
       runId: run.id,
       type: 'routine_started',
