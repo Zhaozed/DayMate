@@ -58,9 +58,9 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            export PATH="/usr/local/bin:/usr/bin:$PATH"
             mkdir -p /opt/daymate/data
             cd /opt/daymate
             npm install --omit=dev
-            # Restart or start daymate daemon via PM2
-            pm2 restart daymate || pm2 start server.js --name daymate --time
+            pm2 reload server.js --update-env || pm2 start server.js --name daymate --time
             pm2 save
