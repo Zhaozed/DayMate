@@ -68,3 +68,4 @@ jobs:
             pm2 status
             pm2 logs daymate --lines 40 --nostream
             curl -sS -v http://127.0.0.1:3210/health || true
+            curl -sS -v http://39.98.44.205:3210/health || true

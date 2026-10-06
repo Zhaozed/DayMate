@@ -18,6 +18,13 @@ export class ServerGateway {
 
   constructor(private readonly options: ServerGatewayOptions) {
     this.server = createServer((req, res) => this.handleHttp(req, res))
+    this.server.on('connection', (socket) => {
+      console.log(`[gateway] Connection from ${socket.remoteAddress}:${socket.remotePort}`)
+    })
+    this.server.on('clientError', (err, socket) => {
+      console.error('[gateway] clientError:', err)
+      socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
+    })
     this.wss = new WebSocketServer({ noServer: true })
 
     this.server.on('upgrade', (request, socket, head) => {
@@ -70,6 +77,7 @@ export class ServerGateway {
   }
 
   private handleHttp(req: IncomingMessage, res: ServerResponse): void {
+    console.log(`[gateway] HTTP ${req.method} ${req.url} (Host: ${req.headers.host})`)
     const url = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`)
 
     // CORS headers for local/cross-origin desktop calls
