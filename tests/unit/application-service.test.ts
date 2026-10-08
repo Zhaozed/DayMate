@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { InMemoryStore } from '../../src/main/db/in-memory-store'
-import { ApplicationService } from '../../src/main/services/application-service'
+import { ApplicationService, extractJobCodeFromText, extractPositionFromText } from '../../src/main/services/application-service'
 import { ActivityService } from '../../src/main/services/activity-service'
 function makeService(): { svc: ApplicationService; store: InMemoryStore; activity: ActivityService } {
   const store = new InMemoryStore()
@@ -344,5 +344,90 @@ describe('application service — jobCode matching & requisition deduplication',
     expect(meituan).toBeDefined()
     expect(meituan?.application.jobCode).toBe('MT_RD_999')
   })
+
+  it('extractJobCodeFromText rejects Job Requirements and extracts valid job code', () => {
+    expect(extractJobCodeFromText('Job Requirements:\n1. 本科及以上学历')).toBeUndefined()
+    expect(extractJobCodeFromText('Job Requirement:\n1. 本科及以上学历')).toBeUndefined()
+    expect(extractJobCodeFromText('Job Description:\n负责产品研发')).toBeUndefined()
+    expect(extractJobCodeFromText('职位编号: J18671')).toBe('J18671')
+    expect(extractJobCodeFromText('Req ID: REQ-2024-99')).toBe('REQ-2024-99')
+  })
+
+  it('extractPositionFromText correctly captures application confirmation bracketed titles', () => {
+    expect(
+      extractPositionFromText('理想汽车邀请您投递简历（你申请的【AI 产品经理】岗位已经投递成功）')
+    ).toBe('AI 产品经理')
+    expect(
+      extractPositionFromText('理想汽车邀请您投递简历（你申请的【前线产品Builder-北京】岗位已经投递成功）')
+    ).toBe('前线产品Builder-北京')
+    expect(
+      extractPositionFromText('理想汽车邀请您投递简历（你申请的【AI系统产品经理-北京】岗位已经投递成功）')
+    ).toBe('AI系统产品经理-北京')
+  })
+
+  it('repairBogusJobCodeMerges clears uirements jobCode and splits falsely merged positions', () => {
+    const { svc, store } = makeService()
+    // Simulate corrupt state: 1 application with jobCode 'uirements' holding 3 distinct email events + 1 empty seed
+    const v = svc.create({
+      company: '理想汽车',
+      position: 'AI系统产品经理',
+      jobCode: 'uirements',
+      source: 'email'
+    })
+    const appId = v.application.id
+
+    // Add 3 distinct email-applied events
+    store.createApplicationEvent({
+      id: 'evt-1',
+      applicationId: appId,
+      type: 'applied',
+      source: 'email',
+      sourceRef: 'email:1677387438',
+      evidence: '理想汽车邀请您投递简历（你申请的【AI 产品经理】岗位已经投递成功）',
+      locked: false,
+      eventAt: '2026-10-08T17:35:58.882Z',
+      createdAt: '2026-10-08T17:35:58.882Z'
+    })
+    store.createApplicationEvent({
+      id: 'evt-2',
+      applicationId: appId,
+      type: 'applied',
+      source: 'email',
+      sourceRef: 'email:1677387439',
+      evidence: '理想汽车邀请您投递简历（你申请的【前线产品Builder-北京】岗位已经投递成功）',
+      locked: false,
+      eventAt: '2026-10-08T17:35:58.881Z',
+      createdAt: '2026-10-08T17:35:58.881Z'
+    })
+    store.createApplicationEvent({
+      id: 'evt-3',
+      applicationId: appId,
+      type: 'applied',
+      source: 'email',
+      sourceRef: 'email:1677387440',
+      evidence: '理想汽车邀请您投递简历（你申请的【AI系统产品经理-北京】岗位已经投递成功）',
+      locked: false,
+      eventAt: '2026-10-08T17:35:58.880Z',
+      createdAt: '2026-10-08T17:35:58.880Z'
+    })
+
+    const result = svc.repairBogusJobCodeMerges()
+    expect(result.splitApps).toBe(2)
+
+    const apps = svc.list().filter((a) => a.application.company === '理想汽车')
+    expect(apps).toHaveLength(3)
+
+    const positions = apps.map((a) => a.application.position).sort()
+    expect(positions).toEqual(['AI 产品经理', 'AI系统产品经理-北京', '前线产品Builder-北京'].sort())
+
+    for (const a of apps) {
+      expect(a.application.jobCode).toBeUndefined()
+      // Each application should have exactly 1 clean applied event
+      expect(a.events).toHaveLength(1)
+      expect(a.events[0].type).toBe('applied')
+      expect(a.events[0].sourceRef).toBeDefined()
+    }
+  })
 })
+
 

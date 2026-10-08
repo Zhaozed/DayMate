@@ -121,6 +121,9 @@ function normalizePosition(s: string | undefined): string {
 }
 
 const ATS_POSITION_PATTERNS = [
+  /(?:申请|应聘|投递)(?:了|的)?(?:[^\s【「]{1,20}?(?:公司|集团))?[:：\s]*[【「\[]([a-zA-Z\u4e00-\u9fa50-9+/#·_— -]{2,40}?)[】」\]](?:岗位|职位)?/i,
+  /你申请的[【「\[]([a-zA-Z\u4e00-\u9fa50-9+/#·_— -]{2,40}?)[】」\]]/i,
+  /【([a-zA-Z\u4e00-\u9fa50-9+/#·_— -]{2,40}?(?:经理|专家|工程师|专员|实习生|管培生|管培|设计|运营|开发|分析师|研究员|顾问|总监|助理|产品|Builder)[^】」\]]*?)】/i,
   /(?:应聘|投递|申请)(?:[^\s，。！!]{2,35}?(?:有限公司|有限责任公司|公司|集团)(?:的)?)?[:：\s]*[【「[]?([a-zA-Z\u4e00-\u9fa50-9+/#·_-]{2,30}?)[】」\]]?(?:职位|岗位)/i,
   /(?:职位|岗位|职位名称|应聘职位|投递职位)[:：\s]+[【「[]?([a-zA-Z\u4e00-\u9fa50-9+/#·_-]{2,30}?)[】」\]]?(?:[\r\n\t,，。；;]|$)/i,
   /【([a-zA-Z\u4e00-\u9fa50-9+/#·_-]{2,30}?(?:经理|专家|工程师|专员|实习生|管培生|管培|设计|运营|开发|分析师|研究员|顾问|总监|助理|产品))】/i,
@@ -154,8 +157,18 @@ export function extractPositionFromText(text: string): string | undefined {
   return undefined
 }
 
+export const INVALID_JOB_CODES = new Set([
+  'null', 'undefined', 'none', 'true', 'false', 'n/a', 'na',
+  'requirements', 'uirements', 'requirement', 'description',
+  'qualifications', 'qualification', 'position', 'positions',
+  'responsibilities', 'responsibility', 'overview', 'details',
+  'application', 'applications', 'candidate', 'interview',
+  'status', 'update', 'notice', 'email', 'urgent', 'normal',
+  'beijing', 'shanghai', 'shenzhen', 'hangzhou', 'guangzhou'
+])
+
 const ATS_JOB_CODE_PATTERNS = [
-  /(?:职位编号|岗位编号|职位代码|岗位代码|职位ID|岗位ID|需求编号|招聘编号|Req(?:uisition)?\s*(?:ID|No|Code|#)?|Job\s*(?:ID|Code|#|Req))[:：\s]*[【「[#]?([a-zA-Z0-9_-]{3,35})[】」\]]?/i,
+  /(?:职位编号|岗位编号|职位代码|岗位代码|职位ID|岗位ID|需求编号|招聘编号|Req(?:uisition)?\s*(?:ID|No|Code|#)\b|Job\s*(?:ID|Code|#|Req\b))[:：\s#]+[【「[#]?([a-zA-Z0-9_-]{3,35})[】」\]]?/i,
   /[【「[](?:职位编号|岗位编号|Job ID|Req ID)[:：\s]*([a-zA-Z0-9_-]{3,35})[】」\]]/i,
   /\((?:职位编号|岗位编号|Req\s*ID|Job\s*ID)[:：\s]*([a-zA-Z0-9_-]{3,35})\)/i,
   /(?:职位|岗位|投递|应聘|[a-zA-Z\u4e00-\u9fa5]{2,10})[（(]([A-Z0-9_-]{4,25})[)）]/i,
@@ -169,9 +182,11 @@ export function extractJobCodeFromText(text: string): string | undefined {
     const m = text.match(p)
     if (m && m[1]) {
       const code = m[1].trim()
-      if (code.length >= 3 && !/^(null|undefined|none|true|false)$/i.test(code)) {
-        return code
-      }
+      const lower = code.toLowerCase()
+      if (code.length < 3) continue
+      if (INVALID_JOB_CODES.has(lower)) continue
+      if (/^[a-zA-Z]+$/.test(code) && code.length > 8) continue
+      return code
     }
   }
   return undefined
@@ -194,7 +209,9 @@ export class ApplicationService {
   constructor(
     private readonly store: RoutineStore,
     private readonly activityService: ActivityService
-  ) {}
+  ) {
+    this.repairBogusJobCodeMerges()
+  }
 
   /** Listener fired when applications change. */
   private onApplicationsChanged?: () => void
@@ -612,8 +629,14 @@ export class ApplicationService {
       }
 
       // ── Job Code Matching (highest-confidence deterministic requisition matching) ──
-      const codeMatch = r.jobCode
-        ? apps.find((a) => a.jobCode && a.jobCode.trim().toLowerCase() === r.jobCode!.trim().toLowerCase())
+      const codeMatch = r.jobCode && r.company
+        ? apps.find((a) => {
+            if (!a.jobCode) return false
+            if (a.jobCode.trim().toLowerCase() !== r.jobCode!.trim().toLowerCase()) return false
+            if (!this.isSameCompany(a.company, r.company!)) return false
+            if (!this.isPositionCompatible(a.position, r.position)) return false
+            return true
+          })
         : undefined
 
       const companyApps = this.findApplicationsByCompany(apps, r.company || codeMatch?.company || '')
@@ -838,6 +861,127 @@ export class ApplicationService {
     const nc = normalizeCompany(company)
     if (!nc) return []
     return apps.filter((a) => normalizeCompany(a.company) === nc)
+  }
+
+  private isSameCompany(c1: string | undefined, c2: string | undefined): boolean {
+    const n1 = normalizeCompany(c1)
+    const n2 = normalizeCompany(c2)
+    if (!n1 || !n2) return false
+    return n1 === n2 || n1.includes(n2) || n2.includes(n1)
+  }
+
+  private isPositionCompatible(pos1: string | undefined, pos2: string | undefined): boolean {
+    if (!pos1 || !pos2) return true
+    if (pos1 === '未知岗位' || pos2 === '未知岗位') return true
+    const n1 = normalizePosition(pos1)
+    const n2 = normalizePosition(pos2)
+    if (n1 === n2) return true
+    if (n1.includes(n2) || n2.includes(n1)) return true
+    return false
+  }
+
+  /**
+   * Data repair migration:
+   * 1. Detect applications with bogus jobCode (e.g. 'uirements' or blacklisted words) and clear them.
+   * 2. Detect applications that erroneously merged multiple distinct job application events
+   *    (e.g. distinct positions in applied events under the same company).
+   * 3. Split them into separate clean application records, each retaining its own email event.
+   */
+  repairBogusJobCodeMerges(): { repaired: number; splitApps: number } {
+    let repaired = 0
+    let splitApps = 0
+
+    const apps = this.store.listApplications()
+    for (const app of apps) {
+      // 1. Clear bogus jobCode
+      if (
+        app.jobCode &&
+        (INVALID_JOB_CODES.has(app.jobCode.toLowerCase()) || app.jobCode.toLowerCase() === 'uirements')
+      ) {
+        this.store.updateApplication(app.id, { jobCode: undefined })
+        app.jobCode = undefined
+        repaired++
+      }
+
+      // 2. Check for erroneously merged multiple distinct email-applied events
+      const events = this.store.listApplicationEvents(app.id)
+      const emailAppliedEvents = events.filter((e) => e.type === 'applied' && e.sourceRef?.startsWith('email:'))
+
+      if (emailAppliedEvents.length > 1) {
+        // Parse position for each event
+        const parsedPositions = emailAppliedEvents.map((evt) => {
+          const evidence = evt.evidence || ''
+          const pos = extractPositionFromText(evidence) || app.position
+          return { evt, pos, evidence }
+        })
+
+        // Check if there are distinct positions
+        const distinctPositions = new Set(parsedPositions.map((p) => normalizePosition(p.pos)))
+        if (distinctPositions.size > 1) {
+          // Erroneous multi-job merge detected!
+          // Remove any redundant empty seed applied event (event without sourceRef or evidence)
+          const emptySeedEvents = events.filter((e) => e.type === 'applied' && !e.sourceRef && !e.evidence)
+          for (const emptyEvt of emptySeedEvents) {
+            this.store.deleteApplicationEvent(emptyEvt.id)
+          }
+
+          // Keep the first email event with the existing app (updating position if appropriate)
+          const first = parsedPositions[0]
+          this.store.updateApplication(app.id, {
+            position: first.pos,
+            emailRefId: first.evt.sourceRef?.replace(/^email:/, '')
+          })
+
+          // For the remaining distinct email events, split each into its own Application
+          for (let i = 1; i < parsedPositions.length; i++) {
+            const item = parsedPositions[i]
+            const newAppId = newId('app')
+            const now = item.evt.eventAt || nowIso()
+            const messageId = item.evt.sourceRef?.replace(/^email:/, '')
+
+            const newApp: Application = {
+              id: newAppId,
+              company: app.company,
+              position: item.pos,
+              jobCode: undefined,
+              source: 'email',
+              appliedAt: now,
+              emailRefId: messageId,
+              notes: app.notes,
+              city: app.city,
+              salaryRange: app.salaryRange,
+              jdText: undefined,
+              stage: '已投递',
+              prepStatus: 'none',
+              priority: 'normal',
+              createdAt: item.evt.createdAt || now,
+              updatedAt: now
+            }
+            this.store.createApplication(newApp)
+
+            // Rebind the event to the new application
+            this.store.deleteApplicationEvent(item.evt.id)
+            this.store.createApplicationEvent({
+              ...item.evt,
+              id: newId('appevt'),
+              applicationId: newAppId
+            })
+
+            splitApps++
+          }
+          repaired++
+        }
+      }
+    }
+
+    if (repaired > 0 || splitApps > 0) {
+      this.broadcastApplications()
+      console.log(
+        `[application-service] Repaired bogus job code merges: repaired ${repaired}, created ${splitApps} split applications`
+      )
+    }
+
+    return { repaired, splitApps }
   }
 
   /**

@@ -747,22 +747,22 @@ export class SqliteStore implements RoutineStore {
   }
   updateApplication(id: string, patch: Partial<Application>): Application | undefined {
     const set: Record<string, unknown> = {}
-    if (patch.company !== undefined) set.company = patch.company
-    if (patch.position !== undefined) set.position = patch.position
-    if (patch.jobCode !== undefined) set.jobCode = patch.jobCode ?? null
-    if (patch.source !== undefined) set.source = patch.source
-    if (patch.bossSecurityId !== undefined) set.bossSecurityId = patch.bossSecurityId ?? null
-    if (patch.appliedAt !== undefined) set.appliedAt = patch.appliedAt
-    if (patch.channelRef !== undefined) set.channelRef = patch.channelRef ?? null
-    if (patch.notes !== undefined) set.notes = patch.notes ?? null
-    if (patch.city !== undefined) set.city = patch.city ?? null
-    if (patch.salaryRange !== undefined) set.salaryRange = patch.salaryRange ?? null
-    if (patch.jdText !== undefined) set.jdText = patch.jdText ?? null
-    if (patch.stage !== undefined) set.stage = patch.stage ?? null
-    if (patch.stageDeadline !== undefined) set.stageDeadline = patch.stageDeadline ?? null
-    if (patch.interviewLink !== undefined) set.interviewLink = patch.interviewLink ?? null
-    if (patch.priority !== undefined) set.priority = patch.priority
-    if (patch.emailRefId !== undefined) set.emailRefId = patch.emailRefId ?? null
+    if ('company' in patch && patch.company !== undefined) set.company = patch.company
+    if ('position' in patch && patch.position !== undefined) set.position = patch.position
+    if ('jobCode' in patch) set.jobCode = patch.jobCode ?? null
+    if ('source' in patch && patch.source !== undefined) set.source = patch.source
+    if ('bossSecurityId' in patch) set.bossSecurityId = patch.bossSecurityId ?? null
+    if ('appliedAt' in patch && patch.appliedAt !== undefined) set.appliedAt = patch.appliedAt
+    if ('channelRef' in patch) set.channelRef = patch.channelRef ?? null
+    if ('notes' in patch) set.notes = patch.notes ?? null
+    if ('city' in patch) set.city = patch.city ?? null
+    if ('salaryRange' in patch) set.salaryRange = patch.salaryRange ?? null
+    if ('jdText' in patch) set.jdText = patch.jdText ?? null
+    if ('stage' in patch) set.stage = patch.stage ?? null
+    if ('stageDeadline' in patch) set.stageDeadline = patch.stageDeadline ?? null
+    if ('interviewLink' in patch) set.interviewLink = patch.interviewLink ?? null
+    if ('priority' in patch && patch.priority !== undefined) set.priority = patch.priority
+    if ('emailRefId' in patch) set.emailRefId = patch.emailRefId ?? null
     set.updatedAt = new Date().toISOString()
     this.db.update(applicationsTbl).set(set).where(eq(applicationsTbl.id, id)).run()
     return this.getApplication(id)
