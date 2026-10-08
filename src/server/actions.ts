@@ -544,6 +544,9 @@ export async function dispatchBusinessAction(
       await container.settings.writeEmailSyncCursor(result.cursor)
       container.broadcastApplications()
       container.broadcastEmailMatches()
+      if (result.newEmails.length > 0) {
+        await container.emailBriefing.briefNewEmails(result.newEmails)
+      }
       return result
     }
 

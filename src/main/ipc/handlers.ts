@@ -887,6 +887,94 @@ export function registerIpcHandlers(): void {
   })
 }
 
+async function autoSyncLocalSecretsToRemote(client: RemoteGatewayClient): Promise<void> {
+  try {
+    const { existsSync } = await import('node:fs')
+    const secretsPath = join(app.getPath('userData'), 'secrets.json')
+    if (!existsSync(secretsPath)) return
+    const content = JSON.parse(await readFile(secretsPath, 'utf8'))
+    const entries = content.entries || {}
+
+    // Wait until client is connected
+    for (let i = 0; i < 30; i++) {
+      if (client.isConnected) break
+      await new Promise((r) => setTimeout(r, 300))
+    }
+    if (!client.isConnected) return
+
+    // 1. Sync 163 Mail
+    if (entries['mail163-client']?.cipher && safeStorage.isEncryptionAvailable()) {
+      try {
+        const serverHas163 = await client.call(IPC.MAIL163_HAS_CLIENT)
+        if (!serverHas163) {
+          const plain = safeStorage.decryptString(Buffer.from(entries['mail163-client'].cipher, 'base64'))
+          const parsed = JSON.parse(plain)
+          if (parsed.email && parsed.authCode) {
+            console.log(`[auto-sync] Forwarding 163 Mail credentials (${parsed.email}) to cloud server...`)
+            await client.call(IPC.MAIL163_SET_CLIENT, [parsed])
+            await client.call(IPC.MAIL163_CONNECT, [])
+            console.log(`[auto-sync] 163 Mail successfully connected on cloud server!`)
+          }
+        }
+      } catch (e) {
+        console.warn('[auto-sync] Failed to decrypt or sync 163 Mail:', e)
+      }
+    }
+
+    // 2. Sync Gmail
+    if (entries['gmail-oauth-client']?.cipher && entries['gmail']?.cipher && safeStorage.isEncryptionAvailable()) {
+      try {
+        const serverHasGmail = await client.call(IPC.GMAIL_HAS_CLIENT)
+        if (!serverHasGmail) {
+          const clientPlain = safeStorage.decryptString(Buffer.from(entries['gmail-oauth-client'].cipher, 'base64'))
+          const parsedClient = JSON.parse(clientPlain)
+          if (parsedClient.clientId && parsedClient.clientSecret) {
+            console.log(`[auto-sync] Forwarding Gmail OAuth client to cloud server...`)
+            await client.call(IPC.GMAIL_SET_CLIENT, [parsedClient])
+          }
+          const tokensPlain = safeStorage.decryptString(Buffer.from(entries['gmail'].cipher, 'base64'))
+          const parsedTokens = JSON.parse(tokensPlain)
+          if (parsedTokens.access_token || parsedTokens.refresh_token) {
+            console.log(`[auto-sync] Forwarding Gmail tokens to cloud server...`)
+            await client.call('daymate:gmail:save-tokens', [parsedTokens])
+            console.log(`[auto-sync] Gmail successfully connected on cloud server!`)
+          }
+        }
+      } catch (e) {
+        console.warn('[auto-sync] Failed to decrypt or sync Gmail:', e)
+      }
+    }
+
+    // 3. Sync DeepSeek / LLM Key
+    if (entries['deepseek']?.cipher && safeStorage.isEncryptionAvailable()) {
+      try {
+        const serverConfig = (await client.call(IPC.LLM_GET_CONFIG)) as { keyConfigured?: boolean }
+        if (!serverConfig?.keyConfigured) {
+          const plainKey = safeStorage.decryptString(Buffer.from(entries['deepseek'].cipher, 'base64'))
+          if (plainKey) {
+            console.log(`[auto-sync] Forwarding DeepSeek API key to cloud server...`)
+            await client.call(IPC.LLM_SET_KEY, [plainKey])
+            console.log(`[auto-sync] DeepSeek API key successfully configured on cloud server!`)
+          }
+        }
+      } catch (e) {
+        console.warn('[auto-sync] Failed to decrypt or sync LLM key:', e)
+      }
+    }
+
+    // 4. Trigger immediate email sync on cloud server to pull recent emails
+    try {
+      console.log(`[auto-sync] Triggering immediate email sync on cloud server...`)
+      const syncRes = await client.call(IPC.APPLICATION_SYNC_EMAIL, [])
+      console.log(`[auto-sync] Cloud email sync completed:`, syncRes)
+    } catch (e) {
+      console.warn('[auto-sync] Initial email sync error:', e)
+    }
+  } catch (err) {
+    console.warn('[auto-sync] autoSyncLocalSecretsToRemote error:', err)
+  }
+}
+
 let containerBootstrapped = false
 
 // Called from bootstrap once the app is ready and the DB path is resolvable.
@@ -901,6 +989,7 @@ export function bootstrapContainer(): void {
       token: process.env.DAYMATE_SERVER_TOKEN || ''
     })
     remoteClient.connect()
+    void autoSyncLocalSecretsToRemote(remoteClient)
     return
   }
 
