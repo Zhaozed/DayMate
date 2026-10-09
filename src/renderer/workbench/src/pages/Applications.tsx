@@ -1445,8 +1445,13 @@ function ApplicationCard({
               onClick={async (e) => {
                 e.stopPropagation()
                 if (window.confirm(`确定将「${view.application.company} · ${view.application.position}」标记为收到感谢信/已淘汰？`)) {
-                  await window.daymate.updateApplicationStatus(view.application.id, 'rejected', { evidence: '收到感谢信' })
-                  onChanged()
+                  try {
+                    await window.daymate.updateApplicationStatus(view.application.id, 'rejected', { evidence: '收到感谢信' })
+                    onChanged()
+                  } catch (err) {
+                    console.error('Failed to update application status:', err)
+                    alert(`标记失败: ${err instanceof Error ? err.message : String(err)}`)
+                  }
                 }
               }}
               className="rounded-lg border border-rose-500/20 bg-rose-500/5 hover:bg-rose-500/15 px-2.5 py-1 text-[11px] font-medium text-rose-300/70 hover:text-rose-200 transition-all select-none shadow-sm"

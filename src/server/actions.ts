@@ -1,4 +1,4 @@
-import { IPC } from '@shared/constants'
+import { IPC, type ApplicationEventType } from '@shared/constants'
 import type { Container } from '../main/app/container'
 import type {
   TaskCreateInput,
@@ -496,6 +496,24 @@ export async function dispatchBusinessAction(
       const eventId = args[1] as string
       const toAppId = args[2] as string
       return container.applicationService.rebindEmailEvent(fromAppId, eventId, toAppId)
+    }
+
+    case IPC.APPLICATION_DELETE_EVENT: {
+      const [applicationId, eventId] = args as [string, string]
+      const view = container.applicationService.deleteEvent(applicationId, eventId)
+      container.broadcastApplications()
+      return view
+    }
+
+    case IPC.APPLICATION_UPDATE_STATUS: {
+      const [applicationId, status, options] = args as [
+        string,
+        ApplicationEventType,
+        { round?: number; evidence?: string; eventAt?: string } | undefined
+      ]
+      const view = container.applicationService.updateStatus(applicationId, status, options)
+      container.broadcastApplications()
+      return view
     }
 
     case IPC.APPLICATION_UPDATE_JD: {

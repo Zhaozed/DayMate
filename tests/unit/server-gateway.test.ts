@@ -37,6 +37,17 @@ describe('ServerGateway', () => {
     store: {
       listRoutines: () => [{ id: 'mock_routine', name: 'Mock' }]
     },
+    applicationService: {
+      updateStatus: (id: string, status: string, options: unknown) => ({
+        application: { id, currentStatus: status },
+        options
+      }),
+      deleteEvent: (applicationId: string, eventId: string) => ({
+        application: { id: applicationId },
+        deletedEventId: eventId
+      })
+    },
+    broadcastApplications: () => {},
     broadcastTasks: () => {}
   } as unknown as AppContainer
 
@@ -124,5 +135,45 @@ describe('ServerGateway', () => {
     expect(receivedEvents[0].channel).toBe('daymate:task:changed')
 
     ws.close()
+  })
+
+  it('dispatches APPLICATION_UPDATE_STATUS and APPLICATION_DELETE_EVENT correctly', async () => {
+    const resUpdate = await fetch(`http://127.0.0.1:${port}/api/rpc`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Daymate-Token': token
+      },
+      body: JSON.stringify({
+        channel: 'daymate:application:update-status',
+        args: ['app_123', 'rejected', { evidence: '收到感谢信' }]
+      })
+    })
+    expect(resUpdate.status).toBe(200)
+    const jsonUpdate = (await resUpdate.json()) as { success: boolean; result: unknown }
+    expect(jsonUpdate.success).toBe(true)
+    expect(jsonUpdate.result).toMatchObject({
+      application: { id: 'app_123', currentStatus: 'rejected' },
+      options: { evidence: '收到感谢信' }
+    })
+
+    const resDel = await fetch(`http://127.0.0.1:${port}/api/rpc`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Daymate-Token': token
+      },
+      body: JSON.stringify({
+        channel: 'daymate:application:delete-event',
+        args: ['app_123', 'evt_456']
+      })
+    })
+    expect(resDel.status).toBe(200)
+    const jsonDel = (await resDel.json()) as { success: boolean; result: unknown }
+    expect(jsonDel.success).toBe(true)
+    expect(jsonDel.result).toMatchObject({
+      application: { id: 'app_123' },
+      deletedEventId: 'evt_456'
+    })
   })
 })
