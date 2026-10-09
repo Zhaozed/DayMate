@@ -58,7 +58,8 @@ export function extractSnippets(html: string, max = 5): string[] {
     /(boss直聘|zhipin\.com|和boss开聊|下载boss|58同城|看准网|赶集网|猎聘为您提供|智联招聘为您提供|boss直聘为您提供)/i.test(t)
 
   // Match `<a class="result__snippet"...>…</a>` or `<td class="result-snippet">` blocks (DDG HTML / Lite).
-  const re = /<(?:a|td|div)[^>]*class="[^"]*(?:result__snippet|result-snippet)[^"]*"[^>]*>([\s\S]*?)<\/(?:a|td|div)>/gi
+  // Also match Bing snippet blocks: `<div class="b_caption">`, `b_snippet`, `b_lineclamp`.
+  const re = /<(?:a|td|div|p)[^>]*class="[^"]*(?:result__snippet|result-snippet|b_caption|b_snippet|b_lineclamp)[^"]*"[^>]*>([\s\S]*?)<\/(?:a|td|div|p)>/gi
   let m: RegExpExecArray | null
   while ((m = re.exec(html)) !== null && out.length < max) {
     const text = stripTags(m[1]).trim()
@@ -841,10 +842,22 @@ export function createToolRegistry(): ToolRegistry {
       let lastErr: unknown = null
       let successCount = 0
       for (const q of queries) {
-        const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q.trim())}`
+        const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q.trim())}`
+        const bingUrl = `https://cn.bing.com/search?q=${encodeURIComponent(q.trim())}`
+        let html: string | null = null
         try {
-          const html = await ctx.webFetch(url)
+          html = await ctx.webFetch(ddgUrl)
           successCount++
+        } catch (ddgErr) {
+          lastErr = ddgErr
+          try {
+            html = await ctx.webFetch(bingUrl)
+            successCount++
+          } catch (bingErr) {
+            lastErr = bingErr
+          }
+        }
+        if (html) {
           const snippets = extractSnippets(html, 5)
           for (const s of snippets) {
             if (!allSnippets.includes(s)) {
@@ -852,14 +865,15 @@ export function createToolRegistry(): ToolRegistry {
             }
           }
           if (allSnippets.length >= 4) break
-        } catch (err) {
-          lastErr = err
         }
       }
 
       if (allSnippets.length === 0 && successCount === 0 && lastErr) {
         const msg = lastErr instanceof Error ? lastErr.message : String(lastErr)
-        return { status: 'error', error: `web 抓取失败：${msg}` }
+        return {
+          status: 'error',
+          error: `web 抓取失败：网络检索受限（${msg}），国内云服务器访问公网搜索可能超时，建议直接手动粘贴 JD`
+        }
       }
 
       if (allSnippets.length === 0) {

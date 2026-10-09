@@ -655,14 +655,31 @@ export class ApplicationService {
           /(?:二面|三面|四面|终面|复试|终审|2nd round|final round|hr面)/i.test(email.subject + ' ' + (r.evidence || '')) ||
           Boolean(r.isReschedule || r.isCancelled)
 
+        // 进展推进信号：AI面试、测评、笔试、一面、初试、初面、面试邀请等流程事件
+        const isProgressSignal =
+          r.eventType === 'interview' ||
+          r.eventType === 'written_test' ||
+          r.eventType === 'assessment' ||
+          /(?:ai面试|测评|笔试|一面|初试|初面|面试邀请)/i.test(email.subject + ' ' + (r.evidence || ''))
+
+        // 独苗公司无冲突兼容判定：来信若未带岗位名称，或岗位名称与已有记录兼容（如包含/一致）
+        const positionCompatibleWithSingle =
+          !r.position ||
+          singlePosNorm === emailPosNorm ||
+          singleApp.position === '未知岗位' ||
+          singlePosNorm.includes(emailPosNorm) ||
+          emailPosNorm.includes(singlePosNorm)
+
         // 确定性归并硬逻辑：
         // 1) 岗位名称规范化一致 -> 归并到已有记录
         // 2) 已有记录为'未知岗位' -> 归并并补齐岗位名称
         // 3) 显式后续面试轮次 (二面/三面/终面/复试/HR面/改期/取消) -> 归并到已有记录
+        // 4) 独苗公司流程推进 (AI面试/笔试/测评/面试) 且无岗位冲突 -> 自动推进并归并到已有记录
         if (
           (r.position && singlePosNorm === emailPosNorm) ||
           singleApp.position === '未知岗位' ||
-          isSubsequentRound
+          (isSubsequentRound && r.eventType !== 'applied') ||
+          (isProgressSignal && positionCompatibleWithSingle && r.eventType !== 'applied')
         ) {
           match = singleApp
         }
