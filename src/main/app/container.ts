@@ -364,6 +364,7 @@ export function initContainer(deps: ContainerDeps): Container {
           applicationService,
           settings,
           webFetch,
+          agentRuntime,
           notify: (m: string) => notificationService.notify({ message: m, category: 'info' })
         }
       )

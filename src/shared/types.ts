@@ -695,16 +695,16 @@ export interface ApplicationCreateInput {
 export interface ApplicationUpdateFields {
   company?: string
   position?: string
-  jobCode?: string
-  city?: string
-  salaryRange?: string
-  jdText?: string
-  stage?: string
-  stageDeadline?: string
-  interviewLink?: string
+  jobCode?: string | null
+  city?: string | null
+  salaryRange?: string | null
+  jdText?: string | null
+  stage?: string | null
+  stageDeadline?: string | null
+  interviewLink?: string | null
   prepStatus?: 'ready' | 'generating' | 'suspended_missing_jd' | 'none'
-  notes?: string
-  channelRef?: string
+  notes?: string | null
+  channelRef?: string | null
   priority?: ApplicationPriority
 }
 

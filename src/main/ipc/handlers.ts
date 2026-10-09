@@ -531,6 +531,7 @@ export function registerIpcHandlers(): void {
           applicationService: container.applicationService,
           settings: container.settings,
           webFetch: container.webFetch,
+          agentRuntime: container.agentRuntime,
           notify: (m: string) => container.notificationService.notify({ message: m, category: 'info' })
         }
       )
@@ -577,6 +578,7 @@ export function registerIpcHandlers(): void {
               applicationService: container.applicationService,
               settings: container.settings,
               webFetch: container.webFetch,
+              agentRuntime: container.agentRuntime,
               notify: (m: string) => container.notificationService.notify({ message: m, category: 'info' })
             }
           ).then((res) => {

@@ -394,6 +394,7 @@ export async function dispatchBusinessAction(
           applicationService: container.applicationService,
           settings: container.settings,
           webFetch: container.webFetch,
+          agentRuntime: container.agentRuntime,
           notify: (m: string) => container.notificationService.notify({ message: m, category: 'info' })
         }
       )

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import type { ReactElement } from 'react'
 import type {
   ApplicationView,
@@ -380,12 +380,12 @@ function RichFields({
   const [saving, setSaving] = useState(false)
   const [saveErr, setSaveErr] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const [isDirty, setIsDirty] = useState(false)
   const [fetchingJd, setFetchingJd] = useState(false)
   const [jdErr, setJdErr] = useState<string | null>(null)
   const [jdSuccess, setJdSuccess] = useState<string | null>(null)
 
-  // On-demand JD enrichment: fetch a best-effort JD snippet from the public web
-  // (DuckDuckGo HTML) via the `web.fetch_jd` tool using company, position, and jobCode.
+  // On-demand JD enrichment: fetch a best-effort JD from the public web via `web.fetch_jd`.
   const fetchJd = async (): Promise<void> => {
     setFetchingJd(true)
     setJdErr(null)
@@ -398,8 +398,9 @@ function RichFields({
       })
       if (res.jdText) {
         setForm((f) => ({ ...f, jdText: res.jdText! }))
+        setIsDirty(true)
         setSaved(false)
-        setJdSuccess('已通过联网搜索获取 JD 片段，请核对保存')
+        setJdSuccess('已通过 AI 联网搜索并提炼真实 JD，请核对保存')
       }
       if (res.error) setJdErr(res.error)
     } catch (e) {
@@ -409,34 +410,32 @@ function RichFields({
     }
   }
 
-  // The seed changes when the underlying view is refreshed (e.g. an email-
-  // inference event landed a new field). Re-seed the form only when not mid-edit.
+  // The seed changes when the underlying view is refreshed or switching to another application.
+  // Re-seed the form ONLY when switching application or when the user has not made unsaved edits.
+  const prevAppIdRef = useRef(a.id)
   useEffect(() => {
-    setForm({
-      company: a.company ?? '',
-      position: a.position ?? '',
-      jobCode: a.jobCode ?? '',
-      city: a.city ?? '',
-      salaryRange: a.salaryRange ?? '',
-      stage: a.stage ?? '',
-      stageDeadline: a.stageDeadline ? a.stageDeadline.slice(0, 10) : '',
-      interviewLink: a.interviewLink ?? '',
-      channelRef: a.channelRef ?? '',
-      notes: a.notes ?? '',
-      priority: (a.priority ?? 'normal') as ApplicationPriority,
-      jdText: a.jdText ?? ''
-    })
-  }, [a.id, a.company, a.position, a.jobCode, a.city, a.salaryRange, a.stage, a.stageDeadline, a.interviewLink, a.channelRef, a.notes, a.priority, a.jdText])
-
-  // Automatically trigger JD search in the background if the application has no JD text
-  useEffect(() => {
-    if (!a.jdText && (a.company || a.position) && !fetchingJd) {
-      void fetchJd()
+    if (prevAppIdRef.current !== a.id || !isDirty) {
+      prevAppIdRef.current = a.id
+      setIsDirty(false)
+      setForm({
+        company: a.company ?? '',
+        position: a.position ?? '',
+        jobCode: a.jobCode ?? '',
+        city: a.city ?? '',
+        salaryRange: a.salaryRange ?? '',
+        stage: a.stage ?? '',
+        stageDeadline: a.stageDeadline ? a.stageDeadline.slice(0, 10) : '',
+        interviewLink: a.interviewLink ?? '',
+        channelRef: a.channelRef ?? '',
+        notes: a.notes ?? '',
+        priority: (a.priority ?? 'normal') as ApplicationPriority,
+        jdText: a.jdText ?? ''
+      })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [a.id, a.jdText])
+  }, [a, isDirty])
 
   const set = (k: keyof typeof form, v: string): void => {
+    setIsDirty(true)
     setSaved(false)
     setForm((f) => ({ ...f, [k]: v }))
   }
@@ -446,25 +445,29 @@ function RichFields({
     setSaveErr(null)
     try {
       const patch: ApplicationUpdateFields = {}
-      if (form.company !== (a.company ?? '')) patch.company = form.company || undefined
-      if (form.position !== (a.position ?? '')) patch.position = form.position || undefined
-      if (form.jobCode !== (a.jobCode ?? '')) patch.jobCode = form.jobCode || undefined
-      if (form.city !== (a.city ?? '')) patch.city = form.city || undefined
-      if (form.salaryRange !== (a.salaryRange ?? '')) patch.salaryRange = form.salaryRange || undefined
-      if (form.stage !== (a.stage ?? '')) patch.stage = form.stage || undefined
+      if (form.company !== (a.company ?? '')) patch.company = form.company.trim() || undefined
+      if (form.position !== (a.position ?? '')) patch.position = form.position.trim() || undefined
+      if (form.jobCode !== (a.jobCode ?? '')) patch.jobCode = form.jobCode.trim() || null
+      if (form.city !== (a.city ?? '')) patch.city = form.city.trim() || null
+      if (form.salaryRange !== (a.salaryRange ?? '')) patch.salaryRange = form.salaryRange.trim() || null
+      if (form.stage !== (a.stage ?? '')) patch.stage = form.stage.trim() || null
       if (form.stageDeadline !== (a.stageDeadline ? a.stageDeadline.slice(0, 10) : '')) {
-        patch.stageDeadline = form.stageDeadline ? `${form.stageDeadline}T00:00:00.000Z` : undefined
+        patch.stageDeadline = form.stageDeadline ? `${form.stageDeadline}T00:00:00.000Z` : null
       }
-      if (form.interviewLink !== (a.interviewLink ?? '')) patch.interviewLink = form.interviewLink || undefined
-      if (form.channelRef !== (a.channelRef ?? '')) patch.channelRef = form.channelRef || undefined
-      if (form.notes !== (a.notes ?? '')) patch.notes = form.notes || undefined
+      if (form.interviewLink !== (a.interviewLink ?? '')) patch.interviewLink = form.interviewLink.trim() || null
+      if (form.channelRef !== (a.channelRef ?? '')) patch.channelRef = form.channelRef.trim() || null
+      if (form.notes !== (a.notes ?? '')) patch.notes = form.notes.trim() || null
       if (form.priority !== (a.priority ?? 'normal')) patch.priority = form.priority
-      if (form.jdText !== (a.jdText ?? '')) patch.jdText = form.jdText || undefined
+      if (form.jdText !== (a.jdText ?? '')) {
+        patch.jdText = form.jdText.trim() === '' ? null : form.jdText.trim()
+      }
       if (Object.keys(patch).length === 0) {
+        setIsDirty(false)
         setSaved(true)
         return
       }
       await window.daymate.updateApplicationFields(view.application.id, patch)
+      setIsDirty(false)
       setSaved(true)
       onChanged()
     } catch (e) {
@@ -573,7 +576,11 @@ function RichFields({
         <textarea
           className={`${inputCls} mt-1 h-40 w-full resize-y`}
           value={form.jdText}
-          onChange={(e) => set('jdText', e.target.value)}
+          onChange={(e) => {
+            setJdSuccess(null)
+            setJdErr(null)
+            set('jdText', e.target.value)
+          }}
           placeholder="可手动粘贴，或点「🌐 联网搜索 JD」从公开网络检索岗位职责与任职要求"
         />
       </div>

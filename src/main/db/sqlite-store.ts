@@ -33,6 +33,7 @@ import type {
   ApprovalRequest,
   MemoryItem,
   Application,
+  ApplicationUpdateFields,
   ApplicationEvent,
   ResumeVersion,
   PrepMaterial,
@@ -745,7 +746,7 @@ export class SqliteStore implements RoutineStore {
       .all()
       .map(rowToApplication)
   }
-  updateApplication(id: string, patch: Partial<Application>): Application | undefined {
+  updateApplication(id: string, patch: Partial<Application> | ApplicationUpdateFields): Application | undefined {
     const set: Record<string, unknown> = {}
     if ('company' in patch && patch.company !== undefined) set.company = patch.company
     if ('position' in patch && patch.position !== undefined) set.position = patch.position

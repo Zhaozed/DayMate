@@ -767,3 +767,12 @@ export const bossJobSchema = z.object({
   jobLabels: z.array(z.string()).optional()
 })
 
+// ── Job description enrichment output (Agent-guided web verification) ──────
+export const enrichJdOutputSchema = z.object({
+  isValid: z.boolean(),
+  jdText: z.string().optional(),
+  reason: z.string().optional()
+})
+export type EnrichJdOutput = z.infer<typeof enrichJdOutputSchema>
+
+

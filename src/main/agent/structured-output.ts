@@ -43,6 +43,7 @@ export interface OutputSchemas {
   submit_interview_transcript: TSchema
   submit_application_email_classifications: TSchema
   submit_funnel_review: TSchema
+  submit_enrich_jd: TSchema
 }
 
 /**
@@ -252,6 +253,12 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
     memoryProposals: Type.Optional(Type.Array(memoryProposal))
   })
 
+  const submit_enrich_jd = Type.Object({
+    isValid: Type.Boolean(),
+    jdText: Type.Optional(Type.String()),
+    reason: Type.Optional(Type.String())
+  })
+
   // ── Milestone C: score job matches ───────────────────────────────────────────
   // PublishableBrief shape + `results` (per-job score/reason). Publishable to
   // NTK via `need_to_know fromKey`; the renderer lists `results`.
@@ -259,7 +266,8 @@ export function buildOutputSchemas(Type: TypeBuilder): OutputSchemas {
     submit_classifications,
     submit_interview_transcript,
     submit_application_email_classifications,
-    submit_funnel_review
+    submit_funnel_review,
+    submit_enrich_jd
   }
 }
 

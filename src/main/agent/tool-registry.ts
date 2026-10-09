@@ -54,8 +54,8 @@ export type WebFetch = (input: string) => Promise<string>
  */
 export function extractSnippets(html: string, max = 5): string[] {
   const out: string[] = []
-  const isSpam = (t: string): boolean =>
-    /(boss直聘|zhipin\.com|和boss开聊|下载boss|58同城|看准网|赶集网|猎聘为您提供|智联招聘为您提供|boss直聘为您提供)/i.test(t)
+  const isSpamOrNoise = (t: string): boolean =>
+    /(boss直聘|zhipin\.com|和boss开聊|下载boss|58同城|看准网|赶集网|猎聘为您提供|智联招聘为您提供|boss直聘为您提供|汽车之家|懂车帝|太平洋汽车|易车|车系|在售车型|最新报价|首销期|纯电续航|零重力座椅|试驾|超充站|超充桩|指导价|落地价|二手车|汽车频道|在售车系|分期付款|4S店|景点胜地|热门旅游|客路)/i.test(t)
 
   // Match `<a class="result__snippet"...>…</a>` or `<td class="result-snippet">` blocks (DDG HTML / Lite).
   // Also match Bing snippet blocks: `<div class="b_caption">`, `b_snippet`, `b_lineclamp`.
@@ -63,14 +63,14 @@ export function extractSnippets(html: string, max = 5): string[] {
   let m: RegExpExecArray | null
   while ((m = re.exec(html)) !== null && out.length < max) {
     const text = stripTags(m[1]).trim()
-    if (text.length > 0 && !out.includes(text) && !isSpam(text)) out.push(text)
+    if (text.length > 0 && !out.includes(text) && !isSpamOrNoise(text)) out.push(text)
   }
   if (out.length === 0) {
     // Fallback: grab text from the first few <p>/<li> blocks.
     const fallback = /<(?:p|li)[^>]*>([\s\S]*?)<\/(?:p|li)>/gi
     while ((m = fallback.exec(html)) !== null && out.length < max) {
       const text = stripTags(m[1]).trim()
-      if (text.length > 0 && !out.includes(text) && !isSpam(text)) out.push(text)
+      if (text.length > 0 && !out.includes(text) && !isSpamOrNoise(text)) out.push(text)
     }
   }
   return out
@@ -113,6 +113,8 @@ export interface ToolContext {
   notify: (message: string) => void
   /** Present only when executing an already-approved action (M2). */
   approval?: { requestId: string }
+  /** Agent runtime for intelligent verification / synthesis */
+  agentRuntime?: import('./agent-runtime').AgentRuntime
 }
 
 /** Resolve the email provider for an `accountId`; throws if none matches. */
@@ -826,14 +828,18 @@ export function createToolRegistry(): ToolRegistry {
       const a = args as { company: string; position?: string; jobCode?: string }
       const queries: string[] = []
       if (a.company && a.position) {
+        const isAutoBrand = /(汽车|车控|动力|出行)/i.test(a.company)
+        const negKeywords = isAutoBrand
+          ? '-汽车之家 -懂车帝 -报价 -车系 -在售 -车型 -4S店'
+          : '-boss直聘 -zhipin'
         if (a.jobCode) {
-          queries.push(`${a.company} 校园招聘官网 ${a.jobCode} 岗位职责 职位详情 -boss直聘 -zhipin`)
-          queries.push(`${a.company} 校招 ${a.position} ${a.jobCode} 岗位职责 任职要求`)
+          queries.push(`"${a.company}" 校园招聘 "${a.jobCode}" 岗位职责 ${negKeywords}`.trim())
+          queries.push(`"${a.company}" 校招 "${a.position}" "${a.jobCode}" 任职要求 ${negKeywords}`.trim())
         }
-        queries.push(`${a.company} 校园招聘官网 ${a.position} 岗位职责 任职要求 职位详情 -boss直聘 -zhipin`)
-        queries.push(`${a.company} 校招 ${a.position} 招聘官网 岗位职责`)
+        queries.push(`"${a.company}" 校园招聘 "${a.position}" 岗位职责 任职要求 ${negKeywords}`.trim())
+        queries.push(`"${a.company}" 校招 "${a.position}" 招聘官网 岗位职责 ${negKeywords}`.trim())
       } else if (a.company) {
-        queries.push(`${a.company} 校园招聘官网 职位详情 岗位职责 -boss直聘 -zhipin`)
+        queries.push(`"${a.company}" 校园招聘官网 职位详情 岗位职责 -boss直聘 -zhipin`)
       } else {
         return { status: 'ok', data: { text: '', note: '缺少公司名称，无法检索 JD' } }
       }
@@ -877,8 +883,39 @@ export function createToolRegistry(): ToolRegistry {
       }
 
       if (allSnippets.length === 0) {
-        return { status: 'ok', data: { text: '', note: '未在公开互联网检索到匹配的 JD 片段，可手动粘贴补充' } }
+        return {
+          status: 'ok',
+          data: {
+            text: '',
+            note: '未在公开互联网检索到该岗位的真实校招 JD（已过滤无关产品报价与企业宣传），建议直接手动粘贴补充'
+          }
+        }
       }
+
+      // If Agent runtime is available, invoke intelligent verification and extraction
+      if (ctx.agentRuntime) {
+        try {
+          const enrichResult = (await ctx.agentRuntime.runAgentStep('enrich_job_description', {
+            company: a.company,
+            position: a.position || '',
+            jobCode: a.jobCode,
+            snippets: allSnippets
+          })) as { isValid?: boolean; jdText?: string; reason?: string }
+          if (enrichResult && enrichResult.isValid && enrichResult.jdText) {
+            return { status: 'ok', data: { text: enrichResult.jdText } }
+          }
+          return {
+            status: 'ok',
+            data: {
+              text: '',
+              note: enrichResult?.reason || '未在公开互联网检索到该岗位的真实校招职责描述，建议手动粘贴补充'
+            }
+          }
+        } catch {
+          // If Agent runtime call threw, fall back to clean snippets join
+        }
+      }
+
       // Plain-text join (§17: tags already stripped in extractSnippets; the
       // stored value is inert text, rendered sandboxed regardless).
       return { status: 'ok', data: { text: allSnippets.join('\n\n') } }

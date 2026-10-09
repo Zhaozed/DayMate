@@ -13,6 +13,7 @@ import type {
   ApprovalRequest,
   MemoryItem,
   Application,
+  ApplicationUpdateFields,
   ApplicationEvent,
   ResumeVersion,
   PrepMaterial,
@@ -284,10 +285,14 @@ export class InMemoryStore implements RoutineStore {
       .sort((a, b) => ((a.archivedAt ?? '') < (b.archivedAt ?? '') ? 1 : -1))
       .map((a) => ({ ...a }))
   }
-  updateApplication(id: string, patch: Partial<Application>): Application | undefined {
+  updateApplication(id: string, patch: Partial<Application> | ApplicationUpdateFields): Application | undefined {
     const a = this.applications.get(id)
     if (!a) return undefined
-    const next = { ...a, ...patch, updatedAt: new Date().toISOString() }
+    const cleanedPatch = { ...patch } as Record<string, unknown>
+    for (const [k, v] of Object.entries(cleanedPatch)) {
+      if (v === null) cleanedPatch[k] = undefined
+    }
+    const next = { ...a, ...cleanedPatch, updatedAt: new Date().toISOString() } as Application
     this.applications.set(id, next)
     return { ...next }
   }

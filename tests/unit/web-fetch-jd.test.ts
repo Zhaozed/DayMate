@@ -167,4 +167,43 @@ describe('web.fetch_jd tool', () => {
     expect(text).not.toContain('<script>')
     expect(text).not.toContain('<')
   })
+
+  it('filters out car quotes and automotive spam from snippets', async () => {
+    const html = `
+      <div>
+        <div class="b_caption">理想L6 2024款最新报价 24.98万，纯电续航，在售车型首销期</div>
+        <div class="b_caption">理想汽车 校园招聘 前线产品Builder 岗位职责：负责智能座舱与产品架构设计</div>
+      </div>
+    `
+    const snippets = extractSnippets(html, 5)
+    expect(snippets).toHaveLength(1)
+    expect(snippets[0]).toContain('前线产品Builder')
+    expect(snippets[0]).not.toContain('最新报价')
+  })
+
+  it('invokes agentRuntime to synthesize verified JD when agentRuntime is available', async () => {
+    const webFetch: WebFetch = async () =>
+      `<div class="b_caption">负责AI产品设计与落地，3年经验，统招本科以上学历</div>`
+    const mockAgentRuntime = {
+      runAgentStep: async () => ({
+        isValid: true,
+        jdText: '【岗位职责】\n1. 负责AI产品设计与落地\n\n【任职要求】\n1. 统招本科以上学历'
+      })
+    }
+    const ctx = {
+      ...makeCtx(webFetch),
+      agentRuntime: mockAgentRuntime
+    } as unknown as ToolContext
+    const res = await registry.execute(
+      'web.fetch_jd',
+      { company: '理想汽车', position: 'AI产品经理' },
+      ctx
+    )
+    expect(res.status).toBe('ok')
+    if (res.status !== 'ok') throw new Error('unreachable')
+    const data = res.data as { text: string }
+    expect(data.text).toContain('【岗位职责】')
+    expect(data.text).toContain('【任职要求】')
+  })
 })
+

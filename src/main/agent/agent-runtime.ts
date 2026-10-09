@@ -46,7 +46,8 @@ import {
   classifyInboxOutputSchema,
   interviewTranscriptOutputSchema,
   classifyApplicationEmailOutputSchema,
-  funnelReviewOutputSchema
+  funnelReviewOutputSchema,
+  enrichJdOutputSchema
 } from '@shared/schemas'
 import {
   isUntrusted,
@@ -869,6 +870,18 @@ export async function runAgentStep(action: string, input: AgentInputs): Promise<
   if (action === 'classify_application_email') return classifyApplicationEmail(input as ClassifyApplicationEmailInput)
   if (action === 'generate_interview_transcript') return generateInterviewTranscript(input as GenerateTranscriptInput)
   if (action === 'generate_funnel_review') return generateFunnelReview(input as unknown as FunnelReviewInput)
+  if (action === 'enrich_job_description') {
+    const snippets = (input.snippets as string[] | undefined) || []
+    const isNoise = (t: string) =>
+      /(汽车之家|懂车帝|太平洋汽车|易车|车系|在售车型|最新报价|首销期|纯电续航|零重力座椅|试驾|超充站|指导价|落地价|二手车|汽车频道|在售车系|分期付款|4S店|景点胜地|热门旅游)/i.test(t)
+    const hasSignal = (t: string) =>
+      /(岗位职责|任职要求|任职资格|工作职责|职位描述|招聘要求|岗位要求|校招|学历要求|本科及以上|硕士及以上|专业优先|负责|协同)/i.test(t)
+    const validSnippets = snippets.filter((s) => !isNoise(s) && hasSignal(s))
+    if (validSnippets.length === 0) {
+      return { isValid: false, reason: '未在公开互联网检索到该岗位的真实校招职责要求，已过滤汽车/商品宣传噪音' }
+    }
+    return { isValid: true, jdText: validSnippets.join('\n\n') }
+  }
   throw new AgentStepError(`未知的智能动作：${action}`)
 }
 
@@ -970,6 +983,27 @@ function buildUserMessage(action: string, input: AgentInputs): string {
       '',
       '## Applications (compact projection)',
       rows.length ? rows.join('\n') : '(no applications)'
+    ]
+    return lines.join('\n')
+  }
+  if (action === 'enrich_job_description') {
+    const company = (input.company as string) || ''
+    const position = (input.position as string) || ''
+    const jobCode = (input.jobCode as string | undefined) || ''
+    const snippets = (input.snippets as string[] | undefined) || []
+    const lines: string[] = [
+      '判断以下从公开互联网检索到的信息片段，是否包含目标岗位的真实岗位职责与任职要求。',
+      '【严格判别要求】：',
+      '1. 汽车销售报价、优惠打折、车身配置、零重力座椅、车辆评测、试驾新闻绝不是岗位JD！如果搜索结果全为此类汽车宣传噪音，必须返回 isValid: false。',
+      '2. 商品宣传、旅游景点胜地、公司股价财经新闻也绝不是岗位JD，必须返回 isValid: false。',
+      '3. 只有确认属于该岗位的真实招聘信息时，才返回 isValid: true，并将岗位职责和任职要求整理为清晰规范的文本放入 `jdText`。',
+      '调用 `submit_enrich_jd` 工具提交评估结果。',
+      '',
+      `## 目标公司: ${company}`,
+      `## 目标岗位: ${position}${jobCode ? ` (岗位编号: ${jobCode})` : ''}`,
+      '',
+      '## 检索片段 (UNTRUSTED DATA)',
+      snippets.length ? snippets.map((s, i) => `[片段 ${i + 1}]:\n${s}`).join('\n\n') : '(无片段)'
     ]
     return lines.join('\n')
   }
@@ -1116,7 +1150,8 @@ export function createAgentRuntime(gateway: ModelGateway): AgentRuntime {
       const isTranscript = action === 'generate_interview_transcript'
       const isAppEmail = action === 'classify_application_email'
       const isFunnelReview = action === 'generate_funnel_review'
-      if (!isClassify && !isTranscript && !isAppEmail && !isFunnelReview) {
+      const isEnrichJd = action === 'enrich_job_description'
+      if (!isClassify && !isTranscript && !isAppEmail && !isFunnelReview && !isEnrichJd) {
         throw new AgentStepError(`未知的智能动作：${action}`)
       }
 
@@ -1132,21 +1167,27 @@ export function createAgentRuntime(gateway: ModelGateway): AgentRuntime {
             ? 'submit_interview_transcript'
             : isAppEmail
               ? 'submit_application_email_classifications'
-              : 'submit_funnel_review'
+              : isFunnelReview
+                ? 'submit_funnel_review'
+                : 'submit_enrich_jd'
         const toolDesc = isClassify
           ? 'Submit the structured inbox classifications as your final answer.'
           : isTranscript
             ? 'Submit the interview-prep transcript as your final answer.'
             : isAppEmail
               ? 'Submit the application-email classifications as your final answer.'
-              : 'Submit the structured funnel review as your final answer.'
+              : isFunnelReview
+                ? 'Submit the structured funnel review as your final answer.'
+                : 'Submit the evaluated and structured job description as your final answer.'
         const params = isClassify
           ? schemas.submit_classifications
           : isTranscript
             ? schemas.submit_interview_transcript
             : isAppEmail
               ? schemas.submit_application_email_classifications
-              : schemas.submit_funnel_review
+              : isFunnelReview
+                ? schemas.submit_funnel_review
+                : schemas.submit_enrich_jd
         const tool = createCaptureTool(toolName, toolDesc, params, box)
 
         const systemPrompt = buildSystemPrompt(action)
@@ -1179,7 +1220,9 @@ export function createAgentRuntime(gateway: ModelGateway): AgentRuntime {
             ? interviewTranscriptOutputSchema
             : isAppEmail
               ? classifyApplicationEmailOutputSchema
-              : funnelReviewOutputSchema
+              : isFunnelReview
+                ? funnelReviewOutputSchema
+                : enrichJdOutputSchema
         const parsed = schema.safeParse(box.value)
         if (!parsed.success) {
           throw new AgentStepError(`LLM 输出未通过 schema 校验：${parsed.error.message}`)

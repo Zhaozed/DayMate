@@ -17,6 +17,7 @@ import type {
   ApprovalRequest,
   MemoryItem,
   Application,
+  ApplicationUpdateFields,
   ApplicationEvent,
   ResumeVersion,
   PrepMaterial,
@@ -106,7 +107,7 @@ export interface RoutineStore {
   getApplication(id: string): Application | undefined
   getApplicationByBossSecurityId(securityId: string): Application | undefined
   listApplications(): Application[]
-  updateApplication(id: string, patch: Partial<Application>): Application | undefined
+  updateApplication(id: string, patch: Partial<Application> | ApplicationUpdateFields): Application | undefined
   /** Soft-delete (sets deletedAt); visible in the recycle bin until purged. */
   softDeleteApplication(id: string, deletedAt: string): void
   restoreApplication(id: string): void
